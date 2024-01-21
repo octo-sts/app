@@ -5,6 +5,9 @@ terraform {
     # bucket = "mattmoor-chainguard-terraform-state"
     # prefix = "/octo-sts"
   }
+  required_providers {
+    ko = { source = "ko-build/ko" }
+  }
 }
 
 provider "google" { project = var.project_id }
