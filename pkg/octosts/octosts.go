@@ -142,7 +142,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 	})
 	file, _, _, err := client.Repositories.GetContents(ctx,
 		owner, repo,
-		fmt.Sprintf(".github/chainguard/%s.yaml", identity),
+		fmt.Sprintf(".github/chainguard/%s.sts.yaml", identity),
 		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
 	)
 	if err != nil {
