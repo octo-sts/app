@@ -1,0 +1,44 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read  # clone the repository contents
+      id-token: write # federates with GCP
+
+    steps:
+    - uses: actions/checkout@2541b1294d2704b0964813337f33b291d3f8596b # v3
+
+    - uses: google-github-actions/auth@ceee102ec2387dd9e844e01b530ccd4ec87ce955 # v0
+      id: auth
+      with:
+        token_format: 'access_token'
+        project_id: 'octo-sts'
+        workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+        service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+
+    - uses: 'docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a' # v2
+      with:
+        username: 'oauth2accesstoken'
+        password: '${{ steps.auth.outputs.access_token }}'
+        registry: 'gcr.io'
+
+    # Attempt to deploy the terraform configuration
+    - uses: hashicorp/setup-terraform@a1502cd9e758c50496cc9ac5308c4843bcd56d36 # v2.0.0
+      with:
+        terraform_version: 1.6
+
+    - working-directory: ./iac
+      run: |
+        terraform init
+
+        terraform plan
+
+        terraform apply -auto-approve
