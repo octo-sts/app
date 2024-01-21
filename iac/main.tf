@@ -68,7 +68,7 @@ locals {
   #     --key app-signing-key \
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
-  kms_key = "${google_kms_crypto_key.app-key.id}/cryptoKeyVersions/3"
+  kms_key = "${google_kms_crypto_key.app-key.id}/cryptoKeyVersions/1"
 }
 
 // Create a dedicated GSA for the IAM datastore service.
