@@ -1,0 +1,110 @@
+# Copyright 2022 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Code Style
+
+on:
+  pull_request:
+    branches: [ 'main', 'release-*' ]
+  push:
+    branches: [ 'main', 'release-*' ]
+
+jobs:
+
+  gofmt:
+    name: check gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Go
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+
+      - uses: chainguard-dev/actions/gofmt@main
+        with:
+          args: -s
+
+  goimports:
+    name: check goimports
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Go
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+
+      - uses: chainguard-dev/actions/goimports@main
+
+  golangci-lint:
+    name: golangci-lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Go
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+          cache: true
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@3a919529898de77ec3da873e3063ca4b10e7f5cc # v3.7.0
+        with:
+          # Required: the version of golangci-lint is required and must be specified without patch version: we always use the latest patch version.
+          version: v1.54
+          args: --timeout=5m
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Set up Go
+        uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
+        with:
+          go-version-file: './go.mod'
+          check-latest: true
+
+      - uses: chainguard-dev/actions/trailing-space@main
+        if: ${{ always() }}
+
+      - uses: chainguard-dev/actions/eof-newline@main
+        if: ${{ always() }}
+
+      - uses: reviewdog/action-tflint@master
+        if: ${{ always() }}
+        with:
+          github_token: ${{ secrets.github_token }}
+          fail_on_error: true
+
+      - uses: reviewdog/action-misspell@06d6a480724fa783c220081bbc22336a78dbbe82 # v1.15.0
+        if: ${{ always() }}
+        with:
+          github_token: ${{ secrets.github_token }}
+          fail_on_error: true
+          locale: "US"
+          exclude: |
+            **/go.sum
+            **/third_party/**
+            ./*.yml
+
+      - uses: get-woke/woke-action-reviewdog@d71fd0115146a01c3181439ce714e21a69d75e31 # v0
+        if: ${{ always() }}
+        with:
+          github-token: ${{ secrets.github_token }}
+          reporter: github-pr-check
+          level: error
+          fail-on-error: true
