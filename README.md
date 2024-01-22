@@ -23,8 +23,8 @@ configured.
 
 ### The Trust Policy
 
-Trust policies are checked into `.github/chainguard/{name}.yaml`, and consist of
-a few key parts:
+Trust policies are checked into `.github/chainguard/{name}.sts.yaml`, and
+consist of a few key parts:
 1. The claim matching criteria for federation,
 2. The permissions to grant the identity, and
 3. (for Org-level policies) The list of repositories to grant access.
@@ -66,10 +66,10 @@ definition [here](https://github.com/chainguard-dev/sdk/blob/main/proto/platform
 If a `${TOKEN}` suitable for federation is sent like so:
 ```
 curl -H "Authorization: Bearer ${TOKEN}" \
-  "https://octo-sts-j2wqachcbq-uc.a.run.app/sts/exchange?scope=${REPO}&identity=${NAME}"
+  "https://octo-sts-cp2estmhja-uc.a.run.app/sts/exchange?scope=${REPO}&identity=${NAME}"
 ```
 
 The App will attempt to load the trust policy from
-`.github/chainguard/${NAME}.yaml` from `${REPO}` and if the provided `${TOKEN}`
+`.github/chainguard/${NAME}.sts.yaml` from `${REPO}` and if the provided `${TOKEN}`
 satisfies those rules, it will return a token with the permissions in the trust
 policy.
