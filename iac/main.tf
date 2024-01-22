@@ -2,8 +2,6 @@ terraform {
   backend "gcs" {
     bucket = "octo-sts-terraform-state"
     prefix = "/octo-sts"
-    # bucket = "mattmoor-chainguard-terraform-state"
-    # prefix = "/octo-sts"
   }
   required_providers {
     ko = { source = "ko-build/ko" }
