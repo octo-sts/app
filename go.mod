@@ -1,4 +1,4 @@
-module github.com/mattmoor/octo-sts
+module github.com/chainguard-dev/octo-sts
 
 go 1.21.2
 
@@ -14,6 +14,7 @@ require (
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/go-github/v57 v57.0.0
 	github.com/kelseyhightower/envconfig v1.4.0
+	google.golang.org/api v0.149.0
 	google.golang.org/grpc v1.60.1
 	sigs.k8s.io/yaml v1.4.0
 )
@@ -65,7 +66,6 @@ require (
 	golang.org/x/sync v0.4.0 // indirect
 	golang.org/x/sys v0.16.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
-	google.golang.org/api v0.149.0 // indirect
 	google.golang.org/appengine v1.6.8 // indirect
 	google.golang.org/genproto v0.0.0-20231212172506-995d672761c0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240102182953-50ed04b92917 // indirect
