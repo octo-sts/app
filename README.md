@@ -66,7 +66,7 @@ definition [here](https://github.com/chainguard-dev/sdk/blob/main/proto/platform
 If a `${TOKEN}` suitable for federation is sent like so:
 ```
 curl -H "Authorization: Bearer ${TOKEN}" \
-  "https://octo-sts-cp2estmhja-uc.a.run.app/sts/exchange?scope=${REPO}&identity=${NAME}"
+  "https://octo-sts.dev/sts/exchange?scope=${REPO}&identity=${NAME}"
 ```
 
 The App will attempt to load the trust policy from
