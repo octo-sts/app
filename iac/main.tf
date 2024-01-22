@@ -94,8 +94,8 @@ module "sts-service" {
   name       = var.name
   regions    = module.networking.regional-networks
 
-  // TODO: Put this behind GCLB
-  ingress = "INGRESS_TRAFFIC_ALL"
+  // Only accept traffic coming from GCLB.
+  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
   // This needs to egress in order to talk to Github
   egress = "PRIVATE_RANGES_ONLY"
 
@@ -119,18 +119,4 @@ module "sts-service" {
       ]
     }
   }
-}
-
-// TODO: Remove this when we shift the above to be behind GCLB.
-resource "google_cloud_run_v2_service_iam_member" "public-services-are-unauthenticated" {
-  for_each = module.networking.regional-networks
-
-  // Ensure that the service exists before attempting to expose things publicly.
-  depends_on = [module.sts-service]
-
-  project  = var.project_id
-  location = each.key
-  name     = var.name
-  role     = "roles/run.invoker"
-  member   = "allUsers"
 }
