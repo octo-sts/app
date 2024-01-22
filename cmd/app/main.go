@@ -13,9 +13,9 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/octo-sts/pkg/gcpkms"
+	"github.com/chainguard-dev/octo-sts/pkg/octosts"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/mattmoor/octo-sts/pkg/gcpkms"
-	"github.com/mattmoor/octo-sts/pkg/octosts"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
