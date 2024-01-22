@@ -54,7 +54,7 @@ resource "google_service_account_iam_binding" "allow_github_impersonation" {
   role               = "roles/iam.workloadIdentityUser"
 
   members = [
-    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.sub/repo:mattmoor/octo-sts:ref:refs/heads/main",
+    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.sub/repo:chainguard-dev/octo-sts:ref:refs/heads/main",
   ]
 }
 
