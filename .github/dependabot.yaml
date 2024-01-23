@@ -4,11 +4,24 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    groups:
+      all:
+        update-types:
+          - "minor"
+          - "patch"
   - package-ecosystem: gomod
     directory: "./"
     schedule:
       interval: "daily"
+    groups:
+      all:
+        update-types:
+          - "patch"
   - package-ecosystem: terraform
     directory: "/iac"
     schedule:
       interval: "daily"
+    groups:
+      all:
+        update-types:
+          - "patch"
