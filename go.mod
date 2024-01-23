@@ -6,11 +6,11 @@ require (
 	chainguard.dev/go-grpc-kit v0.17.2
 	chainguard.dev/sdk v0.1.14
 	cloud.google.com/go/kms v1.15.5
-	github.com/bradleyfalzon/ghinstallation/v2 v2.9.0
+	github.com/bradleyfalzon/ghinstallation/v2 v2.9.1-0.20240116154122-7838128b61c6
 	github.com/chainguard-dev/clog v1.2.3-0.20240118163743-fec25b637dd2
 	github.com/coreos/go-oidc/v3 v3.9.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
-	github.com/google/go-github/v57 v57.0.0
+	github.com/google/go-github/v58 v58.0.0
 	github.com/hashicorp/golang-lru v1.0.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	google.golang.org/api v0.157.0
