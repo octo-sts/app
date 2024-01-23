@@ -74,7 +74,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) error {
 	// Check the issuer.
 	if tp.issuerPattern != nil {
 		if !tp.issuerPattern.MatchString(token.Issuer) {
-			return fmt.Errorf("trust policy: issuer %q did not match %q", token.Issuer, tp.IssuerPattern)
+			return fmt.Errorf("trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
 		}
 	} else if tp.Issuer != "" {
 		if token.Issuer != tp.Issuer {
@@ -85,7 +85,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) error {
 	// Check the subject.
 	if tp.subjectPattern != nil {
 		if !tp.subjectPattern.MatchString(token.Subject) {
-			return fmt.Errorf("trust policy: subject %q did not match %q", token.Subject, tp.SubjectPattern)
+			return fmt.Errorf("trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
 		}
 	} else if tp.Subject != "" {
 		if token.Subject != tp.Subject {
