@@ -13,7 +13,7 @@ require (
 	github.com/google/go-github/v57 v57.0.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	google.golang.org/api v0.157.0
-	google.golang.org/grpc v1.60.1
+	google.golang.org/grpc v1.61.0
 	sigs.k8s.io/yaml v1.4.0
 )
 
