@@ -48,3 +48,16 @@ jobs:
         terraform plan
 
         terraform apply -auto-approve
+
+    - uses: rtCamp/action-slack-notify@b24d75fe0e728a4bf9fc42ee217caa686d141ee8 # v2.2.1
+      if: ${{ failure() }}
+      env:
+        SLACK_ICON: http://github.com/chainguard-dev.png?size=48
+        SLACK_USERNAME: guardian
+        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+        SLACK_CHANNEL: '@mattmoor' # Use a channel
+        SLACK_COLOR: '#8E1600'
+        MSG_MINIMAL: 'true'
+        SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
+        SLACK_MESSAGE: |
+          For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
