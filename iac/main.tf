@@ -78,15 +78,6 @@ resource "google_service_account" "octo-sts" {
   description  = "Dedicated service account for the Octo STS service."
 }
 
-// Allow the STS service to call the sign method on the keys in the keyring.
-resource "google_kms_key_ring_iam_binding" "signer-members" {
-  key_ring_id = google_kms_key_ring.app-keyring.id
-  role        = "roles/cloudkms.signer"
-  members = [
-    "serviceAccount:${google_service_account.octo-sts.email}",
-  ]
-}
-
 module "sts-service" {
   source = "chainguard-dev/common/infra//modules/regional-go-service"
 
@@ -119,4 +110,67 @@ module "sts-service" {
       ]
     }
   }
+}
+
+// Allow the STS service to call the sign method on the keys in the keyring.
+resource "google_kms_key_ring_iam_binding" "signer-members" {
+  key_ring_id = google_kms_key_ring.app-keyring.id
+  role        = "roles/cloudkms.signer"
+  members = [
+    "serviceAccount:${google_service_account.octo-sts.email}",
+  ]
+}
+
+data "google_client_openid_userinfo" "me" {}
+
+resource "google_monitoring_alert_policy" "anomalous-kms-access" {
+  # In the absence of data, incident will auto-close in 7 days
+  alert_strategy {
+    auto_close = "604800s"
+
+    notification_rate_limit {
+      period = "86400s" // re-alert once a day if condition still valid.
+    }
+  }
+
+  display_name = "Abnormal KMS Access"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "Unauthorized KMS access"
+
+    condition_matched_log {
+      filter = <<EOT
+      -- KMS operations
+      protoPayload.serviceName="cloudkms.googleapis.com"
+
+      -- Against our Github App's keyring
+      protoPayload.resourceName: "${google_kms_key_ring.app-keyring.id}/"
+
+      -- The application itself should only perform signing operations.
+      -(
+        protoPayload.authenticationInfo.principalEmail="${google_service_account.octo-sts.email}" AND
+        protoPayload.methodName=("AsymmetricSign")
+      )
+
+      -- Github IaC should only reconcile the keyring and keys.
+      -(
+        protoPayload.authenticationInfo.principalEmail="${data.google_client_openid_userinfo.me.email}" AND
+        protoPayload.methodName=("CreateKeyRing" OR "CreateCryptoKey" OR "SetIamPolicy")
+      )
+
+      -- If we were to filter out import events they would look like
+      -- this, but instead I am opting to explicitly have these alert,
+      -- to raise awareness of the rotation, since it means that a human
+      -- has interacted with an App key locally.
+      -- -(
+      --   protoPayload.authenticationInfo.principalEmail="...@chainguard.dev" AND
+      --   protoPayload.methodName=("CreateImportJob" OR "ImportCryptoKeyVersion")
+      -- )
+      EOT
+    }
+  }
+
+  enabled = "true"
+  project = var.project_id
 }
