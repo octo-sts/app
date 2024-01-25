@@ -1,3 +1,8 @@
+/*
+Copyright 2024 Chainguard, Inc.
+SPDX-License-Identifier: Apache-2.0
+*/
+
 package octosts
 
 import (
@@ -10,6 +15,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v57/github"
+	lru "github.com/hashicorp/golang-lru"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -24,6 +30,11 @@ import (
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport) pboidc.SecurityTokenServiceServer {
 	return &sts{atr: atr}
 }
+
+var (
+	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
+	installationIDs, _ = lru.New2Q(20 /* size */)
+)
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
@@ -102,7 +113,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 }
 
 func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
-	// TODO(mattmoor): Cache these lookups.
+	// check the LRU cache for the installation ID
+	if v, ok := installationIDs.Get(owner); ok {
+		return v.(int64), nil
+	}
 
 	client := github.NewClient(&http.Client{
 		Transport: s.atr,
@@ -121,11 +135,15 @@ func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
 
 		for _, install := range installs {
 			if install.Account.GetLogin() == owner {
-				return install.GetID(), nil
+				installID := install.GetID()
+				// store in the LRU cache
+				installationIDs.Add(owner, installID)
+				return installID, nil
 			}
 		}
 		page = resp.NextPage
 	}
+
 	return 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
