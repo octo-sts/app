@@ -11,6 +11,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.9.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/go-github/v57 v57.0.0
+	github.com/hashicorp/golang-lru v1.0.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	google.golang.org/api v0.157.0
 	google.golang.org/grpc v1.61.0
