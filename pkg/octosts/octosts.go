@@ -14,8 +14,9 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v57/github"
+	"github.com/google/go-github/v58/github"
 	lru "github.com/hashicorp/golang-lru"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
