@@ -7,18 +7,18 @@ import (
 	"path"
 	"strings"
 
-	apiauth "chainguard.dev/sdk/auth"
-	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/chainguard-dev/clog"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v57/github"
-
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
-
 	"sigs.k8s.io/yaml"
+
+	apiauth "chainguard.dev/sdk/auth"
+	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
+	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/octo-sts/pkg/provider"
 )
 
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport) pboidc.SecurityTokenServiceServer {
@@ -51,11 +51,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
 	}
-	provider, err := oidc.NewProvider(ctx, issuer)
+
+	// Fetch the provider from the cache or create a new one and add to the cache
+	p, err := provider.Get(ctx, issuer)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "unable to validate token issuer: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
 	}
-	verifier := provider.Verifier(&oidc.Config{
+
+	verifier := p.Verifier(&oidc.Config{
 		// TODO(mattmoor): Add audience checking!
 		SkipClientIDCheck: true,
 	})
