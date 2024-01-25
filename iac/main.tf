@@ -14,11 +14,13 @@ provider "ko" { docker_repo = "gcr.io/${var.project_id}" }
 
 // Create a network with several regional subnets
 module "networking" {
-  source = "chainguard-dev/common/infra//modules/networking"
+  source  = "chainguard-dev/common/infra//modules/networking"
+  version = "0.3.0"
 
-  name       = var.name
-  project_id = var.project_id
-  regions    = var.regions
+  name          = var.name
+  project_id    = var.project_id
+  regions       = var.regions
+  netnum_offset = 1
 }
 
 // Create a keyring to hold our OIDC keys.
@@ -79,7 +81,8 @@ resource "google_service_account" "octo-sts" {
 }
 
 module "sts-service" {
-  source = "chainguard-dev/common/infra//modules/regional-go-service"
+  source  = "chainguard-dev/common/infra//modules/regional-go-service"
+  version = "0.3.0"
 
   project_id = var.project_id
   name       = var.name

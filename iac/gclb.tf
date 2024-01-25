@@ -12,7 +12,8 @@ resource "google_dns_managed_zone" "top-level-zone" {
 
 // Put the above domain in front of our regional services.
 module "serverless-gclb" {
-  source = "github.com/chainguard-dev/terraform-infra-common//modules/serverless-gclb"
+  source  = "chainguard-dev/common/infra//modules/serverless-gclb"
+  version = "0.3.0"
 
   name       = var.name
   project_id = var.project_id
