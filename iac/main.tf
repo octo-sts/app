@@ -156,7 +156,7 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       -- Github IaC should only reconcile the keyring and keys.
       -(
         protoPayload.authenticationInfo.principalEmail="${data.google_client_openid_userinfo.me.email}" AND
-        protoPayload.methodName=("CreateKeyRing" OR "CreateCryptoKey" OR "SetIamPolicy")
+        protoPayload.methodName=("CreateKeyRing" OR "CreateCryptoKey" OR "GetCryptoKey" OR "SetIamPolicy")
       )
 
       -- If we were to filter out import events they would look like
