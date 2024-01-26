@@ -71,8 +71,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	}
 
 	verifier := p.Verifier(&oidc.Config{
-		// TODO(mattmoor): Add audience checking!
-		SkipClientIDCheck: true,
+		ClientID: "octo-sts.dev",
 	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
