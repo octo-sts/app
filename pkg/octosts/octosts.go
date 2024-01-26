@@ -180,7 +180,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 	}
 
 	tp := &TrustPolicy{}
-	if err := yaml.Unmarshal([]byte(raw), tp); err != nil {
+	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
 		// Don't leak the error to the client.
 		return nil, status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", identity)
