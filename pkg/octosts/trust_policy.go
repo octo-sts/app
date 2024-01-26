@@ -22,8 +22,12 @@ type TrustPolicy struct {
 	claimPattern map[string]*regexp.Regexp `json:"-"`
 
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
+}
 
-	// TODO(mattmoor): Support a list of repositories within the org.
+type OrgTrustPolicy struct {
+	TrustPolicy `json:",inline"`
+
+	Repositories []string `json:"repositories,omitempty"`
 }
 
 // Compile checks the trust policy for validity, and prepares internal state

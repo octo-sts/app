@@ -78,14 +78,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
 	}
 
-	// TODO(mattmoor): Make this handle org-level stuff with .github
-	owner, repo := path.Dir(request.Scope), path.Base(request.Scope)
-	id, err := s.lookupInstall(ctx, owner)
-	if err != nil {
-		return nil, err
-	}
-
-	tp, err := s.lookupTrustPolicy(ctx, id, owner, repo, request.Identity)
+	id, tp, err := s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +93,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	// trust policy.
 	atr := ghinstallation.NewFromAppsTransport(s.atr, id)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: []string{repo}, // TODO: Allow this to be the repo
+		Repositories: tp.Repositories,
 		Permissions:  &tp.Permissions,
 	}
 	token, err := atr.Token(ctx)
@@ -110,6 +103,29 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	return &pboidc.RawToken{
 		Token: token,
 	}, nil
+}
+
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
+	otp := &OrgTrustPolicy{}
+	var tp trustPolicy = &otp.TrustPolicy
+
+	owner, repo := path.Dir(scope), path.Base(scope)
+	if owner == "." {
+		owner, repo = repo, ".github"
+		tp = otp
+	} else {
+		otp.Repositories = []string{repo}
+	}
+
+	id, err := s.lookupInstall(ctx, owner)
+	if err != nil {
+		return 0, nil, err
+	}
+
+	if err := s.lookupTrustPolicy(ctx, id, owner, repo, identity, tp); err != nil {
+		return 0, nil, err
+	}
+	return id, otp, nil
 }
 
 func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
@@ -147,7 +163,11 @@ func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
 	return 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo, identity string) (*TrustPolicy, error) {
+type trustPolicy interface {
+	Compile() error
+}
+
+func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo, identity string, tp trustPolicy) error {
 	atr := ghinstallation.NewFromAppsTransport(s.atr, install)
 	// We only need to read from the repository, so create that token to fetch
 	// the trust policy.
@@ -169,28 +189,27 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 	if err != nil {
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 		// Don't leak the error to the client.
-		return nil, status.Errorf(codes.NotFound, "unable to find trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", identity)
 	}
 	raw, err := file.GetContent()
 	if err != nil {
 		clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
 		// Don't leak the error to the client.
-		return nil, status.Errorf(codes.NotFound, "unable to read trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to read trust policy found for %q", identity)
 	}
 
-	tp := &TrustPolicy{}
 	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
 		// Don't leak the error to the client.
-		return nil, status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", identity)
 	}
 
 	if err := tp.Compile(); err != nil {
 		clog.InfoContextf(ctx, "failed to compile trust policy: %v", err)
 		// Don't leak the error to the client.
-		return nil, status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", identity)
 	}
-	return tp, nil
+	return nil
 }
 
 // ExchangeRefreshToken implements pboidc.SecurityTokenServiceServer
