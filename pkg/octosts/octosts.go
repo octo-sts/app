@@ -7,8 +7,10 @@ package octosts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
 	"path"
 	"strings"
 
@@ -86,6 +88,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 
 	// Check the token against the federation rules.
 	if err := tp.CheckToken(tok); err != nil {
+		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
 		return nil, err
 	}
 
@@ -98,6 +101,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	}
 	token, err := atr.Token(ctx)
 	if err != nil {
+		var herr *ghinstallation.HTTPError
+		if errors.As(err, &herr) {
+			body, err := httputil.DumpResponse(herr.Response, true)
+			if err == nil {
+				clog.FromContext(ctx).Warnf("token exchange failure: %s", body)
+			}
+		} else {
+			clog.FromContext(ctx).Warnf("token exchange failure: %v", err)
+		}
 		return nil, status.Errorf(codes.Internal, "failed to get token: %v", err)
 	}
 	return &pboidc.RawToken{
