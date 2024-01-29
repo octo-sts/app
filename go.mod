@@ -7,7 +7,7 @@ require (
 	chainguard.dev/sdk v0.1.14
 	cloud.google.com/go/kms v1.15.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.9.1-0.20240116154122-7838128b61c6
-	github.com/chainguard-dev/clog v1.2.3-0.20240118163743-fec25b637dd2
+	github.com/chainguard-dev/clog v1.3.0
 	github.com/coreos/go-oidc/v3 v3.9.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/go-github/v58 v58.0.0
