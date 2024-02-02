@@ -78,7 +78,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
 	act := Actor{
 		Issuer:  token.Issuer,
 		Subject: token.Subject,
-		Claims:  make([]Claim, len(tp.claimPattern)),
+		Claims:  make([]Claim, 0, len(tp.claimPattern)),
 	}
 	// Check the issuer.
 	if tp.issuerPattern != nil {
