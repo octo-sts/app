@@ -1,11 +1,12 @@
-# Copyright 2022 Chainguard, Inc.
+# Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
 name: Do Not Submit
 
 on:
   pull_request:
-    branches: [ 'main', 'release-*' ]
+    branches:
+      - 'main'
 
 jobs:
 

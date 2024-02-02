@@ -1,10 +1,3 @@
-terraform {
-  backend "gcs" {
-    bucket = "octo-sts-terraform-state"
-    prefix = "/bootstrap"
-  }
-}
-
 provider "google" { project = var.project_id }
 provider "google-beta" { project = var.project_id }
 
