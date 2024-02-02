@@ -193,7 +193,7 @@ func TestCheckToken(t *testing.T) {
 			if err := tt.tp.Compile(); err != nil {
 				t.Fatalf("Compile() = %v", err)
 			}
-			if err := tt.tp.CheckToken(tt.token); (err != nil) != tt.wantErr {
+			if _, err := tt.tp.CheckToken(tt.token); (err != nil) != tt.wantErr {
 				t.Errorf("CheckToken() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
