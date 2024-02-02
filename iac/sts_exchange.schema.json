@@ -1,0 +1,282 @@
+[
+    {
+      "name": "actor",
+      "type": "RECORD",
+      "mode": "NULLABLE",
+      "fields": [
+        {
+          "name": "iss",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "sub",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "claims",
+          "type": "RECORD",
+          "mode": "REPEATED",
+          "fields": [
+            {
+                "name": "name",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "value",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "trust_policy",
+      "type": "RECORD",
+      "mode": "NULLABLE",
+      "fields": [
+        {
+          "name": "issuer",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "issuer_pattern",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "subject",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "subject_pattern",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "claim_pattern",
+          "type": "RECORD",
+          "mode": "NULLABLE",
+          "fields": [
+            {
+                "name": "job_workflow_ref",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            }
+          ]
+        },
+        {
+          "name": "permissions",
+          "type": "RECORD",
+          "mode": "NULLABLE",
+          "fields": [
+            {
+                "name": "actions",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "administration",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "blocking",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "checks",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "contents",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "content_references",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "deployments",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "emails",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "environments",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "followers",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "issues",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "metadata",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "members",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_administration",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_custom_roles",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_hooks",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_packages",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_plan",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_pre_receive_hooks",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_projects",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_secrets",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_self_hosted_runners",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "organization_user_blocking",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "packages",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "pages",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "pull_requests",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "repository_hooks",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "repository_projects",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "repository_pre_receive_hooks",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "secrets",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "secret_scanning_alerts",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "security_events",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "single_file",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "statuses",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "team_discussions",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "vulnerability_alerts",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "workflows",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            }
+          ]
+        }
+      ]
+    },
+    {
+        "name": "installation_id",
+        "type": "NUMERIC",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "scope",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "error",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    }
+]
