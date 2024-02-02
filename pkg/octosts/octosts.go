@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v58/github"
 	lru "github.com/hashicorp/golang-lru"
@@ -30,8 +31,11 @@ import (
 	"github.com/chainguard-dev/octo-sts/pkg/provider"
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport) pboidc.SecurityTokenServiceServer {
-	return &sts{atr: atr}
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client) pboidc.SecurityTokenServiceServer {
+	return &sts{
+		atr:      atr,
+		ceclient: ceclient,
+	}
 }
 
 var (
@@ -42,7 +46,8 @@ var (
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr *ghinstallation.AppsTransport
+	atr      *ghinstallation.AppsTransport
+	ceclient cloudevents.Client
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
@@ -79,6 +84,13 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
 	}
+
+	// TODO(mattmoor): Surface events with:
+	//  - the actor,
+	//  - the trust policy,
+	//  - the installation id,
+	//  - the org/repo, and
+	//  - whether the trust policy was satisfied!
 
 	id, tp, err := s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
