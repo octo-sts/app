@@ -13,6 +13,7 @@ import (
 	"net/http/httputil"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
@@ -29,6 +30,11 @@ import (
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/octo-sts/pkg/provider"
+)
+
+const (
+	retryDelay = 10 * time.Millisecond
+	maxRetry   = 3
 )
 
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client) pboidc.SecurityTokenServiceServer {
@@ -51,8 +57,28 @@ type sts struct {
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
-func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*pboidc.RawToken, error) {
+func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
 	clog.FromContext(ctx).Infof("exchange request: %#v", request)
+	e := Event{
+		Scope: request.Scope,
+	}
+	defer func() {
+		event := cloudevents.NewEvent()
+		event.SetType("dev.octo-sts.exchange")
+		event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
+		event.SetSource("https://octo-sts.dev")
+		if err != nil {
+			e.Error = err.Error()
+		}
+		if err := event.SetData(cloudevents.ApplicationJSON, e); err != nil {
+			clog.FromContext(ctx).Infof("Failed to encode event payload: %v", err)
+			return
+		}
+		rctx := cloudevents.ContextWithRetriesExponentialBackoff(context.WithoutCancel(ctx), retryDelay, maxRetry)
+		if ceresult := s.ceclient.Send(rctx, event); cloudevents.IsUndelivered(ceresult) || cloudevents.IsNACK(ceresult) {
+			clog.FromContext(ctx).Errorf("Failed to deliver event: %v", ceresult)
+		}
+	}()
 
 	// Extract the incoming bearer token.
 	md, ok := metadata.FromIncomingContext(ctx)
@@ -85,31 +111,25 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (*p
 		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
 	}
 
-	// TODO(mattmoor): Surface events with:
-	//  - the actor,
-	//  - the trust policy,
-	//  - the installation id,
-	//  - the org/repo, and
-	//  - whether the trust policy was satisfied!
-
-	id, tp, err := s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
 		return nil, err
 	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", tp)
+	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
 
 	// Check the token against the federation rules.
-	if err := tp.CheckToken(tok); err != nil {
+	e.Actor, err = e.TrustPolicy.CheckToken(tok)
+	if err != nil {
 		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
 		return nil, err
 	}
 
 	// Synthesize a token for the requested scope and permissions based on the
 	// trust policy.
-	atr := ghinstallation.NewFromAppsTransport(s.atr, id)
+	atr := ghinstallation.NewFromAppsTransport(s.atr, e.InstallationID)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: tp.Repositories,
-		Permissions:  &tp.Permissions,
+		Repositories: e.TrustPolicy.Repositories,
+		Permissions:  &e.TrustPolicy.Permissions,
 	}
 	token, err := atr.Token(ctx)
 	if err != nil {

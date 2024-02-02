@@ -74,47 +74,58 @@ func (tp *TrustPolicy) Compile() error {
 }
 
 // CheckToken checks the token against the trust policy.
-func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) error {
+func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
+	act := Actor{
+		Issuer:  token.Issuer,
+		Subject: token.Subject,
+		Claims:  make([]Claim, len(tp.claimPattern)),
+	}
 	// Check the issuer.
 	if tp.issuerPattern != nil {
 		if !tp.issuerPattern.MatchString(token.Issuer) {
-			return fmt.Errorf("trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
+			return act, fmt.Errorf("trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
 		}
 	} else if tp.Issuer != "" {
 		if token.Issuer != tp.Issuer {
-			return fmt.Errorf("trust policy: issuer %q did not match %q", token.Issuer, tp.Issuer)
+			return act, fmt.Errorf("trust policy: issuer %q did not match %q", token.Issuer, tp.Issuer)
 		}
 	}
 
 	// Check the subject.
 	if tp.subjectPattern != nil {
 		if !tp.subjectPattern.MatchString(token.Subject) {
-			return fmt.Errorf("trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
+			return act, fmt.Errorf("trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
 		}
 	} else if tp.Subject != "" {
 		if token.Subject != tp.Subject {
-			return fmt.Errorf("trust policy: subject %q did not match %q", token.Subject, tp.Subject)
+			return act, fmt.Errorf("trust policy: subject %q did not match %q", token.Subject, tp.Subject)
 		}
 	}
 
 	// Check the claims.
-	for k, v := range tp.claimPattern {
+	if len(tp.claimPattern) != 0 {
 		customClaims := make(map[string]interface{})
 		if err := token.Claims(&customClaims); err != nil {
-			return err
+			return act, err
 		}
-		raw, ok := customClaims[k]
-		if !ok {
-			return fmt.Errorf("trust policy: expected claim %q not found in token", k)
-		}
-		val, ok := raw.(string)
-		if !ok {
-			return fmt.Errorf("trust policy: expected claim %q not a string", k)
-		}
-		if !v.MatchString(val) {
-			return fmt.Errorf("trust policy: claim %q did not match %q", k, v)
+		for k, v := range tp.claimPattern {
+			raw, ok := customClaims[k]
+			if !ok {
+				return act, fmt.Errorf("trust policy: expected claim %q not found in token", k)
+			}
+			val, ok := raw.(string)
+			if !ok {
+				return act, fmt.Errorf("trust policy: expected claim %q not a string", k)
+			}
+			act.Claims = append(act.Claims, Claim{
+				Name:  k,
+				Value: val,
+			})
+			if !v.MatchString(val) {
+				return act, fmt.Errorf("trust policy: claim %q did not match %q", k, v)
+			}
 		}
 	}
 
-	return nil
+	return act, nil
 }
