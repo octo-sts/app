@@ -6,6 +6,8 @@ module "cloudevent-broker" {
   name       = "octo-sts-broker"
   project_id = var.project_id
   regions    = module.networking.regional-networks
+
+  // TODO: notification_channels
 }
 
 module "cloudevent-recorder" {
@@ -22,8 +24,9 @@ module "cloudevent-recorder" {
   provisioner = "serviceAccount:${data.google_client_openid_userinfo.me.email}"
 
   types = {
-    "dev.octo-sts.exchange": {
-      schema = file("${path.module}/sts_exchange.schema.json")
+    "dev.octo-sts.exchange" : {
+      schema                = file("${path.module}/sts_exchange.schema.json")
+      notification_channels = local.notification_channels
     }
   }
 }

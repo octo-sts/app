@@ -34,6 +34,11 @@ resource "google_kms_crypto_key" "app-key" {
   skip_initial_version_creation = true
 }
 
+# For slack need to create the notification manually - https://github.com/hashicorp/terraform-provider-google/issues/11346
+data "google_monitoring_notification_channel" "octo-sts-slack" {
+  display_name = "Slack Octo STS Notification"
+}
+
 locals {
   # To import a key, we need to run the following commands:
   # gcloud kms import-jobs create app-import-job \
@@ -59,6 +64,10 @@ locals {
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
   kms_key = "${google_kms_crypto_key.app-key.id}/cryptoKeyVersions/1"
+
+  notification_channels = [
+    data.google_monitoring_notification_channel.octo-sts-slack.name
+  ]
 }
 
 // Create a dedicated GSA for the IAM datastore service.
@@ -122,6 +131,15 @@ module "sts-service" {
   }
 }
 
+module "dashboard" {
+  source       = "chainguard-dev/common/infra//modules/dashboard/service"
+  version      = "0.4.3"
+  service_name = var.name
+  project_id   = var.project_id
+
+  notification_channels = local.notification_channels
+}
+
 // Allow the STS service to call the sign method on the keys in the keyring.
 resource "google_kms_key_ring_iam_binding" "signer-members" {
   key_ring_id = google_kms_key_ring.app-keyring.id
@@ -180,6 +198,8 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       EOT
     }
   }
+
+  notification_channels = local.notification_channels
 
   enabled = "true"
   project = var.project_id
