@@ -1,34 +1,23 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Test
+name: go-build-test
 
 on:
   pull_request:
-    branches: [ 'main', 'release-*' ]
+    branches:
+      - 'main'
   push:
-    branches: [ 'main', 'release-*' ]
+    branches:
+      - 'main'
 
 jobs:
 
-  test:
+  go-build-test:
     runs-on: ubuntu-latest
     steps:
     - name: Check out code onto GOPATH
       uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-
-    # https://github.com/mvdan/github-actions-golang#how-do-i-set-up-caching-between-builds
-    - uses: actions/cache@13aacd865c20de90d75de3b17ebe84f7a17d57d2 # v4.0.0
-      with:
-        # In order:
-        # * Module download cache
-        # * Build cache (Linux)
-        path: |
-          ~/go/pkg/mod
-          ~/.cache/go-build
-        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
-        restore-keys: |
-          ${{ runner.os }}-go-
 
     - name: Set up Go
       uses: actions/setup-go@0c52d547c9bc32b1aa3301fd7a9cb496313a4491 # v5.0.0
@@ -36,6 +25,11 @@ jobs:
         go-version-file: './go.mod'
         check-latest: true
 
-    - run: |
+    - name: build
+      run: |
+        go build -o octo-sts ./cmd/app
+
+    - name: test
+      run: |
         # Exclude running unit tests against third_party repos.
-        go test -race ./...
+        go test -v -race ./...
