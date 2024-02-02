@@ -71,6 +71,11 @@
           ]
         },
         {
+          "name": "repositories",
+          "type": "STRING",
+          "mode": "REPEATED",
+        },
+        {
           "name": "permissions",
           "type": "RECORD",
           "mode": "NULLABLE",
