@@ -19,6 +19,8 @@ module "cloudevent-recorder" {
 
   retention-period = 90
 
+  provisioner = "serviceAccount:${data.google_client_openid_userinfo.me.email}"
+
   types = {
     "dev.octo-sts.exchange": file("${path.module}/sts_exchange.schema.json"),
   }
