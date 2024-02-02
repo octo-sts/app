@@ -1,13 +1,3 @@
-terraform {
-  backend "gcs" {
-    bucket = "octo-sts-terraform-state"
-    prefix = "/octo-sts"
-  }
-  required_providers {
-    ko = { source = "ko-build/ko" }
-  }
-}
-
 provider "google" { project = var.project_id }
 provider "google-beta" { project = var.project_id }
 provider "ko" { docker_repo = "gcr.io/${var.project_id}" }

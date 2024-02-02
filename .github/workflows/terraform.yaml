@@ -10,15 +10,23 @@ on:
   pull_request:
 
 jobs:
-  lint-and-validate:
-    name: "Terraform fmt and validate"
+  terraform-lint-validate:
     runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        terraform-dir:
+          - ./iac/bootstrap
+          - ./iac
+
     steps:
       - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
       - uses: hashicorp/setup-terraform@a1502cd9e758c50496cc9ac5308c4843bcd56d36 # v3.0.0
 
       - run: terraform fmt -check
 
-      - run: |
+      - run: cp $GITHUB_WORKSPACE/.github/testdata/backend_override.tf $GITHUB_WORKSPACE/${{ matrix.terraform-dir }}
+      - working-directory: ${{ matrix.terraform-dir }}
+        run: |
           terraform init
           terraform validate
