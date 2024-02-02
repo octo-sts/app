@@ -1,8 +1,12 @@
+# Copyright 2024 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 name: Deploy to Cloud Run
 
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - "main"
   workflow_dispatch:
 
 concurrency: deploy
