@@ -80,6 +80,19 @@ resource "google_service_account" "octo-sts" {
   description  = "Dedicated service account for the Octo STS service."
 }
 
+// Authorize the "octo-sts" service account to publish events.
+module "sts-emits-events" {
+  for_each = module.networking.regional-networks
+
+  source = "chainguard-dev/common/infra//modules/authorize-private-service"
+
+  project_id = var.project_id
+  region     = each.key
+  name       = module.cloudevent-broker.ingress.name
+
+  service-account = google_service_account.octo-sts.email
+}
+
 module "sts-service" {
   source  = "chainguard-dev/common/infra//modules/regional-go-service"
   version = "0.4.3"
@@ -111,6 +124,10 @@ module "sts-service" {
           value = local.kms_key
         }
       ]
+      regional-env = [{
+        name  = "EVENT_INGRESS_URI"
+        value = { for k, v in module.sts-emits-events : k => v.uri }
+      }]
     }
   }
 }
