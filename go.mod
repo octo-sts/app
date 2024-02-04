@@ -15,6 +15,7 @@ require (
 	github.com/google/go-github/v58 v58.0.0
 	github.com/hashicorp/golang-lru v1.0.2
 	github.com/kelseyhightower/envconfig v1.4.0
+	golang.org/x/oauth2 v0.16.0
 	google.golang.org/api v0.161.0
 	google.golang.org/grpc v1.61.0
 	knative.dev/pkg v0.0.0-20231101193506-b09d4f2a2845
@@ -67,7 +68,6 @@ require (
 	go.uber.org/zap v1.26.0 // indirect
 	golang.org/x/crypto v0.18.0 // indirect
 	golang.org/x/net v0.20.0 // indirect
-	golang.org/x/oauth2 v0.16.0 // indirect
 	golang.org/x/sync v0.6.0 // indirect
 	golang.org/x/sys v0.16.0 // indirect
 	golang.org/x/text v0.14.0 // indirect
