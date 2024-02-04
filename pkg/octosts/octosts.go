@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"path"
@@ -133,9 +134,19 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if err != nil {
 		var herr *ghinstallation.HTTPError
 		if errors.As(err, &herr) {
-			body, err := httputil.DumpResponse(herr.Response, true)
-			if err == nil {
-				clog.FromContext(ctx).Warnf("token exchange failure: %s", body)
+			// Github returns a 422 response when something is off, and the
+			// transport surfaces a not useful error message, but Github
+			// actually has a pretty reasonable error message in the response
+			// body typically, so extract that.
+			if herr.Response.StatusCode == http.StatusUnprocessableEntity {
+				if body, err := io.ReadAll(herr.Response.Body); err == nil {
+					return nil, status.Errorf(codes.PermissionDenied, "token exchange failure: %s", body)
+				}
+			} else {
+				body, err := httputil.DumpResponse(herr.Response, true)
+				if err == nil {
+					clog.FromContext(ctx).Warnf("token exchange failure: %s", body)
+				}
 			}
 		} else {
 			clog.FromContext(ctx).Warnf("token exchange failure: %v", err)
