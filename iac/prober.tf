@@ -21,7 +21,3 @@ module "prober" {
   // TODO(mattmoor): Wire up notifications once this is stable.
   // notification_channels = local.notification_channels
 }
-
-output "prober-sub" {
-  value = google_service_account.octo-sts.unique_id
-}
