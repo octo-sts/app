@@ -10,6 +10,8 @@ import (
 	"fmt"
 
 	"chainguard.dev/sdk/sts"
+	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/octo-sts/pkg/octosts"
 	"github.com/google/go-github/v58/github"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
@@ -37,6 +39,11 @@ func Func(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("exchange failed: %w", err)
 	}
+	defer func() {
+		if err := octosts.Revoke(ctx, res); err != nil {
+			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
+		}
+	}()
 
 	ghc := github.NewClient(
 		oauth2.NewClient(ctx,
