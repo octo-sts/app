@@ -67,7 +67,7 @@
                 "name": "job_workflow_ref",
                 "type": "STRING",
                 "mode": "NULLABLE"
-            }
+            },
             {
                 "name": "email",
                 "type": "STRING",
