@@ -230,6 +230,18 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 			Contents: ptr("read"),
 		},
 	}
+	// Once we have looked up the trust policy we should revoke the token.
+	defer func() {
+		tok, err := atr.Token(ctx)
+		if err != nil {
+			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
+			return
+		}
+		if err := Revoke(ctx, tok); err != nil {
+			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
+			return
+		}
+	}()
 
 	client := github.NewClient(&http.Client{
 		Transport: atr,
