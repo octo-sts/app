@@ -5,7 +5,7 @@ resource "google_service_account" "prober" {
 
 module "prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.4.4"
+  version = "0.4.7"
 
   name       = "octo-sts-prober"
   project_id = var.project_id
