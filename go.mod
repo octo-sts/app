@@ -16,7 +16,7 @@ require (
 	github.com/hashicorp/golang-lru v1.0.2
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.17.0
-	google.golang.org/api v0.162.0
+	google.golang.org/api v0.163.0
 	google.golang.org/grpc v1.61.0
 	knative.dev/pkg v0.0.0-20231101193506-b09d4f2a2845
 	sigs.k8s.io/yaml v1.4.0
