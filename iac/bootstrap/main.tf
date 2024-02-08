@@ -33,10 +33,6 @@ resource "google_iam_workload_identity_pool_provider" "github_provider" {
   }
 }
 
-output "provider" {
-  value = google_iam_workload_identity_pool_provider.github_provider.name
-}
-
 resource "google_service_account" "github_identity" {
   project    = var.project_id
   account_id = "github-identity"
@@ -55,4 +51,24 @@ resource "google_project_iam_member" "github_owner" {
   project = var.project_id
   role    = "roles/owner"
   member  = "serviceAccount:${google_service_account.github_identity.email}"
+}
+
+resource "google_service_account" "github_pull_requests" {
+  project    = var.project_id
+  account_id = "github-pull-requests"
+}
+
+resource "google_service_account_iam_binding" "allow_github_pull_requests_impersonation" {
+  service_account_id = google_service_account.github_pull_requests.name
+  role               = "roles/iam.workloadIdentityUser"
+
+  members = [
+    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.sub/repo:chainguard-dev/octo-sts:pull_request",
+  ]
+}
+
+resource "google_project_iam_member" "github_viewer" {
+  project = var.project_id
+  role    = "roles/viewer"
+  member  = "serviceAccount:${google_service_account.github_pull_requests.email}"
 }
