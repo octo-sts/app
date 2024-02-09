@@ -7,20 +7,22 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/coreos/go-oidc/v3/oidc"
-	lru "github.com/hashicorp/golang-lru"
+	lru "github.com/hashicorp/golang-lru/v2"
 )
 
 var (
 	// providers is an LRU cache of recently used providers.
-	providers, _ = lru.New2Q(100 /* size */)
+	providers, _ = lru.New2Q[string, *oidc.Provider](100)
 )
 
 func Get(ctx context.Context, issuer string) (provider *oidc.Provider, err error) {
 	// Return any verifiers that we have already constructed
 	// to avoid paying for discovery again.
 	if v, ok := providers.Get(issuer); ok {
-		return v.(*oidc.Provider), nil
+		clog.InfoContext(ctx, "found provider in cache")
+		return v, nil
 	}
 
 	// Verify the token before we trust anything about it.
