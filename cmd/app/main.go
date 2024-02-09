@@ -12,13 +12,8 @@ import (
 	"os/signal"
 	"strings"
 
-	"chainguard.dev/go-grpc-kit/pkg/duplex"
-	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/octo-sts/pkg/gcpkms"
-	"github.com/chainguard-dev/octo-sts/pkg/octosts"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
 	"github.com/kelseyhightower/envconfig"
@@ -26,6 +21,12 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"knative.dev/pkg/logging"
+
+	"chainguard.dev/go-grpc-kit/pkg/duplex"
+	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
+	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/octo-sts/pkg/gcpkms"
+	"github.com/chainguard-dev/octo-sts/pkg/octosts"
 )
 
 type envConfig struct {

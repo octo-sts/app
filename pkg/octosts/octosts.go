@@ -19,6 +19,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v58/github"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"golang.org/x/time/rate"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -28,6 +29,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	cghttp "github.com/chainguard-dev/octo-sts/pkg/http"
 	"github.com/chainguard-dev/octo-sts/pkg/provider"
 )
 
@@ -188,8 +190,12 @@ func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
 		return v, nil
 	}
 
+	// Create a rate limiter and wrap the transport
+	// 1 request every 5 seconds
+	limiter := rate.NewLimiter(rate.Every(5*time.Second), 1)
+	transport := cghttp.NewRateLimitingRoundTripper(limiter, s.atr)
 	client := github.NewClient(&http.Client{
-		Transport: s.atr,
+		Transport: transport,
 	})
 	// Walk through the pages of installations looking for an organization
 	// matching owner.
@@ -244,8 +250,12 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 		}
 	}()
 
+	// Create a rate limiter and wrap the transport
+	// 1 request every 5 seconds
+	limiter := rate.NewLimiter(rate.Every(5*time.Second), 1)
+	transport := cghttp.NewRateLimitingRoundTripper(limiter, s.atr)
 	client := github.NewClient(&http.Client{
-		Transport: atr,
+		Transport: transport,
 	})
 	file, _, _, err := client.Repositories.GetContents(ctx,
 		owner, repo,
