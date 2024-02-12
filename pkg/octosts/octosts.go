@@ -19,7 +19,6 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v58/github"
 	lru "github.com/hashicorp/golang-lru/v2"
-	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -47,7 +46,6 @@ func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient c
 var (
 	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
 	installationIDs, _ = lru.New2Q[string, int64](200)
-	trustPolicies      = expirablelru.NewLRU[string, trustPolicy](200, nil, time.Minute*5)
 )
 
 type sts struct {
@@ -224,14 +222,6 @@ type trustPolicy interface {
 }
 
 func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo, identity string, tp trustPolicy) error {
-	// create the key name for cache
-	cacheKey := fmt.Sprintf("%s-%s-%s", owner, repo, identity)
-	// check the LRU cache for the TrustPolicy
-	if _, ok := trustPolicies.Get(cacheKey); ok {
-		clog.InfoContextf(ctx, "found trust policy in cache for %s", cacheKey)
-		return nil
-	}
-
 	atr := ghinstallation.NewFromAppsTransport(s.atr, install)
 	// We only need to read from the repository, so create that token to fetch
 	// the trust policy.
@@ -285,8 +275,6 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo,
 		// Don't leak the error to the client.
 		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", identity)
 	}
-
-	_ = trustPolicies.Add(cacheKey, tp)
 
 	return nil
 }
