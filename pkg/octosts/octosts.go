@@ -19,6 +19,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v58/github"
 	lru "github.com/hashicorp/golang-lru/v2"
+	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -46,6 +47,7 @@ func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient c
 var (
 	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
 	installationIDs, _ = lru.New2Q[string, int64](200)
+	trustPolicies      = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 )
 
 type sts struct {
@@ -53,6 +55,12 @@ type sts struct {
 
 	atr      *ghinstallation.AppsTransport
 	ceclient cloudevents.Client
+}
+
+type cacheTrustPolicyKey struct {
+	owner    string
+	repo     string
+	identity string
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
@@ -175,7 +183,13 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		return 0, nil, err
 	}
 
-	if err := s.lookupTrustPolicy(ctx, id, owner, repo, identity, tp); err != nil {
+	trustPolicyKey := cacheTrustPolicyKey{
+		owner:    owner,
+		repo:     repo,
+		identity: identity,
+	}
+
+	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp); err != nil {
 		return 0, nil, err
 	}
 	return id, otp, nil
@@ -221,59 +235,75 @@ type trustPolicy interface {
 	Compile() error
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, owner, repo, identity string, tp trustPolicy) error {
-	atr := ghinstallation.NewFromAppsTransport(s.atr, install)
-	// We only need to read from the repository, so create that token to fetch
-	// the trust policy.
-	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: []string{repo},
-		Permissions: &github.InstallationPermissions{
-			Contents: ptr("read"),
-		},
+func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+	raw := ""
+	// check the LRU cache for the TrustPolicy
+	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
+		clog.InfoContextf(ctx, "found trust policy in cache for %s", trustPolicyKey)
+		raw = cachedRawPolicy
 	}
-	// Once we have looked up the trust policy we should revoke the token.
-	defer func() {
-		tok, err := atr.Token(ctx)
-		if err != nil {
-			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
-			return
-		}
-		if err := Revoke(ctx, tok); err != nil {
-			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
-			return
-		}
-	}()
 
-	client := github.NewClient(&http.Client{
-		Transport: atr,
-	})
-	file, _, _, err := client.Repositories.GetContents(ctx,
-		owner, repo,
-		fmt.Sprintf(".github/chainguard/%s.sts.yaml", identity),
-		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
-	)
-	if err != nil {
-		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
-		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", identity)
-	}
-	raw, err := file.GetContent()
-	if err != nil {
-		clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
-		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to read trust policy found for %q", identity)
+	// if is not cached will get the trustpolicy from the api
+	if raw == "" {
+		atr := ghinstallation.NewFromAppsTransport(s.atr, install)
+		// We only need to read from the repository, so create that token to fetch
+		// the trust policy.
+		atr.InstallationTokenOptions = &github.InstallationTokenOptions{
+			Repositories: []string{trustPolicyKey.repo},
+			Permissions: &github.InstallationPermissions{
+				Contents: ptr("read"),
+			},
+		}
+		// Once we have looked up the trust policy we should revoke the token.
+		defer func() {
+			tok, err := atr.Token(ctx)
+			if err != nil {
+				clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
+				return
+			}
+			if err := Revoke(ctx, tok); err != nil {
+				clog.WarnContextf(ctx, "failed to revoke token: %v", err)
+				return
+			}
+		}()
+
+		client := github.NewClient(&http.Client{
+			Transport: atr,
+		})
+
+		file, _, _, err := client.Repositories.GetContents(ctx,
+			trustPolicyKey.owner, trustPolicyKey.repo,
+			fmt.Sprintf(".github/chainguard/%s.sts.yaml", trustPolicyKey.identity),
+			&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
+		)
+		if err != nil {
+			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
+			// Don't leak the error to the client.
+			return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", trustPolicyKey.identity)
+		}
+
+		raw, err = file.GetContent()
+		if err != nil {
+			clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
+			// Don't leak the error to the client.
+			return status.Errorf(codes.NotFound, "unable to read trust policy found for %q", trustPolicyKey.identity)
+		}
+
+		if evicted := trustPolicies.Add(trustPolicyKey, raw); evicted {
+			clog.InfoContextf(ctx, "evicted cachekey %s", trustPolicyKey)
+		}
 	}
 
 	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
 		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", trustPolicyKey.identity)
 	}
 
 	if err := tp.Compile(); err != nil {
 		clog.InfoContextf(ctx, "failed to compile trust policy: %v", err)
 		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", identity)
+		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", trustPolicyKey.identity)
 	}
 
 	return nil
