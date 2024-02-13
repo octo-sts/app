@@ -154,13 +154,9 @@ resource "google_kms_key_ring_iam_binding" "signer-members" {
 data "google_client_openid_userinfo" "me" {}
 
 resource "google_monitoring_alert_policy" "anomalous-kms-access" {
-  # In the absence of data, incident will auto-close in 7 days
+  # In the absence of data, incident will auto-close after an hour
   alert_strategy {
-    auto_close = "604800s"
-
-    notification_rate_limit {
-      period = "86400s" // re-alert once a day if condition still valid.
-    }
+    auto_close = "3600s"
   }
 
   display_name = "Abnormal KMS Access"
