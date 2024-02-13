@@ -91,7 +91,7 @@ func Func(ctx context.Context) error {
 		"does-not-matter",
 		sts.WithScope("chainguard-dev/octo-sts-prober"),
 		sts.WithIdentity("does-not-exist"),
-	).Exchange(ctx, token.AccessToken); err != nil {
+	).Exchange(ctx, token.AccessToken); err == nil {
 		return fmt.Errorf("expected to fail to exchange with a non-existent identity: %w", err)
 	}
 
