@@ -17,7 +17,6 @@ module "prober" {
   importpath  = "./cmd/prober"
   working_dir = "${path.module}/../"
 
-  enable_alert = true
-  // TODO(mattmoor): Wire up notifications once this is stable.
-  // notification_channels = local.notification_channels
+  enable_alert          = true
+  notification_channels = local.notification_channels
 }
