@@ -85,5 +85,15 @@ func Func(ctx context.Context) error {
 
 	// TODO(mattmoor): List pull requests
 
+	// Attempt to exchange with a non-existent identity, which should fail.
+	if _, err := sts.New(
+		"https://octo-sts.dev",
+		"does-not-matter",
+		sts.WithScope("chainguard-dev/octo-sts-prober"),
+		sts.WithIdentity("does-not-exist"),
+	).Exchange(ctx, token.AccessToken); err != nil {
+		return fmt.Errorf("expected to fail to exchange with a non-existent identity: %w", err)
+	}
+
 	return nil
 }
