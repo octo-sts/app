@@ -67,9 +67,33 @@ func Func(ctx context.Context) error {
 		return fmt.Errorf("failed to read file contents: %w", err)
 	}
 
-	// TODO(mattmoor): List issues
+	// Check the `issues: read` permission by listing issues.
+	if _, _, err := ghc.Issues.ListByRepo(ctx,
+		"chainguard-dev", "octo-sts-prober",
+		&github.IssueListByRepoOptions{}); err != nil {
+		return fmt.Errorf("failed to list issues: %w", err)
+	}
+	// Attempt to create an issue, which should fail because we don't have the `issues: write` permission.
+	if _, _, err := ghc.Issues.Create(ctx,
+		"chainguard-dev", "octo-sts-prober",
+		&github.IssueRequest{
+			Title: github.String("octo-sts prober was able to create an issue"),
+			Body:  github.String("This should fail!"),
+		}); err == nil {
+		return fmt.Errorf("expected to fail creating an issue")
+	}
 
 	// TODO(mattmoor): List pull requests
+
+	// Attempt to exchange with a non-existent identity, which should fail.
+	if _, err := sts.New(
+		"https://octo-sts.dev",
+		"does-not-matter",
+		sts.WithScope("chainguard-dev/octo-sts-prober"),
+		sts.WithIdentity("does-not-exist"),
+	).Exchange(ctx, token.AccessToken); err == nil {
+		return fmt.Errorf("expected to fail to exchange with a non-existent identity: %w", err)
+	}
 
 	return nil
 }
