@@ -157,6 +157,10 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
   # In the absence of data, incident will auto-close after an hour
   alert_strategy {
     auto_close = "3600s"
+
+    notification_rate_limit {
+      period = "3600s" // re-alert hourly if condition still valid.
+    }
   }
 
   display_name = "Abnormal KMS Access"
