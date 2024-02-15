@@ -25,6 +25,8 @@ type TrustPolicy struct {
 	claimPattern map[string]*regexp.Regexp `json:"-"`
 
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
+
+	isCompiled bool `json:"-"`
 }
 
 type OrgTrustPolicy struct {
@@ -36,6 +38,10 @@ type OrgTrustPolicy struct {
 // Compile checks the trust policy for validity, and prepares internal state
 // for validating tokens.
 func (tp *TrustPolicy) Compile() error {
+	if tp.isCompiled {
+		return errors.New("trust policy: already compiled")
+	}
+
 	// Check that we got exactly oneof Issuer[Pattern]
 	switch {
 	case tp.Issuer != "" && tp.IssuerPattern != "":
@@ -73,6 +79,9 @@ func (tp *TrustPolicy) Compile() error {
 		}
 		tp.claimPattern[k] = r
 	}
+
+	// Mark the trust policy as compiled.
+	tp.isCompiled = true
 	return nil
 }
 
@@ -83,26 +92,42 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
 		Subject: token.Subject,
 		Claims:  make([]Claim, 0, len(tp.claimPattern)),
 	}
+	if !tp.isCompiled {
+		return act, errors.New("trust policy: not compiled")
+	}
+
 	// Check the issuer.
-	if tp.issuerPattern != nil {
+	switch {
+	case tp.issuerPattern != nil:
 		if !tp.issuerPattern.MatchString(token.Issuer) {
 			return act, fmt.Errorf("trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
 		}
-	} else if tp.Issuer != "" {
+
+	case tp.Issuer != "":
 		if token.Issuer != tp.Issuer {
 			return act, fmt.Errorf("trust policy: issuer %q did not match %q", token.Issuer, tp.Issuer)
 		}
+
+	default:
+		// Shouldn't be possible for compiled policies (defense in depth).
+		return act, fmt.Errorf("trust policy: no issuer or issuer_pattern set")
 	}
 
 	// Check the subject.
-	if tp.subjectPattern != nil {
+	switch {
+	case tp.subjectPattern != nil:
 		if !tp.subjectPattern.MatchString(token.Subject) {
 			return act, fmt.Errorf("trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
 		}
-	} else if tp.Subject != "" {
+
+	case tp.Subject != "":
 		if token.Subject != tp.Subject {
 			return act, fmt.Errorf("trust policy: subject %q did not match %q", token.Subject, tp.Subject)
 		}
+
+	default:
+		// Shouldn't be possible for compiled policies (defense in depth).
+		return act, fmt.Errorf("trust policy: no subject or subject_pattern set")
 	}
 
 	// Check the claims.
