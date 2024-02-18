@@ -49,7 +49,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Issuer == "" && tp.IssuerPattern == "":
 		return errors.New("trust policy: one of issuer or issuer_pattern must be set, got neither")
 	case tp.IssuerPattern != "":
-		r, err := regexp.Compile(tp.IssuerPattern)
+		r, err := regexp.Compile("^" + tp.IssuerPattern + "$")
 		if err != nil {
 			return err
 		}
@@ -63,7 +63,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Subject == "" && tp.SubjectPattern == "":
 		return errors.New("trust policy: one of subject or subject_pattern must be set, got neither")
 	case tp.SubjectPattern != "":
-		r, err := regexp.Compile(tp.SubjectPattern)
+		r, err := regexp.Compile("^" + tp.SubjectPattern + "$")
 		if err != nil {
 			return err
 		}
@@ -73,7 +73,7 @@ func (tp *TrustPolicy) Compile() error {
 	// Compile the claim patterns.
 	tp.claimPattern = make(map[string]*regexp.Regexp, len(tp.ClaimPattern))
 	for k, v := range tp.ClaimPattern {
-		r, err := regexp.Compile(v)
+		r, err := regexp.Compile("^" + v + "$")
 		if err != nil {
 			return fmt.Errorf("error compiling claim_pattern[%q]: %w", k, err)
 		}

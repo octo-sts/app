@@ -181,6 +181,28 @@ func TestCheckToken(t *testing.T) {
 			// No email claim.
 		},
 		wantErr: true,
+	}, {
+		name: "reject prefix (with ^$)",
+		tp: &TrustPolicy{
+			Issuer:         "https://accounts.google.com",
+			SubjectPattern: "^(123|456)$",
+		},
+		token: &oidc.IDToken{
+			Issuer:  "https://accounts.google.com",
+			Subject: "123999",
+		},
+		wantErr: true,
+	}, {
+		name: "reject prefix (without ^$)",
+		tp: &TrustPolicy{
+			Issuer:         "https://accounts.google.com",
+			SubjectPattern: "(123|456)",
+		},
+		token: &oidc.IDToken{
+			Issuer:  "https://accounts.google.com",
+			Subject: "123999",
+		},
+		wantErr: true,
 	}}
 
 	// TODO(mattmoor): Figure out how to test custom claims with IDToken.
