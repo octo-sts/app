@@ -69,6 +69,11 @@
                 "mode": "NULLABLE"
             },
             {
+                "name": "workflow_ref",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
                 "name": "email",
                 "type": "STRING",
                 "mode": "NULLABLE"
