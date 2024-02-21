@@ -139,7 +139,10 @@ module "dashboard" {
   service_name = var.name
   project_id   = var.project_id
 
-  alerts = { "STS Probe" : module.prober.alert_id }
+  alerts = {
+    "STS Probe" : module.prober.alert_id,
+    "STS Negative Probe" : module.negative_prober.alert_id
+  }
 
   notification_channels = local.notification_channels
 }
