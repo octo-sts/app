@@ -5,7 +5,7 @@ provider "ko" { docker_repo = "gcr.io/${var.project_id}" }
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "0.4.20"
+  version = "0.5.1"
 
   name          = var.name
   project_id    = var.project_id
@@ -94,7 +94,7 @@ module "sts-emits-events" {
 
 module "sts-service" {
   source  = "chainguard-dev/common/infra//modules/regional-go-service"
-  version = "0.4.20"
+  version = "0.5.1"
 
   project_id = var.project_id
   name       = var.name
@@ -129,11 +129,13 @@ module "sts-service" {
       }]
     }
   }
+
+  notification_channels = local.notification_channels
 }
 
 module "dashboard" {
   source       = "chainguard-dev/common/infra//modules/dashboard/service"
-  version      = "0.4.20"
+  version      = "0.5.1"
   service_name = var.name
   project_id   = var.project_id
 
