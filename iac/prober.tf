@@ -28,7 +28,7 @@ resource "google_service_account" "negative_prober" {
 
 module "negative_prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.4.12"
+  version = "0.5.1"
 
   name       = "octo-sts-negative-prober"
   project_id = var.project_id
@@ -40,7 +40,6 @@ module "negative_prober" {
   importpath  = "./cmd/negative-prober"
   working_dir = "${path.module}/../"
 
-  enable_alert = true
-  // TODO(mattmoor): Wire up notifications once this is stable.
-  // notification_channels = local.notification_channels
+  enable_alert          = true
+  notification_channels = local.notification_channels
 }
