@@ -17,7 +17,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.17.0
 	google.golang.org/api v0.166.0
-	google.golang.org/grpc v1.61.1
+	google.golang.org/grpc v1.62.0
 	knative.dev/pkg v0.0.0-20231101193506-b09d4f2a2845
 	sigs.k8s.io/yaml v1.4.0
 )
