@@ -12,3 +12,7 @@ variable "regions" {
   type        = list(string)
   default     = []
 }
+
+variable "github_app_id" {
+  description = "The Github App ID for the Octo STS service."
+}

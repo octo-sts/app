@@ -116,7 +116,7 @@ module "sts-service" {
       env = [
         {
           name  = "GITHUB_APP_ID"
-          value = "801323" // https://github.com/settings/apps/octosts
+          value = var.github_app_id
         },
         {
           name  = "KMS_KEY"
