@@ -29,9 +29,16 @@ variable "domain" {
   type        = string
 }
 
-variable "image" {
+variable "images" {
   description = "The Octo STS application image."
-  default     = "chainguard/octo-sts:latest"
+  type = object({
+    app     = optional(string, "chainguard/octo-sts:latest")
+    webhook = optional(string, "chainguard/octo-sts-webhook:latest")
+  })
+  default = {
+    app     = "chainguard/octo-sts:latest"
+    webhook = "chainguard/octo-sts-webhook:latest"
+  }
 }
 
 variable "github_app_id" {
