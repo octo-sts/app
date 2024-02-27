@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/kms v1.15.7
 	github.com/bradleyfalzon/ghinstallation/v2 v2.9.1-0.20240116154122-7838128b61c6
 	github.com/chainguard-dev/clog v1.3.1
-	github.com/chainguard-dev/terraform-infra-common v0.5.3
+	github.com/chainguard-dev/terraform-infra-common v0.5.4
 	github.com/cloudevents/sdk-go/v2 v2.15.1
 	github.com/coreos/go-oidc/v3 v3.9.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
@@ -16,7 +16,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.17.0
-	google.golang.org/api v0.166.0
+	google.golang.org/api v0.167.0
 	google.golang.org/grpc v1.62.0
 	knative.dev/pkg v0.0.0-20231101193506-b09d4f2a2845
 	sigs.k8s.io/yaml v1.4.0
@@ -56,13 +56,13 @@ require (
 	github.com/prometheus/procfs v0.12.0 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.48.0 // indirect
-	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.48.0 // indirect
-	go.opentelemetry.io/otel v1.23.1 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.23.1 // indirect
+	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.49.0 // indirect
+	go.opentelemetry.io/otel v1.24.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.24.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.19.0 // indirect
-	go.opentelemetry.io/otel/metric v1.23.1 // indirect
-	go.opentelemetry.io/otel/sdk v1.23.1 // indirect
-	go.opentelemetry.io/otel/trace v1.23.1 // indirect
+	go.opentelemetry.io/otel/metric v1.24.0 // indirect
+	go.opentelemetry.io/otel/sdk v1.24.0 // indirect
+	go.opentelemetry.io/otel/trace v1.24.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.26.0 // indirect
