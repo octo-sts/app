@@ -8,6 +8,7 @@ type Event struct {
 	TrustPolicy    *OrgTrustPolicy `json:"trust_policy"`
 	InstallationID int64           `json:"installation_id"`
 	Scope          string          `json:"scope"`
+	Identity       string          `json:"identity"`
 	Error          string          `json:"error,omitempty"`
 }
 
