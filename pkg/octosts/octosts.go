@@ -67,7 +67,8 @@ type cacheTrustPolicyKey struct {
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
 	clog.FromContext(ctx).Infof("exchange request: %#v", request)
 	e := Event{
-		Scope: request.Scope,
+		Scope:    request.Scope,
+		Identity: request.Identity,
 	}
 	defer func() {
 		event := cloudevents.NewEvent()
@@ -116,6 +117,12 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
+	}
+	// This is typically overwritten below, but we populate this here to enrich
+	// certain error paths with the issuer and subject.
+	e.Actor = Actor{
+		Issuer:  tok.Issuer,
+		Subject: tok.Subject,
 	}
 
 	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)

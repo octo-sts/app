@@ -290,6 +290,11 @@
         "mode": "NULLABLE"
     },
     {
+        "name": "identity",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
         "name": "error",
         "type": "STRING",
         "mode": "NULLABLE"
