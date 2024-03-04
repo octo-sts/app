@@ -197,7 +197,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 	}
 
 	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp); err != nil {
-		return 0, nil, err
+		return id, nil, err
 	}
 	return id, otp, nil
 }
