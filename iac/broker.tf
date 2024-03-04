@@ -41,11 +41,29 @@ resource "google_bigquery_table" "errors-by-installations" {
     query = <<EOT
     SELECT installation_id,
        (CASE WHEN STRPOS(scope, '/') > 0 THEN LEFT(scope, STRPOS(scope, '/')-1) ELSE scope END) as org,
-       AVG(CASE WHEN LENGTH(error) > 0 THEN 1 ELSE 0 END) * 100 as error_rate,
        TIMESTAMP_TRUNC(_PARTITIONTIME, DAY) as day,
+       AVG(CASE WHEN LENGTH(error) > 0 THEN 1 ELSE 0 END) * 100 as error_rate,
        COUNT(*) as volume
     FROM `${var.project_id}.${module.cloudevent-recorder.dataset_id}.${module.cloudevent-recorder.table_ids["dev.octo-sts.exchange"]}`
     GROUP BY installation_id, org, day
+    EOT
+    // Use standard SQL
+    use_legacy_sql = false
+  }
+}
+
+resource "google_bigquery_table" "errors-by-subject" {
+  dataset_id = module.cloudevent-recorder.dataset_id
+  table_id   = "errors_by_subject"
+
+  view {
+    query = <<EOT
+    SELECT actor.sub as subject,
+       TIMESTAMP_TRUNC(_PARTITIONTIME, DAY) as day,
+       AVG(CASE WHEN LENGTH(error) > 0 THEN 1 ELSE 0 END) * 100 as error_rate,
+       COUNT(*) as volume
+    FROM `${var.project_id}.${module.cloudevent-recorder.dataset_id}.${module.cloudevent-recorder.table_ids["dev.octo-sts.exchange"]}`
+    GROUP BY subject, day
     EOT
     // Use standard SQL
     use_legacy_sql = false
