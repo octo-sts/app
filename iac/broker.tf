@@ -47,5 +47,7 @@ resource "google_bigquery_table" "errors-by-installations" {
     FROM `${var.project_id}.${module.cloudevent-recorder.dataset_id}.${module.cloudevent-recorder.table_ids["dev.octo-sts.exchange"]}`
     GROUP BY installation_id, org, day
     EOT
+    // Use standard SQL
+    use_legacy_sql = false
   }
 }
