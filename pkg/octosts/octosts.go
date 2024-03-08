@@ -5,6 +5,8 @@ package octosts
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -168,6 +170,11 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		}
 		return nil, status.Errorf(codes.Internal, "failed to get token: %v", err)
 	}
+
+	// Compute the SHA256 hash of the token and store the hex-encoded value into e.TokenSHA256
+	hash := sha256.Sum256([]byte(token))
+	e.TokenSHA256 = hex.EncodeToString(hash[:])
+
 	return &pboidc.RawToken{
 		Token: token,
 	}, nil

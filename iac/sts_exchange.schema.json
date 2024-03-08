@@ -295,6 +295,11 @@
         "mode": "NULLABLE"
     },
     {
+        "name": "token_sha256",
+        "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
         "name": "error",
         "type": "STRING",
         "mode": "NULLABLE"

@@ -9,6 +9,7 @@ type Event struct {
 	InstallationID int64           `json:"installation_id"`
 	Scope          string          `json:"scope"`
 	Identity       string          `json:"identity"`
+	TokenSHA256    string          `json:"token_sha256"`
 	Error          string          `json:"error,omitempty"`
 }
 
