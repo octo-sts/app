@@ -1,4 +1,4 @@
-module github.com/chainguard-dev/octo-sts
+module github.com/octo-sts/app
 
 go 1.21.6
 
