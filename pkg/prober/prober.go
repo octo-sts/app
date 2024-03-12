@@ -21,7 +21,7 @@ func Func(ctx context.Context) error {
 	xchg := sts.New(
 		"https://octo-sts.dev",
 		"does-not-matter",
-		sts.WithScope("chainguard-dev/octo-sts-prober"),
+		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("prober"),
 	)
 
@@ -56,7 +56,7 @@ func Func(ctx context.Context) error {
 	// Check the `contents: read` permission by reading back the STS policy we
 	// used to federate.
 	file, _, _, err := ghc.Repositories.GetContents(ctx,
-		"chainguard-dev", "octo-sts-prober",
+		"octo-sts", "prober",
 		".github/chainguard/prober.sts.yaml",
 		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
 	)
@@ -69,13 +69,13 @@ func Func(ctx context.Context) error {
 
 	// Check the `issues: read` permission by listing issues.
 	if _, _, err := ghc.Issues.ListByRepo(ctx,
-		"chainguard-dev", "octo-sts-prober",
+		"octo-sts", "prober",
 		&github.IssueListByRepoOptions{}); err != nil {
 		return fmt.Errorf("failed to list issues: %w", err)
 	}
 	// Attempt to create an issue, which should fail because we don't have the `issues: write` permission.
 	if _, _, err := ghc.Issues.Create(ctx,
-		"chainguard-dev", "octo-sts-prober",
+		"octo-sts", "prober",
 		&github.IssueRequest{
 			Title: github.String("octo-sts prober was able to create an issue"),
 			Body:  github.String("This should fail!"),
@@ -89,7 +89,7 @@ func Func(ctx context.Context) error {
 	if _, err := sts.New(
 		"https://octo-sts.dev",
 		"does-not-matter",
-		sts.WithScope("chainguard-dev/octo-sts-prober"),
+		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("does-not-exist"),
 	).Exchange(ctx, token.AccessToken); err == nil {
 		return fmt.Errorf("expected to fail to exchange with a non-existent identity: %w", err)
@@ -102,7 +102,7 @@ func Negative(ctx context.Context) error {
 	xchg := sts.New(
 		"https://octo-sts.dev",
 		"does-not-matter",
-		sts.WithScope("chainguard-dev/octo-sts-prober"),
+		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("prober"),
 	)
 
