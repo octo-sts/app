@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Check out code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@9bb56186c3b09b4f86b1c65136769dd318469633 # v4.1.2
 
       - name: Find yamls
         id: get_yamls
@@ -24,6 +24,6 @@ jobs:
           echo "files=${yamls}" >> "$GITHUB_OUTPUT"
 
       - name: Action lint
-        uses: reviewdog/action-actionlint@b0a6aebe1d2191decc9b4f022cdfc248b702477d # v1.42.0
+        uses: reviewdog/action-actionlint@c6ee1eb0a5d47b2af53a203652b5dac0b6c4016e # v1.43.0
         with:
           actionlint_flags: ${{ steps.get_yamls.outputs.files }}
