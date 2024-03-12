@@ -31,7 +31,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/octo-sts/pkg/provider"
+	"github.com/octo-sts/app/pkg/provider"
 )
 
 const (

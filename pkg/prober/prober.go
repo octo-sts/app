@@ -11,8 +11,8 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/octo-sts/pkg/octosts"
 	"github.com/google/go-github/v58/github"
+	"github.com/octo-sts/app/pkg/octosts"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
 )
