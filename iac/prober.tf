@@ -5,7 +5,7 @@ resource "google_service_account" "prober" {
 
 module "prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.5.16"
+  version = "0.5.20"
 
   name       = "octo-sts-prober"
   project_id = var.project_id
@@ -28,7 +28,7 @@ resource "google_service_account" "negative_prober" {
 
 module "negative_prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.5.16"
+  version = "0.5.20"
 
   name       = "octo-sts-negative-prober"
   project_id = var.project_id
