@@ -8,67 +8,85 @@ resource "google_project_service" "iamcredentials-api" {
   disable_on_destroy         = false
 }
 
-resource "google_iam_workload_identity_pool" "github_pool" {
-  project                   = var.project_id
-  provider                  = google-beta
-  workload_identity_pool_id = "github-pool"
-  display_name              = "Github pool"
-  depends_on                = [google_project_service.iamcredentials-api]
+data "google_monitoring_notification_channel" "notify-chainguard-slack" {
+  display_name = "Slack Octo STS Notification"
 }
 
-resource "google_iam_workload_identity_pool_provider" "github_provider" {
-  project                            = var.project_id
-  provider                           = google-beta
-  workload_identity_pool_id          = google_iam_workload_identity_pool.github_pool.workload_identity_pool_id
-  workload_identity_pool_provider_id = "github-provider" # This gets 4-32 alphanumeric characters (and '-')
-  display_name                       = "Github provider"
-
-  attribute_mapping = {
-    "google.subject" = "assertion.sub"
-    "attribute.sub"  = "assertion.sub"
-  }
-
-  oidc {
-    issuer_uri = "https://token.actions.githubusercontent.com"
-  }
-}
-
-resource "google_service_account" "github_identity" {
-  project    = var.project_id
-  account_id = "github-identity"
-}
-
-resource "google_service_account_iam_binding" "allow_github_impersonation" {
-  service_account_id = google_service_account.github_identity.name
-  role               = "roles/iam.workloadIdentityUser"
-
-  members = [
-    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.sub/repo:octo-sts/app:ref:refs/heads/main",
+locals {
+  notification_channels = [
+    data.google_monitoring_notification_channel.notify-chainguard-slack.name,
   ]
 }
+
+module "github-wif" {
+  source  = "chainguard-dev/common/infra//modules/github-wif-provider"
+  version = "0.5.20"
+
+  project_id = var.project_id
+  name       = "github-pool"
+
+  notification_channels = local.notification_channels
+}
+
+moved {
+  from = google_iam_workload_identity_pool.github_pool
+  to   = module.github-wif.google_iam_workload_identity_pool.this
+}
+
+moved {
+  from = google_iam_workload_identity_pool_provider.github_provider
+  to   = module.github-wif.google_iam_workload_identity_pool_provider.this
+}
+
+module "github_identity" {
+  source  = "chainguard-dev/common/infra//modules/github-gsa"
+  version = "0.5.20"
+
+  project_id = var.project_id
+  name       = "github-identity"
+  wif-pool   = module.github-wif.pool_name
+
+  repository   = "octo-sts/app"
+  refspec      = "refs/heads/main"
+  workflow_ref = ".github/workflows/deploy.yaml"
+
+  notification_channels = local.notification_channels
+}
+
+moved {
+  from = google_service_account.github_identity
+  to   = module.github_identity.google_service_account.this
+}
+
 
 resource "google_project_iam_member" "github_owner" {
   project = var.project_id
   role    = "roles/owner"
-  member  = "serviceAccount:${google_service_account.github_identity.email}"
+  member  = "serviceAccount:${module.github_identity.email}"
 }
 
-resource "google_service_account" "github_pull_requests" {
-  project    = var.project_id
-  account_id = "github-pull-requests"
+module "github_pull_requests" {
+  source  = "chainguard-dev/common/infra//modules/github-gsa"
+  version = "0.5.20"
+
+  project_id = var.project_id
+  name       = "github-pull-requests"
+  wif-pool   = module.github-wif.pool_name
+
+  repository   = "octo-sts/app"
+  refspec      = "pull_request"
+  workflow_ref = ".github/workflows/verify-prod.yaml"
+
+  notification_channels = local.notification_channels
 }
 
-resource "google_service_account_iam_binding" "allow_github_pull_requests_impersonation" {
-  service_account_id = google_service_account.github_pull_requests.name
-  role               = "roles/iam.workloadIdentityUser"
-
-  members = [
-    "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github_pool.name}/attribute.sub/repo:octo-sts/app:pull_request",
-  ]
+moved {
+  from = google_service_account.github_pull_requests
+  to   = module.github_pull_requests.google_service_account.this
 }
 
 resource "google_project_iam_member" "github_viewer" {
   project = var.project_id
   role    = "roles/viewer"
-  member  = "serviceAccount:${google_service_account.github_pull_requests.email}"
+  member  = "serviceAccount:${module.github_pull_requests.email}"
 }
