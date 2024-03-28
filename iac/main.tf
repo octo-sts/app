@@ -183,7 +183,7 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       protoPayload.resourceName: "${google_kms_key_ring.app-keyring.id}/"
 
       -- Skip operations that are a part of terraform plan
-      protoPayload.methodName=("GetCryptoKey")
+      -protoPayload.methodName=("GetCryptoKey")
 
       -- The application itself should only perform signing operations.
       -(
