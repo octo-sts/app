@@ -182,6 +182,9 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       -- Against our Github App's keyring
       protoPayload.resourceName: "${google_kms_key_ring.app-keyring.id}/"
 
+      -- Skip operations that are a part of terraform plan
+      -protoPayload.methodName=("GetCryptoKey")
+
       -- The application itself should only perform signing operations.
       -(
         protoPayload.authenticationInfo.principalEmail="${google_service_account.octo-sts.email}" AND
@@ -191,7 +194,7 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       -- Github IaC should only reconcile the keyring and keys.
       -(
         protoPayload.authenticationInfo.principalEmail="${data.google_client_openid_userinfo.me.email}" AND
-        protoPayload.methodName=("CreateKeyRing" OR "CreateCryptoKey" OR "GetCryptoKey" OR "SetIamPolicy")
+        protoPayload.methodName=("CreateKeyRing" OR "CreateCryptoKey" OR "SetIamPolicy")
       )
 
       -- If we were to filter out import events they would look like
