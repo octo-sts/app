@@ -9,7 +9,9 @@ on:
       - "main"
   workflow_dispatch:
 
-concurrency: deploy
+concurrency:
+  group: deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -22,48 +24,22 @@ jobs:
       id-token: write # federates with GCP
 
     steps:
-    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v3
-    - uses: actions/setup-go@41dfa10bad2bb2ae585af6ee5bb4d7d973ad74ed # v5.1.0
-      with:
-        go-version-file: './go.mod'
-        check-latest: true
+      - uses: ./.github/workflows/.terraform.yaml
+        with:
+          project_id: 'octo-sts'
+          workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+          working_directory: ./iac
 
-    - uses: google-github-actions/auth@6fc4af4b145ae7821d527454aa9bd537d1f2dc5f # v2.1.7
-      id: auth
-      with:
-        token_format: 'access_token'
-        project_id: 'octo-sts'
-        workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-        service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
-
-    - uses: 'docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567' # v2
-      with:
-        username: 'oauth2accesstoken'
-        password: '${{ steps.auth.outputs.access_token }}'
-        registry: 'gcr.io'
-
-    # Attempt to deploy the terraform configuration
-    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v2.0.0
-      with:
-        terraform_version: 1.9
-
-    - working-directory: ./iac
-      run: |
-        terraform init
-
-        terraform plan
-
-        terraform apply -auto-approve
-
-    - uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # v2.3.2
-      if: ${{ failure() }}
-      env:
-        SLACK_ICON: http://github.com/chainguard-dev.png?size=48
-        SLACK_USERNAME: guardian
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
-        SLACK_COLOR: '#8E1600'
-        MSG_MINIMAL: 'true'
-        SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
-        SLACK_MESSAGE: |
-          For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      - uses: rtCamp/action-slack-notify@c33737706dea87cd7784c687dadc9adf1be59990 # v2.3.2
+        if: ${{ failure() }}
+        env:
+          SLACK_ICON: http://github.com/chainguard-dev.png?size=48
+          SLACK_USERNAME: guardian
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
+          SLACK_COLOR: '#8E1600'
+          MSG_MINIMAL: 'true'
+          SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
+          SLACK_MESSAGE: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
