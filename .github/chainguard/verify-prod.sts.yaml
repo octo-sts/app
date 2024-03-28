@@ -4,7 +4,7 @@
 issuer: https://token.actions.githubusercontent.com
 subject: repo:octo-sts/app:pull_request
 claim_pattern:
-  job_workflow_ref: octo-sts/app/.github/workflows/verify-prod.yaml@.*
+  workflow_ref: octo-sts/app/.github/workflows/verify-prod.yaml@.*
 
 permissions:
   pull_requests: write
