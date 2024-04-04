@@ -90,3 +90,9 @@ resource "google_project_iam_member" "github_viewer" {
   role    = "roles/viewer"
   member  = "serviceAccount:${module.github_pull_requests.email}"
 }
+
+resource "google_project_iam_member" "github_iam_viewer" {
+  project = var.project_id
+  role    = "roles/iam.securityReviewer"
+  member  = "serviceAccount:${module.github_pull_requests.email}"
+}
