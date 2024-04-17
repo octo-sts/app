@@ -10,22 +10,19 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	cloudevents "github.com/cloudevents/sdk-go/v2"
-	cehttp "github.com/cloudevents/sdk-go/v2/protocol/http"
+	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
 	"github.com/kelseyhightower/envconfig"
 	"github.com/octo-sts/app/pkg/gcpkms"
 	"github.com/octo-sts/app/pkg/octosts"
-	"google.golang.org/api/idtoken"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"knative.dev/pkg/logging"
 )
 
 type envConfig struct {
@@ -39,6 +36,11 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
+
+	go metrics.ServeMetrics()
+
+	// Setup tracing.
+	defer metrics.SetupTracer(ctx)()
 
 	var env envConfig
 	if err := envconfig.Process("", &env); err != nil {
@@ -68,7 +70,7 @@ func main() {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	ceclient, err := cloudevents.NewClientHTTP(WithTarget(ctx, env.EventingIngress)...)
+	ceclient, err := mce.NewClientHTTP(mce.WithTarget(ctx, env.EventingIngress)...)
 	if err != nil {
 		log.Panicf("failed to create cloudevents client: %v", err)
 	}
@@ -84,21 +86,4 @@ func main() {
 
 	// This will block until a signal arrives.
 	<-ctx.Done()
-}
-
-// WithTarget wraps cloudevents.WithTarget to authenticate requests with an
-// identity token when the target is an HTTPS URL.
-func WithTarget(ctx context.Context, url string) []cehttp.Option {
-	opts := make([]cehttp.Option, 0, 2)
-
-	if strings.HasPrefix(url, "https://") {
-		idc, err := idtoken.NewClient(ctx, url)
-		if err != nil {
-			logging.FromContext(ctx).Panicf("failed to create idtoken client: %v", err)
-		}
-		opts = append(opts, cloudevents.WithRoundTripper(idc.Transport))
-	}
-
-	opts = append(opts, cehttp.WithTarget(url))
-	return opts
 }
