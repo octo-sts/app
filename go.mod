@@ -6,7 +6,7 @@ require (
 	chainguard.dev/go-grpc-kit v0.17.3
 	chainguard.dev/sdk v0.1.19
 	cloud.google.com/go/kms v1.15.8
-	github.com/bradleyfalzon/ghinstallation/v2 v2.9.1-0.20240116154122-7838128b61c6
+	github.com/bradleyfalzon/ghinstallation/v2 v2.10.0
 	github.com/chainguard-dev/clog v1.3.1
 	github.com/chainguard-dev/terraform-infra-common v0.6.0
 	github.com/cloudevents/sdk-go/v2 v2.15.2
@@ -34,6 +34,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/golang/protobuf v1.5.4 // indirect
+	github.com/google/go-github/v60 v60.0.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/s2a-go v0.1.7 // indirect
 	github.com/google/uuid v1.6.0 // indirect
