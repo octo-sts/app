@@ -31,8 +31,8 @@ github.com/chainguard-dev/clog v1.3.1 h1:CDNCty5WKQhJzoOPubk0GdXt+bPQyargmfClqeb
 github.com/chainguard-dev/clog v1.3.1/go.mod h1:cV516KZWqYc/phZsCNwF36u/KMGS+Gj5Uqeb8Hlp95Y=
 github.com/chainguard-dev/slogctx v1.2.2 h1:aDfTjasw/ApX0By8Nicl0C02oV/bXzBD8Dh7AG014ZM=
 github.com/chainguard-dev/slogctx v1.2.2/go.mod h1:+/TwogApSQPC+Umn9LF/T6my0KDml1XDAgpuSN/nwU4=
-github.com/chainguard-dev/terraform-infra-common v0.6.0 h1:fde9FMLYxvcL//OjqKH46/15MUzBWpJP/Ldcg9CLHEs=
-github.com/chainguard-dev/terraform-infra-common v0.6.0/go.mod h1:LUILgfchc4UE1JLxFVJO8pc0iFwEamhlbi4yHhfoL2A=
+github.com/chainguard-dev/terraform-infra-common v0.6.4 h1:o3xxO8SGkFXdXjha4LVkPfPMj/ZxxpRTATEScHrmVxk=
+github.com/chainguard-dev/terraform-infra-common v0.6.4/go.mod h1:uWHzsjVszL742qSJXl5+jBQD9TOaORZYQz+x3hv0f34=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/cloudevents/sdk-go/v2 v2.15.2 h1:54+I5xQEnI73RBhWHxbI1XJcqOFOVJN85vb41+8mHUc=
 github.com/cloudevents/sdk-go/v2 v2.15.2/go.mod h1:lL7kSWAE/V8VI4Wh0jbL2v/jvqsm6tjmaQBSvxcv4uE=
