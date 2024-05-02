@@ -8,7 +8,7 @@ STS API in order to produce short-lived tokens for interacting with GitHub.
 **_The ultimate goal of this App is to wholly eliminate the need for GitHub
 Personal Access Tokens (aka PATs)._**
 
-> _[The full design document.](inky.wtf/github-sts)_
+The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have).
 
 ## Setting up workload trust
 
