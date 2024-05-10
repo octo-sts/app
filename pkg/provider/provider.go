@@ -6,11 +6,21 @@ package provider
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/chainguard-dev/clog"
+	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/coreos/go-oidc/v3/oidc"
 	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/octo-sts/app/pkg/maxsize"
 )
+
+// MaximumResponseSize is the maximum size of allowed responses from
+// OIDC providers.  Some anecdata
+//   - Google: needs around 1KiB
+//   - GitHub: needs around 5KiB
+//   - Chainguard: needs around 2KiB
+const MaximumResponseSize = 100 * 1024 // 100KiB
 
 var (
 	// providers is an LRU cache of recently used providers.
@@ -24,6 +34,10 @@ func Get(ctx context.Context, issuer string) (provider *oidc.Provider, err error
 		clog.InfoContext(ctx, "found provider in cache")
 		return v, nil
 	}
+
+	ctx = oidc.ClientContext(ctx, &http.Client{
+		Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
+	})
 
 	// Verify the token before we trust anything about it.
 	provider, err = oidc.NewProvider(ctx, issuer)
