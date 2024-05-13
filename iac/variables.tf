@@ -4,11 +4,11 @@ variable "project_id" {
 
 variable "name" {
   description = "Name indicator, prefixed to resources created."
-  default     = "enforce"
+  default     = "octo-sts"
 }
 
 variable "regions" {
-  description = "Tegions where this environment's services should live."
+  description = "Regions where this environment's services should live."
   type        = list(string)
   default     = []
 }
