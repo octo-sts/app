@@ -92,8 +92,19 @@ module "sts-emits-events" {
   service-account = google_service_account.octo-sts.email
 }
 
-module "sts-service" {
-  source  = "chainguard-dev/common/infra//modules/regional-go-service"
+// Build each of the application images from source.
+resource "ko_build" "this" {
+  working_dir = "${path.module}/.."
+  importpath  = "./cmd/app"
+}
+
+resource "cosign_sign" "this" {
+  image    = ko_build.this.image_ref
+  conflict = "REPLACE"
+}
+
+module "this" {
+  source  = "chainguard-dev/common/infra//modules/regional-service"
   version = "0.6.18"
 
   project_id = var.project_id
@@ -108,10 +119,7 @@ module "sts-service" {
   service_account = google_service_account.octo-sts.email
   containers = {
     "sts" = {
-      source = {
-        working_dir = "${path.module}/.."
-        importpath  = "./cmd/app"
-      }
+      image = cosign_sign.this.signed_ref
       ports = [{ container_port = 8080 }]
       env = [
         {
@@ -131,6 +139,11 @@ module "sts-service" {
   }
 
   notification_channels = local.notification_channels
+}
+
+moved {
+  from = module.sts-service.module.this
+  to   = module.this
 }
 
 module "dashboard" {
