@@ -7,6 +7,8 @@ on:
   pull_request_target:
     branches:
       - 'main'
+    types:
+      - labeled
 
 concurrency:
   group: deploy
@@ -14,6 +16,7 @@ concurrency:
 
 jobs:
   verify-prod-octo-sts:
+    if: contains(github.event.pull_request.labels.*.name, 'ok-to-test')
 
     permissions:
       contents: read  # clone the repository contents
