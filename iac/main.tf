@@ -50,7 +50,7 @@ locals {
   ]
 }
 
-module "this" {
+module "app" {
   source = "../modules/app"
 
   project_id = var.project_id
@@ -73,5 +73,5 @@ module "this" {
 
 moved {
   from = module.this
-  to   = module.this.module.this
+  to   = module.app.module.this
 }
