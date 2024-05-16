@@ -39,10 +39,11 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
 		ceclient: ceclient,
+		domain:   domain,
 	}
 }
 
@@ -57,6 +58,7 @@ type sts struct {
 
 	atr      *ghinstallation.AppsTransport
 	ceclient cloudevents.Client
+	domain   string
 }
 
 type cacheTrustPolicyKey struct {
@@ -76,7 +78,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		event := cloudevents.NewEvent()
 		event.SetType("dev.octo-sts.exchange")
 		event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
-		event.SetSource("https://octo-sts.dev")
+		event.SetSource(fmt.Sprintf("https://%s", s.domain))
 		if err != nil {
 			e.Error = err.Error()
 		}
@@ -114,7 +116,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	verifier := p.Verifier(&oidc.Config{
-		ClientID: "octo-sts.dev",
+		ClientID: s.domain,
 	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {

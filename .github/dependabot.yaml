@@ -29,6 +29,14 @@ updates:
         update-types:
           - "patch"
   - package-ecosystem: terraform
+    directory: "/modules/app"
+    schedule:
+      interval: "daily"
+    groups:
+      all:
+        update-types:
+          - "patch"
+  - package-ecosystem: terraform
     directory: "/iac/bootstrap"
     schedule:
       interval: "daily"
