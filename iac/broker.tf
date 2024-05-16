@@ -10,6 +10,8 @@ module "cloudevent-broker" {
   notification_channels = local.notification_channels
 }
 
+data "google_client_openid_userinfo" "me" {}
+
 module "cloudevent-recorder" {
   source  = "chainguard-dev/common/infra//modules/cloudevent-recorder"
   version = "0.6.18"

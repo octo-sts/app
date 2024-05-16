@@ -27,6 +27,7 @@ import (
 
 type envConfig struct {
 	Port            int    `envconfig:"PORT" required:"true"`
+	Domain          string `envconfig:"STS_DOMAIN" required:"true"`
 	KMSKey          string `envconfig:"KMS_KEY" required:"true"`
 	AppID           int64  `envconfig:"GITHUB_APP_ID" required:"true"`
 	EventingIngress string `envconfig:"EVENT_INGRESS_URI" required:"true"`
@@ -75,7 +76,7 @@ func main() {
 		log.Panicf("failed to create cloudevents client: %v", err)
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, env.Domain))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
