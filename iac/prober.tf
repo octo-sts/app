@@ -17,6 +17,10 @@ module "prober" {
   importpath  = "./cmd/prober"
   working_dir = "${path.module}/../"
 
+  env = {
+    STS_DOMAIN = "octo-sts.dev"
+  }
+
   enable_alert          = true
   notification_channels = local.notification_channels
 }
@@ -39,6 +43,10 @@ module "negative_prober" {
 
   importpath  = "./cmd/negative-prober"
   working_dir = "${path.module}/../"
+
+  env = {
+    STS_DOMAIN = "octo-sts.dev"
+  }
 
   enable_alert          = true
   notification_channels = local.notification_channels
