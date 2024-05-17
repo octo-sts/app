@@ -12,20 +12,30 @@ import (
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v58/github"
+	"github.com/kelseyhightower/envconfig"
 	"github.com/octo-sts/app/pkg/octosts"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
 )
 
+type envConfig struct {
+	Domain string `envconfig:"STS_DOMAIN" required:"true"`
+}
+
 func Func(ctx context.Context) error {
+	var env envConfig
+	if err := envconfig.Process("", &env); err != nil {
+		return err
+	}
+
 	xchg := sts.New(
-		"https://octo-sts.dev",
+		fmt.Sprintf("https://%s", env.Domain),
 		"does-not-matter",
 		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("prober"),
 	)
 
-	ts, err := idtoken.NewTokenSource(ctx, "octo-sts.dev" /* aud */)
+	ts, err := idtoken.NewTokenSource(ctx, env.Domain /* aud */)
 	if err != nil {
 		return fmt.Errorf("failed to get new gcp token source %w", err)
 	}
@@ -87,7 +97,7 @@ func Func(ctx context.Context) error {
 
 	// Attempt to exchange with a non-existent identity, which should fail.
 	if _, err := sts.New(
-		"https://octo-sts.dev",
+		fmt.Sprintf("https://%s", env.Domain),
 		"does-not-matter",
 		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("does-not-exist"),
@@ -99,14 +109,19 @@ func Func(ctx context.Context) error {
 }
 
 func Negative(ctx context.Context) error {
+	var env envConfig
+	if err := envconfig.Process("", &env); err != nil {
+		return err
+	}
+
 	xchg := sts.New(
-		"https://octo-sts.dev",
+		fmt.Sprintf("https://%s", env.Domain),
 		"does-not-matter",
 		sts.WithScope("octo-sts/prober"),
 		sts.WithIdentity("prober"),
 	)
 
-	ts, err := idtoken.NewTokenSource(ctx, "octo-sts.dev" /* aud */)
+	ts, err := idtoken.NewTokenSource(ctx, env.Domain /* aud */)
 	if err != nil {
 		return fmt.Errorf("failed to get new gcp token source %w", err)
 	}
