@@ -18,21 +18,6 @@ data "google_monitoring_notification_channel" "octo-sts-slack" {
   display_name = "Slack Octo STS Notification"
 }
 
-moved {
-  from = google_kms_key_ring.app-keyring
-  to   = module.this.google_kms_key_ring.app-keyapp-keyring
-}
-
-moved {
-  from = google_kms_crypto_key.app-key
-  to   = module.this.google_kms_crypto_key.app-key
-}
-
-moved {
-  from = google_service_account.octo-sts
-  to   = module.this.google_service_account.octo-sts
-}
-
 // Build each of the application images from source.
 resource "ko_build" "this" {
   working_dir = "${path.module}/.."
@@ -69,9 +54,4 @@ module "app" {
   github_app_id          = 801323 // https://github.com/settings/apps/octosts
   github_app_key_version = 1
   notification_channels  = local.notification_channels
-}
-
-moved {
-  from = module.this
-  to   = module.app.module.this
 }
