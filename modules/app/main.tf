@@ -85,7 +85,7 @@ module "this" {
   service_account = google_service_account.octo-sts.email
   containers = {
     "sts" = {
-      image = var.image
+      image = var.images.app
       ports = [{ container_port = 8080 }]
       env = [
         {

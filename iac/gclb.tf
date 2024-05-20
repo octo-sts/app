@@ -36,7 +36,10 @@ module "serverless-gclb" {
 
   public-services = {
     "octo-sts.dev" = {
-      name = var.name
+      name = module.app.app.name
+    }
+    "webhook.octo-sts.dev" = {
+      name = module.app.webhook.name
     }
   }
 }
