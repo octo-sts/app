@@ -15,29 +15,15 @@ concurrency:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
-
+    uses: ./.github/workflows/.terraform.yaml
     permissions:
       contents: read  # clone the repository contents
       id-token: write # federates with GCP
-
-    steps:
-      - uses: ./.github/workflows/.terraform.yaml
-        with:
-          project_id: 'octo-sts'
-          workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
-          working_directory: ./iac
-
-      - uses: rtCamp/action-slack-notify@4e5fb42d249be6a45a298f3c9543b111b02f7907 # v2.3.0
-        if: ${{ failure() }}
-        env:
-          SLACK_ICON: http://github.com/chainguard-dev.png?size=48
-          SLACK_USERNAME: guardian
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
-          SLACK_COLOR: '#8E1600'
-          MSG_MINIMAL: 'true'
-          SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
-          SLACK_MESSAGE: |
-            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    with:
+      project_id: 'octo-sts'
+      workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+      service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+      working_directory: ./iac
+      slack_channel: 'octo-sts-alerts'
+    secrets:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
