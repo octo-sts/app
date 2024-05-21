@@ -19,8 +19,8 @@ import (
 	"github.com/google/go-github/v58/github"
 	"github.com/hashicorp/go-multierror"
 	"github.com/octo-sts/app/pkg/octosts"
-	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/yaml"
 )
 
 const (
