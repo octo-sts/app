@@ -9,7 +9,7 @@ import (
 	"regexp"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v61/github"
+	"github.com/google/go-github/v62/github"
 )
 
 type TrustPolicy struct {
