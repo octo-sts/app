@@ -307,16 +307,27 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
 
-	resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
 	var files []string
-	for _, file := range resp.Files {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			files = append(files, file.GetFilename())
+	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
+		_, dirContents, _, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range dirContents {
+			files = append(files, file.GetPath())
+		}
+	} else {
+		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range resp.Files {
+			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+				files = append(files, file.GetFilename())
+			}
 		}
 	}
+
 	for _, pr := range cs.GetCheckSuite().PullRequests {
 		resp, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pr.GetNumber(), &github.ListOptions{})
 		if err != nil {
