@@ -77,6 +77,16 @@
                 "name": "email",
                 "type": "STRING",
                 "mode": "NULLABLE"
+            },
+            {
+                "name": "actor",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "base_ref",
+                "type": "STRING",
+                "mode": "NULLABLE"
             }
           ]
         },
