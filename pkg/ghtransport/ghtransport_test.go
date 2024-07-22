@@ -26,7 +26,7 @@ func TestGCPKMS(t *testing.T) {
 
 	credsFile := createGCPKMSCredsFile(t)
 
-	// defer os.Remove(credsFile)
+	defer os.Remove(credsFile)
 
 	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 	defer os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
