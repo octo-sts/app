@@ -34,7 +34,7 @@ func main() {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
-	if env.Metrics == "default" {
+	if env.Metrics {
 		go metrics.ServeMetrics()
 
 		// Setup tracing.

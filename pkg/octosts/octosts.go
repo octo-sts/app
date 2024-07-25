@@ -39,7 +39,7 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
 		ceclient: ceclient,
@@ -60,7 +60,7 @@ type sts struct {
 	atr      *ghinstallation.AppsTransport
 	ceclient cloudevents.Client
 	domain   string
-	metrics  string
+	metrics  bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -76,8 +76,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Scope:    request.Scope,
 		Identity: request.Identity,
 	}
-	defer func() {
-		if s.metrics == "default" {
+	if s.metrics {
+		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
 			event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
@@ -93,10 +93,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			if ceresult := s.ceclient.Send(rctx, event); cloudevents.IsUndelivered(ceresult) || cloudevents.IsNACK(ceresult) {
 				clog.FromContext(ctx).Errorf("Failed to deliver event: %v", ceresult)
 			}
-		} else {
-			return
-		}
-	}()
+		}()
+	}
 
 	// Extract the incoming bearer token.
 	md, ok := metadata.FromIncomingContext(ctx)

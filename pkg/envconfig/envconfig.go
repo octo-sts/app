@@ -8,5 +8,5 @@ type EnvConfig struct {
 	EventingIngress            string `envconfig:"EVENT_INGRESS_URI" required:"true"`
 	AppSecretCertificateFile   string `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
-	Metrics                    string `envconfig:"METRICS" required:"false" default:"default"`
+	Metrics                    bool   `envconfig:"METRICS" required:"false" default:"true"`
 }

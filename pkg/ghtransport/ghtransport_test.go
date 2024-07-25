@@ -37,7 +37,7 @@ func TestGCPKMS(t *testing.T) {
 		AppID:           123456,
 		EventingIngress: "https://event.ingress.uri",
 		KMSKey:          "test-kms-key",
-		Metrics:         "enabled",
+		Metrics:         true,
 	}
 
 	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
@@ -55,8 +55,8 @@ func TestCertEnvVar(t *testing.T) {
 		Domain:                     "example.com",
 		AppID:                      123456,
 		EventingIngress:            "https://event.ingress.uri",
-		AppSecretCertificateEnvVar: generateTestCertificate("envvar"),
-		Metrics:                    "enabled",
+		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		Metrics:                    true,
 	}
 
 	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
@@ -74,8 +74,8 @@ func TestCertFile(t *testing.T) {
 		Domain:                   "example.com",
 		AppID:                    123456,
 		EventingIngress:          "https://event.ingress.uri",
-		AppSecretCertificateFile: generateTestCertificate("file"),
-		Metrics:                  "enabled",
+		AppSecretCertificateFile: generateTestCertificateFile(),
+		Metrics:                  true,
 	}
 
 	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
@@ -114,7 +114,7 @@ func createGCPKMSCredsFile(t *testing.T) string {
 	jsonStr := fmt.Sprintf(`{
         "type": "service_account",
         "private_key": "%s"
-    }`, generateTestCertificate("envvar"))
+    }`, generateTestCertificateString())
 
 	if _, err := tmpFile.Write([]byte(jsonStr)); err != nil {
 		t.Fatalf("Failed to write to temporary file: %s", err)
@@ -126,7 +126,7 @@ func createGCPKMSCredsFile(t *testing.T) string {
 	return tmpFile.Name()
 }
 
-func generateTestCertificate(output string) string {
+func generateTestCertificateString() string {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
@@ -138,21 +138,35 @@ func generateTestCertificate(output string) string {
 		Type:  "RSA PRIVATE KEY",
 		Bytes: privateKeyBytes,
 	}
-	if output == "envvar" {
-		var pemOut bytes.Buffer
-		pem.Encode(&pemOut, &privateKeyPEM)
-		return pemOut.String()
-	} else {
-		tmpFile, err := os.CreateTemp("", "privateKey*.pem")
-		if err != nil {
-			log.Fatal(err)
-		}
-		defer tmpFile.Close()
 
-		if err := pem.Encode(tmpFile, &privateKeyPEM); err != nil {
-			log.Fatal(err)
-		}
+	var pemOut bytes.Buffer
+	pem.Encode(&pemOut, &privateKeyPEM)
+	return pemOut.String()
+}
 
-		return tmpFile.Name()
+func generateTestCertificateFile() string {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic(err)
 	}
+
+	privateKeyBytes := x509.MarshalPKCS1PrivateKey(privateKey)
+
+	privateKeyPEM := pem.Block{
+		Type:  "RSA PRIVATE KEY",
+		Bytes: privateKeyBytes,
+	}
+
+	tmpFile, err := os.CreateTemp("", "privateKey*.pem")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tmpFile.Close()
+
+	if err := pem.Encode(tmpFile, &privateKeyPEM); err != nil {
+		log.Fatal(err)
+	}
+
+	return tmpFile.Name()
+
 }
