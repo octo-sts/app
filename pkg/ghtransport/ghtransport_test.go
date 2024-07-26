@@ -28,8 +28,7 @@ func TestGCPKMS(t *testing.T) {
 
 	defer os.Remove(credsFile)
 
-	os.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
-	defer os.Unsetenv("GOOGLE_APPLICATION_CREDENTIALS")
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
 	testConfig := envconfig.EnvConfig{
 		Port:            8080,
