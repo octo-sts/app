@@ -73,7 +73,7 @@ func TestCertFile(t *testing.T) {
 		Domain:                   "example.com",
 		AppID:                    123456,
 		EventingIngress:          "https://event.ingress.uri",
-		AppSecretCertificateFile: generateTestCertificateFile(),
+		AppSecretCertificateFile: generateTestCertificateFile(t),
 		Metrics:                  true,
 	}
 
@@ -143,7 +143,7 @@ func generateTestCertificateString() string {
 	return pemOut.String()
 }
 
-func generateTestCertificateFile() string {
+func generateTestCertificateFile(t *testing.T) string {
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		panic(err)
