@@ -16,7 +16,6 @@ import (
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
-	"github.com/kelseyhightower/envconfig"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
@@ -29,8 +28,8 @@ func main() {
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
-	var env envConfig.EnvConfig
-	if err := envconfig.Process("", &env); err != nil {
+	env, err := envConfig.Process()
+	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
@@ -42,7 +41,6 @@ func main() {
 	}
 
 	var client *kms.KeyManagementClient
-	var err error
 
 	if env.KMSKey != "" {
 		client, err = kms.NewKeyManagementClient(ctx)

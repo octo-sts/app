@@ -1,5 +1,11 @@
 package envconfig
 
+import (
+	"errors"
+
+	"github.com/kelseyhightower/envconfig"
+)
+
 type EnvConfig struct {
 	Port                       int    `envconfig:"PORT" required:"true"`
 	Domain                     string `envconfig:"STS_DOMAIN" required:"true"`
@@ -9,4 +15,24 @@ type EnvConfig struct {
 	AppSecretCertificateFile   string `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
 	Metrics                    bool   `envconfig:"METRICS" required:"false" default:"true"`
+}
+
+func Process() (*EnvConfig, error) {
+	cfg := new(EnvConfig)
+	var err error
+	if err = envconfig.Process("", cfg); err != nil {
+		return nil, err
+	}
+
+	kmsSet := false
+	for _, v := range []string{cfg.KMSKey, cfg.AppSecretCertificateFile, cfg.AppSecretCertificateEnvVar} {
+		if v != "" {
+			if kmsSet {
+				return nil, errors.New("only one of KMS_KEY, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
+			}
+			kmsSet = true
+		}
+	}
+
+	return cfg, err
 }

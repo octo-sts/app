@@ -30,7 +30,7 @@ func TestGCPKMS(t *testing.T) {
 
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
-	testConfig := envconfig.EnvConfig{
+	testConfig := &envconfig.EnvConfig{
 		Port:            8080,
 		Domain:          "example.com",
 		AppID:           123456,
@@ -49,7 +49,7 @@ func TestGCPKMS(t *testing.T) {
 func TestCertEnvVar(t *testing.T) {
 	ctx := context.Background()
 
-	testConfig := envconfig.EnvConfig{
+	testConfig := &envconfig.EnvConfig{
 		Port:                       8080,
 		Domain:                     "example.com",
 		AppID:                      123456,
@@ -68,7 +68,7 @@ func TestCertEnvVar(t *testing.T) {
 func TestCertFile(t *testing.T) {
 	ctx := context.Background()
 
-	testConfig := envconfig.EnvConfig{
+	testConfig := &envconfig.EnvConfig{
 		Port:                     8080,
 		Domain:                   "example.com",
 		AppID:                    123456,

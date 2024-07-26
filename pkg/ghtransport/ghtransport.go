@@ -11,7 +11,7 @@ import (
 	"github.com/octo-sts/app/pkg/gcpkms"
 )
 
-func New(ctx context.Context, env envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
+func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
 	if env.AppSecretCertificateEnvVar != "" {
 		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(env.AppSecretCertificateEnvVar))
 
