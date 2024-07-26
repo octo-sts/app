@@ -157,7 +157,7 @@ func generateTestCertificateFile() string {
 		Bytes: privateKeyBytes,
 	}
 
-	tmpFile, err := os.CreateTemp("", "privateKey*.pem")
+	tmpFile, err := os.CreateTemp(t.TempDir(), "privateKey*.pem")
 	if err != nil {
 		log.Fatal(err)
 	}
