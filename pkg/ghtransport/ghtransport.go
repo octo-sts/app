@@ -20,7 +20,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(env.AppSecretCertificateEnvVar))
 
 		if err != nil {
-			log.Panicf("error creating GitHub App transport: %v", err)
+			return nil, err
 		}
 		return atr, nil
 
@@ -28,7 +28,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, env.AppID, env.AppSecretCertificateFile)
 
 		if err != nil {
-			log.Panicf("error creating GitHub App transport: %v", err)
+			return nil, err
 		}
 		return atr, nil
 	default:
@@ -43,7 +43,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 
 		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
 		if err != nil {
-			log.Panicf("error creating GitHub App transport: %v", err)
+			return nil, err
 		}
 
 		return atr, nil
