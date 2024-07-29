@@ -104,7 +104,6 @@ func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClie
 }
 
 func createGCPKMSCredsFile(t *testing.T) string {
-
 	tmpFile, err := os.CreateTemp(t.TempDir(), "creds-")
 	if err != nil {
 		t.Fatalf("Failed to create temporary file: %s", err)
@@ -167,5 +166,4 @@ func generateTestCertificateFile(t *testing.T) string {
 	}
 
 	return tmpFile.Name()
-
 }
