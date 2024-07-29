@@ -12,7 +12,8 @@ import (
 )
 
 func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
-	if env.AppSecretCertificateEnvVar != "" {
+	switch {
+	case env.AppSecretCertificateEnvVar != "":
 		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(env.AppSecretCertificateEnvVar))
 
 		if err != nil {
@@ -20,14 +21,14 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 		}
 		return atr, nil
 
-	} else if env.AppSecretCertificateFile != "" {
+	case env.AppSecretCertificateFile != "":
 		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, env.AppID, env.AppSecretCertificateFile)
 
 		if err != nil {
 			log.Panicf("error creating GitHub App transport: %v", err)
 		}
 		return atr, nil
-	} else {
+	default:
 		if env.KMSKey == "" {
 			log.Panicf("failed to process env var: %s", env.KMSKey)
 		}
