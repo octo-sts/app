@@ -5,7 +5,7 @@ package ghtransport
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"net/http"
 
 	kms "cloud.google.com/go/kms/apiv1"
