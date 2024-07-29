@@ -39,11 +39,12 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
 		ceclient: ceclient,
 		domain:   domain,
+		metrics:  metrics,
 	}
 }
 
@@ -59,6 +60,7 @@ type sts struct {
 	atr      *ghinstallation.AppsTransport
 	ceclient cloudevents.Client
 	domain   string
+	metrics  bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -74,23 +76,25 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Scope:    request.Scope,
 		Identity: request.Identity,
 	}
-	defer func() {
-		event := cloudevents.NewEvent()
-		event.SetType("dev.octo-sts.exchange")
-		event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
-		event.SetSource(fmt.Sprintf("https://%s", s.domain))
-		if err != nil {
-			e.Error = err.Error()
-		}
-		if err := event.SetData(cloudevents.ApplicationJSON, e); err != nil {
-			clog.FromContext(ctx).Infof("Failed to encode event payload: %v", err)
-			return
-		}
-		rctx := cloudevents.ContextWithRetriesExponentialBackoff(context.WithoutCancel(ctx), retryDelay, maxRetry)
-		if ceresult := s.ceclient.Send(rctx, event); cloudevents.IsUndelivered(ceresult) || cloudevents.IsNACK(ceresult) {
-			clog.FromContext(ctx).Errorf("Failed to deliver event: %v", ceresult)
-		}
-	}()
+	if s.metrics {
+		defer func() {
+			event := cloudevents.NewEvent()
+			event.SetType("dev.octo-sts.exchange")
+			event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
+			event.SetSource(fmt.Sprintf("https://%s", s.domain))
+			if err != nil {
+				e.Error = err.Error()
+			}
+			if err := event.SetData(cloudevents.ApplicationJSON, e); err != nil {
+				clog.FromContext(ctx).Infof("Failed to encode event payload: %v", err)
+				return
+			}
+			rctx := cloudevents.ContextWithRetriesExponentialBackoff(context.WithoutCancel(ctx), retryDelay, maxRetry)
+			if ceresult := s.ceclient.Send(rctx, event); cloudevents.IsUndelivered(ceresult) || cloudevents.IsNACK(ceresult) {
+				clog.FromContext(ctx).Errorf("Failed to deliver event: %v", ceresult)
+			}
+		}()
+	}
 
 	// Extract the incoming bearer token.
 	md, ok := metadata.FromIncomingContext(ctx)
