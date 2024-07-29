@@ -33,12 +33,12 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 		return atr, nil
 	default:
 		if env.KMSKey == "" {
-			log.Panicf("failed to process env var: %s", env.KMSKey)
+			return nil, fmt.Errorf("failed to process env var: %q", env.KMSKey)
 		}
 
 		signer, err := gcpkms.New(ctx, kmsClient, env.KMSKey)
 		if err != nil {
-			log.Panicf("error creating signer: %v", err)
+			return nil, fmt.Errorf("error creating signer: %w", err)
 		}
 
 		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
