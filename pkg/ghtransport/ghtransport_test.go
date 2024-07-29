@@ -159,7 +159,6 @@ func generateTestCertificateFile(t *testing.T) string {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer tmpFile.Close()
 
 	if err := pem.Encode(tmpFile, &privateKeyPEM); err != nil {
 		log.Fatal(err)
