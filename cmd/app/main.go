@@ -62,7 +62,7 @@ func main() {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	ceclient, err := mce.NewClientHTTP(mce.WithTarget(ctx, env.EventingIngress)...)
+	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, env.EventingIngress)...)
 	if err != nil {
 		log.Panicf("failed to create cloudevents client: %v", err)
 	}
