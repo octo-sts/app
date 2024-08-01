@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -17,7 +18,7 @@ import (
 func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
-		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(env.AppSecretCertificateEnvVar))
+		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(os.Getenv(env.AppSecretCertificateEnvVar)))
 
 		if err != nil {
 			return nil, err
