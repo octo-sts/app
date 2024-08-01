@@ -52,12 +52,14 @@ func TestGCPKMS(t *testing.T) {
 func TestCertEnvVar(t *testing.T) {
 	ctx := context.Background()
 
+	t.Setenv("GITHUB_APP_SECRET", generateTestCertificateString())
+
 	testConfig := &envconfig.EnvConfig{
 		Port:                       8080,
 		Domain:                     "example.com",
 		AppID:                      123456,
 		EventingIngress:            "https://event.ingress.uri",
-		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		AppSecretCertificateEnvVar: "GITHUB_APP_SECRET",
 		Metrics:                    true,
 	}
 
