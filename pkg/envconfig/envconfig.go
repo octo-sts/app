@@ -18,6 +18,7 @@ type EnvConfig struct {
 	AppSecretCertificateFile   string `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
 	Metrics                    bool   `envconfig:"METRICS" required:"false" default:"true"`
+	WebhookSecret              string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"false"`
 }
 
 func Process() (*EnvConfig, error) {

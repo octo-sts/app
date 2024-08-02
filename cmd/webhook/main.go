@@ -17,20 +17,12 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
-	"github.com/kelseyhightower/envconfig"
-	"github.com/octo-sts/app/pkg/gcpkms"
+	envConfig "github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/webhook"
 )
-
-type envConfig struct {
-	Port          int    `envconfig:"PORT" required:"true" default:"8080"`
-	KMSKey        string `envconfig:"KMS_KEY" required:"true"`
-	AppID         int64  `envconfig:"GITHUB_APP_ID" required:"true"`
-	WebhookSecret string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"true"`
-}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -42,37 +34,42 @@ func main() {
 	// Setup tracing.
 	defer metrics.SetupTracer(ctx)()
 
-	var env envConfig
-	if err := envconfig.Process("", &env); err != nil {
+	env, err := envConfig.Process()
+	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
-	kms, err := kms.NewKeyManagementClient(ctx)
-	if err != nil {
-		log.Panicf("could not create kms client: %v", err)
+	var client *kms.KeyManagementClient
+
+	if env.KMSKey != "" {
+		client, err = kms.NewKeyManagementClient(ctx)
+		if err != nil {
+			log.Panicf("could not create kms client: %v", err)
+		}
 	}
-	signer, err := gcpkms.New(ctx, kms, env.KMSKey)
-	if err != nil {
-		log.Panicf("error creating signer: %v", err)
-	}
-	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
+
+	atr, err := ghtransport.New(ctx, env, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
 	webhookSecrets := [][]byte{}
-	secretmanager, err := secretmanager.NewClient(ctx)
-	if err != nil {
-		log.Panicf("could not create secret manager client: %v", err)
-	}
-	for _, name := range strings.Split(env.WebhookSecret, ",") {
-		resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-			Name: name,
-		})
+	if env.KMSKey != "" {
+		secretmanager, err := secretmanager.NewClient(ctx)
 		if err != nil {
-			log.Panicf("error fetching webhook secret %s: %v", name, err)
+			log.Panicf("could not create secret manager client: %v", err)
 		}
-		webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+		for _, name := range strings.Split(env.WebhookSecret, ",") {
+			resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+				Name: name,
+			})
+			if err != nil {
+				log.Panicf("error fetching webhook secret %s: %v", name, err)
+			}
+			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+		}
+	} else {
+		webhookSecrets = [][]byte{[]byte(env.WebhookSecret)}
 	}
 
 	mux := http.NewServeMux()
