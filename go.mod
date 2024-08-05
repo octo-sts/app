@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/secretmanager v1.13.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.10.1-0.20240507094914-84bb4cbb7874
 	github.com/chainguard-dev/clog v1.4.0
-	github.com/chainguard-dev/terraform-infra-common v0.6.60
+	github.com/chainguard-dev/terraform-infra-common v0.6.61
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/golang-jwt/jwt/v4 v4.5.0
@@ -17,7 +17,7 @@ require (
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
-	golang.org/x/oauth2 v0.21.0
+	golang.org/x/oauth2 v0.22.0
 	google.golang.org/api v0.190.0
 	google.golang.org/grpc v1.65.0
 	gopkg.in/yaml.v2 v2.4.0
@@ -87,7 +87,7 @@ require (
 	golang.org/x/sync v0.7.0 // indirect
 	golang.org/x/sys v0.22.0 // indirect
 	golang.org/x/text v0.16.0 // indirect
-	golang.org/x/time v0.5.0 // indirect
+	golang.org/x/time v0.6.0 // indirect
 	google.golang.org/genproto v0.0.0-20240730163845-b1a4ccb954bf // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20240725223205-93522f1f2a9f // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240730163845-b1a4ccb954bf // indirect
