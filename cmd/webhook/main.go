@@ -29,37 +29,43 @@ func main() {
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
-	go metrics.ServeMetrics()
-
-	// Setup tracing.
-	defer metrics.SetupTracer(ctx)()
-
-	env, err := envConfig.Process()
+	baseCfg, err := envConfig.BaseConfig()
+	if err != nil {
+		log.Panicf("failed to process env var: %s", err)
+	}
+	webhookConfig, err := envConfig.WebhookConfig()
 	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
+	if baseCfg.Metrics {
+		go metrics.ServeMetrics()
+
+		// Setup tracing.
+		defer metrics.SetupTracer(ctx)()
+	}
+
 	var client *kms.KeyManagementClient
 
-	if env.KMSKey != "" {
+	if baseCfg.KMSKey != "" {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, env, client)
+	atr, err := ghtransport.New(ctx, baseCfg, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
 	webhookSecrets := [][]byte{}
-	if env.KMSKey != "" {
+	if baseCfg.KMSKey != "" {
 		secretmanager, err := secretmanager.NewClient(ctx)
 		if err != nil {
 			log.Panicf("could not create secret manager client: %v", err)
 		}
-		for _, name := range strings.Split(env.WebhookSecret, ",") {
+		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
 			resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
 				Name: name,
 			})
@@ -69,7 +75,7 @@ func main() {
 			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
 		}
 	} else {
-		webhookSecrets = [][]byte{[]byte(env.WebhookSecret)}
+		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
 	}
 
 	mux := http.NewServeMux()
@@ -78,7 +84,7 @@ func main() {
 		WebhookSecret: webhookSecrets,
 	})
 	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", env.Port),
+		Addr:              fmt.Sprintf(":%d", baseCfg.Port),
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler:           mux,
 	}

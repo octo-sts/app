@@ -34,12 +34,10 @@ func TestGCPKMS(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
 	testConfig := &envconfig.EnvConfig{
-		Port:            8080,
-		Domain:          "example.com",
-		AppID:           123456,
-		EventingIngress: "https://event.ingress.uri",
-		KMSKey:          "test-kms-key",
-		Metrics:         true,
+		Port:    8080,
+		AppID:   123456,
+		KMSKey:  "test-kms-key",
+		Metrics: true,
 	}
 
 	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
@@ -56,9 +54,7 @@ func TestCertEnvVar(t *testing.T) {
 
 	testConfig := &envconfig.EnvConfig{
 		Port:                       8080,
-		Domain:                     "example.com",
 		AppID:                      123456,
-		EventingIngress:            "https://event.ingress.uri",
 		AppSecretCertificateEnvVar: "GITHUB_APP_SECRET",
 		Metrics:                    true,
 	}
@@ -75,9 +71,7 @@ func TestCertFile(t *testing.T) {
 
 	testConfig := &envconfig.EnvConfig{
 		Port:                     8080,
-		Domain:                   "example.com",
 		AppID:                    123456,
-		EventingIngress:          "https://event.ingress.uri",
 		AppSecretCertificateFile: generateTestCertificateFile(t),
 		Metrics:                  true,
 	}

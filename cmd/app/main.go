@@ -28,12 +28,16 @@ func main() {
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
-	env, err := envConfig.Process()
+	baseCfg, err := envConfig.BaseConfig()
+	if err != nil {
+		log.Panicf("failed to process env var: %s", err)
+	}
+	appConfig, err := envConfig.AppConfig()
 	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
-	if env.Metrics {
+	if baseCfg.Metrics {
 		go metrics.ServeMetrics()
 
 		// Setup tracing.
@@ -42,32 +46,32 @@ func main() {
 
 	var client *kms.KeyManagementClient
 
-	if env.KMSKey != "" {
+	if baseCfg.KMSKey != "" {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, env, client)
+	atr, err := ghtransport.New(ctx, baseCfg, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
 	d := duplex.New(
-		env.Port,
+		baseCfg.Port,
 		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		// grpc.ChainStreamInterceptor(grpc_prometheus.StreamServerInterceptor),
 		// grpc.ChainUnaryInterceptor(grpc_prometheus.UnaryServerInterceptor, interceptors.ServerErrorInterceptor),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, env.EventingIngress)...)
+	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
 	if err != nil {
 		log.Panicf("failed to create cloudevents client: %v", err)
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, env.Domain, env.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
