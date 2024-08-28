@@ -119,7 +119,6 @@ func createGCPKMSCredsFile(t *testing.T) string {
 	if err := tmpFile.Close(); err != nil {
 		t.Fatalf("Failed to close temporary file: %s", err)
 	}
-	t.Logf(tmpFile.Name())
 	return tmpFile.Name()
 }
 
