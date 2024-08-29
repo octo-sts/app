@@ -59,6 +59,9 @@ func main() {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
+	// Fetch webhook secrets from secret manager
+	// or allow webhook secret to be defined by env var.
+	// Not everyone is using Google KMS, so we need to support other methods
 	webhookSecrets := [][]byte{}
 	if baseCfg.KMSKey != "" {
 		secretmanager, err := secretmanager.NewClient(ctx)
