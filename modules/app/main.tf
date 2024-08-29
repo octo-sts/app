@@ -149,6 +149,9 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
       -- Skip operations that are a part of terraform plan
       -protoPayload.methodName=("GetCryptoKey")
 
+      -- Skip operations done by some infra scanners, which are harmless.
+      -protoPayload.methodName=("GetIamPolicy")
+
       -- The application itself should only perform signing operations.
       -(
         protoPayload.authenticationInfo.principalEmail="${google_service_account.octo-sts.email}" AND
