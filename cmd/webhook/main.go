@@ -17,62 +17,68 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
-	"github.com/kelseyhightower/envconfig"
-	"github.com/octo-sts/app/pkg/gcpkms"
+	envConfig "github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/webhook"
 )
-
-type envConfig struct {
-	Port          int    `envconfig:"PORT" required:"true" default:"8080"`
-	KMSKey        string `envconfig:"KMS_KEY" required:"true"`
-	AppID         int64  `envconfig:"GITHUB_APP_ID" required:"true"`
-	WebhookSecret string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"true"`
-}
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
-	go metrics.ServeMetrics()
-
-	// Setup tracing.
-	defer metrics.SetupTracer(ctx)()
-
-	var env envConfig
-	if err := envconfig.Process("", &env); err != nil {
+	baseCfg, err := envConfig.BaseConfig()
+	if err != nil {
+		log.Panicf("failed to process env var: %s", err)
+	}
+	webhookConfig, err := envConfig.WebhookConfig()
+	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
-	kms, err := kms.NewKeyManagementClient(ctx)
-	if err != nil {
-		log.Panicf("could not create kms client: %v", err)
+	if baseCfg.Metrics {
+		go metrics.ServeMetrics()
+
+		// Setup tracing.
+		defer metrics.SetupTracer(ctx)()
 	}
-	signer, err := gcpkms.New(ctx, kms, env.KMSKey)
-	if err != nil {
-		log.Panicf("error creating signer: %v", err)
+
+	var client *kms.KeyManagementClient
+
+	if baseCfg.KMSKey != "" {
+		client, err = kms.NewKeyManagementClient(ctx)
+		if err != nil {
+			log.Panicf("could not create kms client: %v", err)
+		}
 	}
-	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
+
+	atr, err := ghtransport.New(ctx, baseCfg, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
+	// Fetch webhook secrets from secret manager
+	// or allow webhook secret to be defined by env var.
+	// Not everyone is using Google KMS, so we need to support other methods
 	webhookSecrets := [][]byte{}
-	secretmanager, err := secretmanager.NewClient(ctx)
-	if err != nil {
-		log.Panicf("could not create secret manager client: %v", err)
-	}
-	for _, name := range strings.Split(env.WebhookSecret, ",") {
-		resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-			Name: name,
-		})
+	if baseCfg.KMSKey != "" {
+		secretmanager, err := secretmanager.NewClient(ctx)
 		if err != nil {
-			log.Panicf("error fetching webhook secret %s: %v", name, err)
+			log.Panicf("could not create secret manager client: %v", err)
 		}
-		webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
+			resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
+				Name: name,
+			})
+			if err != nil {
+				log.Panicf("error fetching webhook secret %s: %v", name, err)
+			}
+			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+		}
+	} else {
+		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
 	}
 
 	mux := http.NewServeMux()
@@ -81,7 +87,7 @@ func main() {
 		WebhookSecret: webhookSecrets,
 	})
 	srv := &http.Server{
-		Addr:              fmt.Sprintf(":%d", env.Port),
+		Addr:              fmt.Sprintf(":%d", baseCfg.Port),
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler:           mux,
 	}

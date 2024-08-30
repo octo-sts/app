@@ -11,17 +11,47 @@ import (
 
 type EnvConfig struct {
 	Port                       int    `envconfig:"PORT" required:"true"`
-	Domain                     string `envconfig:"STS_DOMAIN" required:"true"`
 	KMSKey                     string `envconfig:"KMS_KEY" required:"false"`
 	AppID                      int64  `envconfig:"GITHUB_APP_ID" required:"true"`
-	EventingIngress            string `envconfig:"EVENT_INGRESS_URI" required:"true"`
 	AppSecretCertificateFile   string `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
 	Metrics                    bool   `envconfig:"METRICS" required:"false" default:"true"`
 }
 
-func Process() (*EnvConfig, error) {
+type EnvConfigApp struct {
+	Domain          string `envconfig:"STS_DOMAIN" required:"true"`
+	EventingIngress string `envconfig:"EVENT_INGRESS_URI" required:"true"`
+}
+
+type EnvConfigWebhook struct {
+	WebhookSecret string `envconfig:"WEBHOOK_SECRET" required:"true"`
+}
+
+func AppConfig() (*EnvConfigApp, error) {
+	cfg := new(EnvConfigApp)
+
+	var err error
+	if err = envconfig.Process("", cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, err
+}
+
+func WebhookConfig() (*EnvConfigWebhook, error) {
+	cfg := new(EnvConfigWebhook)
+
+	var err error
+	if err = envconfig.Process("", cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, err
+}
+
+func BaseConfig() (*EnvConfig, error) {
 	cfg := new(EnvConfig)
+
 	var err error
 	if err = envconfig.Process("", cfg); err != nil {
 		return nil, err
