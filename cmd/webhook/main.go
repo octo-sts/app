@@ -81,10 +81,18 @@ func main() {
 		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
 	}
 
+	var orgs []string
+	for _, s := range strings.Split(webhookConfig.OrganizationFilter, ",") {
+		if o := strings.TrimSpace(s); o != "" {
+			orgs = append(orgs, o)
+		}
+	}
+
 	mux := http.NewServeMux()
 	mux.Handle("/", &webhook.Validator{
 		Transport:     atr,
 		WebhookSecret: webhookSecrets,
+		Organizations: orgs,
 	})
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", baseCfg.Port),
