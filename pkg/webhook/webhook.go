@@ -20,8 +20,8 @@ import (
 	"github.com/google/go-github/v61/github"
 	"github.com/hashicorp/go-multierror"
 	"github.com/octo-sts/app/pkg/octosts"
-	"gopkg.in/yaml.v2"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -132,7 +132,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 		return nil, nil
 	}
 
-	err := e.validatePolicies(ctx, client, owner, repo, sha, files)
+	err := validatePolicies(ctx, client, owner, repo, sha, files)
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
 	// failure.
@@ -167,7 +167,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	return cr, nil
 }
 
-func (e *Validator) validatePolicies(ctx context.Context, client *github.Client, owner, repo string, sha string, files []string) error {
+func validatePolicies(ctx context.Context, client *github.Client, owner, repo string, sha string, files []string) error {
 	var merr error
 	for _, f := range sets.List(sets.New(files...)) {
 		log := clog.FromContext(ctx).With("path", f)

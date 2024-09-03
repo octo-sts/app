@@ -1,0 +1,18 @@
+{
+  "name": "verify-prod.sts.yaml",
+  "path": ".github/chainguard/verify-prod.sts.yaml",
+  "sha": "9f4890d268e2ad02d4171e131018597a7651f61e",
+  "size": 284,
+  "url": "https://api.github.com/repos/octo-sts/app/contents/.github/chainguard/verify-prod.sts.yaml?ref=main",
+  "html_url": "https://github.com/octo-sts/app/blob/main/.github/chainguard/verify-prod.sts.yaml",
+  "git_url": "https://api.github.com/repos/octo-sts/app/git/blobs/9f4890d268e2ad02d4171e131018597a7651f61e",
+  "download_url": "https://raw.githubusercontent.com/octo-sts/app/main/.github/chainguard/verify-prod.sts.yaml",
+  "type": "file",
+  "content": "IyBDb3B5cmlnaHQgMjAyNCBDaGFpbmd1YXJkLCBJbmMuCiMgU1BEWC1MaWNl\nbnNlLUlkZW50aWZpZXI6IEFwYWNoZS0yLjAKCmlzc3VlcjogaHR0cHM6Ly90\nb2tlbi5hY3Rpb25zLmdpdGh1YnVzZXJjb250ZW50LmNvbQpzdWJqZWN0OiBy\nZXBvOm9jdG8tc3RzL2FwcDpwdWxsX3JlcXVlc3QKY2xhaW1fcGF0dGVybjoK\nICB3b3JrZmxvd19yZWY6IG9jdG8tc3RzL2FwcC8uZ2l0aHViL3dvcmtmbG93\ncy92ZXJpZnktcHJvZC55YW1sQC4qCgpwZXJtaXNzaW9uczoKICBwdWxsX3Jl\ncXVlc3RzOiB3cml0ZQo=\n",
+  "encoding": "base64",
+  "_links": {
+    "self": "https://api.github.com/repos/octo-sts/app/contents/.github/chainguard/verify-prod.sts.yaml?ref=main",
+    "git": "https://api.github.com/repos/octo-sts/app/git/blobs/9f4890d268e2ad02d4171e131018597a7651f61e",
+    "html": "https://github.com/octo-sts/app/blob/main/.github/chainguard/verify-prod.sts.yaml"
+  }
+}
