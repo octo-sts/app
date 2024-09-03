@@ -55,3 +55,9 @@ variable "notification_channels" {
   description = "List of notification channels to alert."
   type        = list(string)
 }
+
+variable "github_webhook_organization_filter" {
+  description = "The organizations to filter webhook events on (comma separated)."
+  type        = string
+  default     = ""
+}

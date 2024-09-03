@@ -46,6 +46,10 @@ module "webhook" {
           value = module.webhook-secret.secret_version_id
         },
         {
+          name  = "GITHUB_WEBHOOK_ORGANIZATION_FILTER"
+          value = var.github_webhook_organization_filter
+        },
+        {
           name  = "KMS_KEY"
           value = local.kms_key
         }

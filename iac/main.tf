@@ -66,4 +66,6 @@ module "app" {
   github_app_id          = var.github_app_id
   github_app_key_version = 1
   notification_channels  = local.notification_channels
+  // Testing out behavior, will remove once we confirm things are working.
+  github_webhook_organization_filter = "octo-sts,chainguard-dev"
 }

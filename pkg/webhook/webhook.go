@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -41,6 +42,8 @@ type Validator struct {
 	// Store multiple secrets to allow for rolling updates.
 	// Only one needs to match for the event to be considered valid.
 	WebhookSecret [][]byte
+
+	Organizations []string
 }
 
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -217,6 +220,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	sha := event.GetAfter()
 	installationID := event.GetInstallation().GetID()
 
+	// Skip if the organization is not in the list of organizations to validate.
+	if e.shouldSkipOrganization(owner) {
+		log.Infof("skipping organization %s", owner)
+		return nil, nil
+	}
+
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
@@ -255,6 +264,12 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	repo := pr.GetRepo().GetName()
 	sha := pr.GetPullRequest().GetHead().GetSHA()
 	installationID := pr.GetInstallation().GetID()
+
+	// Skip if the organization is not in the list of organizations to validate.
+	if e.shouldSkipOrganization(owner) {
+		log.Infof("skipping organization %s", owner)
+		return nil, nil
+	}
 
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
@@ -302,6 +317,12 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	repo := cs.GetRepo().GetName()
 	sha := cs.GetCheckSuite().GetHeadSHA()
 	installationID := cs.GetInstallation().GetID()
+
+	// Skip if the organization is not in the list of organizations to validate.
+	if e.shouldSkipOrganization(owner) {
+		log.Infof("skipping organization %s", owner)
+		return nil, nil
+	}
 
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
@@ -354,4 +375,16 @@ var _ checkSuite = (*fauxCheckSuite)(nil)
 
 func (f *fauxCheckSuite) GetCheckSuite() *github.CheckSuite {
 	return f.GetCheckRun().GetCheckSuite()
+}
+
+func (e *Validator) shouldSkipOrganization(org string) bool {
+	if len(e.Organizations) == 0 {
+		return false
+	}
+	for _, o := range e.Organizations {
+		if strings.EqualFold(o, org) {
+			return false
+		}
+	}
+	return true
 }
