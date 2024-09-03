@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -370,7 +371,7 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 		return false
 	}
 	for _, o := range e.Organizations {
-		if o == org {
+		if strings.EqualFold(o, org) {
 			return false
 		}
 	}
