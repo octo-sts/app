@@ -82,7 +82,7 @@ we will migth make a new release.
 ### Permission updates
 
 Sometimes we need to add or remove a GitHub Permission in order to add/remove permissions that will be include in the
-octo-sts token for the users.
+octo-sts token for the users. Due to the nature of GitHub Apps, OctoSTS must request all permissions it might need to use, even if you don't want to use them for your particular installation or policy.
 
 To avoid disruptions for the users, making them to review and approve the changes in the installed GitHub App we
 will apply permissions changes for the `octo-sts app` quarterly at any day during the quarter.
