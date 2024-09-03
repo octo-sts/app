@@ -77,7 +77,7 @@ policy.
 ### Release cadence
 
 Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
-we will migth make a new release.
+we will might make a new release.
 
 ### Permission updates
 
