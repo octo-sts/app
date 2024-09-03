@@ -150,14 +150,14 @@ func TestWebhookConfig(t *testing.T) {
 		{
 			name: "No environment variables set",
 			envVars: map[string]string{
-				"WEBHOOK_SECRET": "",
+				"GITHUB_WEBHOOK_SECRET": "",
 			},
 			wantErr: false,
 		},
 		{
 			name: "All environment variables set",
 			envVars: map[string]string{
-				"WEBHOOK_SECRET": "octo-sts-test.local",
+				"GITHUB_WEBHOOK_SECRET": "octo-sts-test.local",
 			},
 			wantErr: false,
 		},
