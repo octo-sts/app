@@ -24,7 +24,7 @@ type EnvConfigApp struct {
 }
 
 type EnvConfigWebhook struct {
-	WebhookSecret string `envconfig:"WEBHOOK_SECRET" required:"true"`
+	WebhookSecret string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"true"`
 	// If set, only process events from these organizations (comma separated).
 	OrganizationFilter string `envconfig:"GITHUB_ORGANIZATION_FILTER"`
 }
