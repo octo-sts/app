@@ -21,7 +21,9 @@ import (
 	"testing"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
+	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v61/github"
 )
 
@@ -47,7 +49,7 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.TestContextWithLogger(t)
-	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{"policy.json"}); err != nil {
+	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -74,7 +76,6 @@ func TestOrgFilter(t *testing.T) {
 		WebhookSecret: [][]byte{secret},
 		Organizations: []string{"foo"},
 	}
-
 	srv := httptest.NewServer(v)
 	defer srv.Close()
 
@@ -126,4 +127,107 @@ func signature(secret, body []byte) string {
 	b := mac.Sum(nil)
 
 	return fmt.Sprintf("sha256=%s", hex.EncodeToString(b))
+}
+
+func TestWebhookOK(t *testing.T) {
+	// CheckRuns will be collected here.
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			clog.FromContext(r.Context()).Errorf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Organization: &github.Organization{
+			Login: github.String("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.String("foo"),
+			},
+			Name: github.String("bar"),
+		},
+		Before: github.String("1234"),
+		After:  github.String("5678"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.TestContextWithLogger(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", 200, string(out))
+	}
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+
+	want := []*github.CreateCheckRunOptions{{
+		Name:       "Trust Policy Validation",
+		HeadSHA:    "5678",
+		ExternalID: github.String("5678"),
+		Status:     github.String("completed"),
+		Conclusion: github.String("success"),
+		// Use time from the response to ignore it.
+		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
+		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
+		Output: &github.CheckRunOutput{
+			Title:   github.String("Valid trust policy."),
+			Summary: github.String(""),
+		},
+	}}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Fatalf("unexpected check run (-want +got):\n%s", diff)
+	}
 }
