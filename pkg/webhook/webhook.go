@@ -136,13 +136,14 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
 	// failure.
-	var conclusion, title string
+	var conclusion, title, summary string
 	if err == nil {
 		conclusion = "success"
 		title = "Valid trust policy."
 	} else {
 		conclusion = "failure"
 		title = "Invalid trust policy."
+		summary = "Failed to validate trust policy.\n\n" + err.Error()
 	}
 
 	opts := github.CreateCheckRunOptions{
@@ -155,7 +156,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 		CompletedAt: &github.Timestamp{Time: time.Now()},
 		Output: &github.CheckRunOutput{
 			Title:   github.String(title),
-			Summary: github.String(err.Error()),
+			Summary: github.String(summary),
 		},
 	}
 
@@ -229,6 +230,13 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
+	if e.Transport.BaseURL != "" {
+		var err error
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Check diff
 	// TODO: Pagination?
@@ -236,6 +244,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	if err != nil {
 		return nil, err
 	}
+	log.Infof("%+v\n%+v", resp, resp.Files)
 	var files []string
 	for _, file := range resp.Files {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
@@ -274,6 +283,13 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
+	if e.Transport.BaseURL != "" {
+		var err error
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// Check diff
 	var files []string
@@ -327,6 +343,13 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	client := github.NewClient(&http.Client{
 		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
+	if e.Transport.BaseURL != "" {
+		var err error
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var files []string
 	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
