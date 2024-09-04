@@ -178,6 +178,9 @@ func TestWebhookOK(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Int64(1111),
+		},
 		Organization: &github.Organization{
 			Login: github.String("foo"),
 		},
