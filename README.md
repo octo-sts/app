@@ -73,3 +73,21 @@ The App will attempt to load the trust policy from
 `.github/chainguard/${NAME}.sts.yaml` from `${REPO}` and if the provided `${TOKEN}`
 satisfies those rules, it will return a token with the permissions in the trust
 policy.
+
+### Release cadence
+
+Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
+we will might make a new release.
+
+### Permission updates
+
+Sometimes we need to add or remove a GitHub Permission in order to add/remove permissions that will be include in the
+octo-sts token for the users. Due to the nature of GitHub Apps, OctoSTS must request all permissions it might need to use, even if you don't want to use them for your particular installation or policy.
+
+To avoid disruptions for the users, making them to review and approve the changes in the installed GitHub App we
+will apply permissions changes for the `octo-sts app` quarterly at any day during the quarter.
+
+An issue will be created to explain what permissions is being added or removed.
+
+Special cases will be discussed in a GitHub issue in https://github.com/octo-sts/app/issues and we might apply more than
+one change during the quarter.
