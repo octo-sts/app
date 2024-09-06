@@ -19,6 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-github/v61/github"
 	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
@@ -39,12 +40,17 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+type AllowedOrgs struct {
+	Org string
+}
+
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, orgs string) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
+		orgs:     orgs,
 	}
 }
 
@@ -61,6 +67,7 @@ type sts struct {
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
+	orgs     string
 }
 
 type cacheTrustPolicyKey struct {
@@ -117,6 +124,29 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	p, err := provider.Get(ctx, issuer)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
+	}
+
+	parsedToken, err := jwt.Parse(bearer, nil)
+	if parsedToken == nil {
+		return nil, err
+	}
+	claims, _ := parsedToken.Claims.(jwt.MapClaims)
+
+	orgs := strings.Split(s.orgs, ",")
+
+	if len(orgs) > 0 {
+		repositoryOwner := claims["repository_owner"].(string)
+		isValidOwner := false
+		for _, org := range orgs {
+			if org == repositoryOwner {
+				isValidOwner = true
+				break
+			}
+		}
+
+		if !isValidOwner {
+			return nil, status.Errorf(codes.PermissionDenied, "invalid repository owner")
+		}
 	}
 
 	verifier := p.Verifier(&oidc.Config{
