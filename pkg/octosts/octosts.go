@@ -40,10 +40,6 @@ const (
 	maxRetry   = 3
 )
 
-type AllowedOrgs struct {
-	Org string
-}
-
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, orgs string) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
