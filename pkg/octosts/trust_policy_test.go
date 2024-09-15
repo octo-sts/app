@@ -4,7 +4,9 @@
 package octosts
 
 import (
+	"reflect"
 	"testing"
+	"unsafe"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
@@ -107,6 +109,7 @@ func TestCheckToken(t *testing.T) {
 		name    string
 		tp      *TrustPolicy
 		token   *oidc.IDToken
+		claims  []byte
 		wantErr bool
 	}{{
 		name: "valid token",
@@ -273,35 +276,141 @@ func TestCheckToken(t *testing.T) {
 		},
 		wantErr: false,
 	}, {
-		name: "support boolean claims",
+		name: "matching boolean claims",
 		tp: &TrustPolicy{
 			Issuer:  "https://example.com",
 			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email_verified": "true",
+			},
 		},
 		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email_verified": true}`),
+		wantErr: false,
+	}, {
+		name: "matching custom claim",
+		tp: &TrustPolicy{
 			Issuer:  "https://example.com",
 			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email": ".*@example.com",
+			},
 		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email": "test@example.com"}`),
 		wantErr: false,
+	}, {
+		name: "matching multiple custom claim",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email":  ".*@example.com",
+				"domain": ".*\\.net",
+			},
+		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email": "test@example.com", "domain": "example.net", "extra": "extra"}`),
+		wantErr: false,
+	}, {
+		name: "missing custom claim",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email_verified": "true",
+				"email":          ".*@example.com",
+			},
+		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email_verified": true}`),
+		wantErr: true,
+	}, {
+		name: "number custom claim",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"age": "\\d+",
+			},
+		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"age": 21}`),
+		wantErr: true,
+	}, {
+		name: "mismatching custom claim",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email": ".*@example.com",
+			},
+		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email": "test@example.dev"}`),
+		wantErr: true,
+	}, {
+		name: "mismatching one of multiple custom claim",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "blah",
+			ClaimPattern: map[string]string{
+				"email":  ".*@example.com",
+				"domain": ".*\\.net",
+			},
+		},
+		token: &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  "blah",
+			Audience: []string{"octo-sts.dev"},
+		},
+		claims:  []byte(`{"email": "test@example.dev", "domain": "example.net"}`),
+		wantErr: true,
 	}}
-
-	// TODO(mattmoor): Figure out how to test custom claims with IDToken.
-	// - Test for extra custom claims,
-	// - Test for matching a custom claim,
-	// - Test for mismatching a custom claim,
-	// - Test for matching multiple custom claims,
-	// - Test for mismatching one of several custom claims.
-	// - Test for a non-string custom claim.
-	// - Test for a boolean claim.
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if err := tt.tp.Compile(); err != nil {
 				t.Fatalf("Compile() = %v", err)
 			}
+			withClaims(tt.token, tt.claims)
 			if _, err := tt.tp.CheckToken(tt.token, "octo-sts.dev"); (err != nil) != tt.wantErr {
 				t.Errorf("CheckToken() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}
+}
+
+// reflect hack because "claims" field is unexported by oidc IDToken
+// https://github.com/coreos/go-oidc/pull/329
+func withClaims(token *oidc.IDToken, data []byte) {
+	val := reflect.Indirect(reflect.ValueOf(token))
+	member := val.FieldByName("claims")
+	pointer := unsafe.Pointer(member.UnsafeAddr())
+	realPointer := (*[]byte)(pointer)
+	*realPointer = data
 }
