@@ -120,7 +120,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	verifier := p.Verifier(&oidc.Config{
-		ClientID: s.domain,
+		// The audience is verified later on by the trust policy.
+		SkipClientIDCheck: true,
 	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
@@ -140,7 +141,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
 
 	// Check the token against the federation rules.
-	e.Actor, err = e.TrustPolicy.CheckToken(tok)
+	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
 	if err != nil {
 		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
 		return nil, err
