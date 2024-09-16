@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v61/github"
@@ -20,6 +21,10 @@ type TrustPolicy struct {
 	Subject        string         `json:"subject,omitempty"`
 	SubjectPattern string         `json:"subject_pattern,omitempty"`
 	subjectPattern *regexp.Regexp `json:"-"`
+
+	Audience        string         `json:"audience,omitempty"`
+	AudiencePattern string         `json:"audience_pattern,omitempty"`
+	audiencePattern *regexp.Regexp `json:"-"`
 
 	ClaimPattern map[string]string         `json:"claim_pattern,omitempty"`
 	claimPattern map[string]*regexp.Regexp `json:"-"`
@@ -70,6 +75,18 @@ func (tp *TrustPolicy) Compile() error {
 		tp.subjectPattern = r
 	}
 
+	// Check that we got oneof Audience[Pattern] or none.
+	switch {
+	case tp.Audience != "" && tp.AudiencePattern != "":
+		return errors.New("trust policy: only one of audience or audience_pattern can be set, got both")
+	case tp.AudiencePattern != "":
+		r, err := regexp.Compile("^" + tp.AudiencePattern + "$")
+		if err != nil {
+			return err
+		}
+		tp.audiencePattern = r
+	}
+
 	// Compile the claim patterns.
 	tp.claimPattern = make(map[string]*regexp.Regexp, len(tp.ClaimPattern))
 	for k, v := range tp.ClaimPattern {
@@ -86,7 +103,7 @@ func (tp *TrustPolicy) Compile() error {
 }
 
 // CheckToken checks the token against the trust policy.
-func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
+func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, error) {
 	act := Actor{
 		Issuer:  token.Issuer,
 		Subject: token.Subject,
@@ -130,6 +147,33 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
 		return act, fmt.Errorf("trust policy: no subject or subject_pattern set")
 	}
 
+	// Check the audience.
+	switch {
+	case tp.audiencePattern != nil:
+		// Check that the audience pattern matches at least one of the token's audiences.
+		found := false
+		for _, aud := range token.Audience {
+			if tp.audiencePattern.MatchString(aud) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return act, fmt.Errorf("trust policy: audience_pattern %q did not match any of %q", tp.AudiencePattern, token.Audience)
+		}
+
+	case tp.Audience != "":
+		if !slices.Contains(token.Audience, tp.Audience) {
+			return act, fmt.Errorf("trust policy: audience %q did not match any of %q", tp.Audience, token.Audience)
+		}
+
+	default:
+		// If `audience` or `audience_pattern` is not provided, we fall back to the domain.
+		if !slices.Contains(token.Audience, domain) {
+			return act, fmt.Errorf("trust policy: audience %q did not match any of %q", domain, token.Audience)
+		}
+	}
+
 	// Check the claims.
 	if len(tp.claimPattern) != 0 {
 		customClaims := make(map[string]interface{})
@@ -140,6 +184,15 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken) (Actor, error) {
 			raw, ok := customClaims[k]
 			if !ok {
 				return act, fmt.Errorf("trust policy: expected claim %q not found in token", k)
+			}
+
+			// Convert bool claims into a string
+			boolVal, ok := raw.(bool)
+			if ok {
+				raw = "false"
+				if boolVal {
+					raw = "true"
+				}
 			}
 			val, ok := raw.(string)
 			if !ok {
