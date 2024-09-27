@@ -45,7 +45,7 @@ jobs:
     # Attempt to deploy the terraform configuration
     - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v2.0.0
       with:
-        terraform_version: 1.6
+        terraform_version: 1.9
 
     - working-directory: ./iac
       run: |
