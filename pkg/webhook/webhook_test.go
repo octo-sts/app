@@ -48,7 +48,7 @@ func TestValidatePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx := slogtest.TestContextWithLogger(t)
+	ctx := slogtest.Context(t)
 	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestOrgFilter(t *testing.T) {
 			req.Header.Set("X-Hub-Signature", signature(secret, body))
 			req.Header.Set("X-GitHub-Event", "push")
 			req.Header.Set("Content-Type", "application/json")
-			resp, err := srv.Client().Do(req.WithContext(slogtest.TestContextWithLogger(t)))
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -203,7 +203,7 @@ func TestWebhookOK(t *testing.T) {
 	req.Header.Set("X-Hub-Signature", signature(secret, body))
 	req.Header.Set("X-GitHub-Event", "push")
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := srv.Client().Do(req.WithContext(slogtest.TestContextWithLogger(t)))
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
