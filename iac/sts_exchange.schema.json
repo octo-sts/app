@@ -59,6 +59,11 @@
           "mode": "NULLABLE"
         },
         {
+            "name": "audience",
+            "type": "STRING",
+            "mode": "NULLABLE"
+        },
+        {
             "name": "audience_pattern",
             "type": "STRING",
             "mode": "NULLABLE"
