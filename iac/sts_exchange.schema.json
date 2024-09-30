@@ -79,6 +79,11 @@
                 "mode": "NULLABLE"
             },
             {
+                "name": "email_verified",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
                 "name": "actor",
                 "type": "STRING",
                 "mode": "NULLABLE"
