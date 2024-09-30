@@ -59,6 +59,11 @@
           "mode": "NULLABLE"
         },
         {
+            "name": "audience_pattern",
+            "type": "STRING",
+            "mode": "NULLABLE"
+        },
+        {
           "name": "claim_pattern",
           "type": "RECORD",
           "mode": "NULLABLE",
