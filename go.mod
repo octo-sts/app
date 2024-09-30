@@ -6,7 +6,7 @@ require (
 	chainguard.dev/go-grpc-kit v0.17.6
 	chainguard.dev/sdk v0.1.25
 	cloud.google.com/go/kms v1.19.0
-	cloud.google.com/go/secretmanager v1.14.0
+	cloud.google.com/go/secretmanager v1.14.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.10.1-0.20240507094914-84bb4cbb7874
 	github.com/chainguard-dev/clog v1.5.1-0.20240811185937-4c523ae4593f
 	github.com/chainguard-dev/terraform-infra-common v0.6.85
@@ -21,7 +21,7 @@ require (
 	golang.org/x/oauth2 v0.23.0
 	google.golang.org/api v0.198.0
 	google.golang.org/grpc v1.67.0
-	k8s.io/apimachinery v0.31.0
+	k8s.io/apimachinery v0.31.1
 	sigs.k8s.io/yaml v1.4.0
 )
 
