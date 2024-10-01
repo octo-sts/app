@@ -77,6 +77,8 @@ module "this" {
   name       = var.name
   regions    = var.regions
 
+  deletion_protection = var.deletion_protection
+
   // Only accept traffic coming from GCLB.
   ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
   // This needs to egress in order to talk to Github

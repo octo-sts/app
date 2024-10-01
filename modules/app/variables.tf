@@ -15,6 +15,12 @@ variable "regions" {
   }))
 }
 
+variable "deletion_protection" {
+  type        = bool
+  description = "Whether to enable delete protection for the service."
+  default     = true
+}
+
 variable "private-services" {
   description = "The names of the private services this module depends on."
   type = object({
