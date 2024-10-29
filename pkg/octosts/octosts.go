@@ -134,16 +134,30 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
+	orgRequest := createOrgScope(request)
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, request.Identity)
+	if err != nil {
+		return nil, err
+	}
+	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
+
+	// Check the token against the organization federation rules.
+	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
+	if err != nil {
+		clog.FromContext(ctx).Warnf("token does not match org trust policy: %v", err)
+		return nil, err
+	}
+
 	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
 		return nil, err
 	}
 	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
 
-	// Check the token against the federation rules.
+	// Check the token against the repository federation rules.
 	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
 	if err != nil {
-		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
+		clog.FromContext(ctx).Warnf("token does not match repo trust policy: %v", err)
 		return nil, err
 	}
 
@@ -185,6 +199,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	return &pboidc.RawToken{
 		Token: token,
 	}, nil
+}
+
+func createOrgScope(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
+    orgRequest := request
+    base := path.Base(request.Scope)
+    newBase := ".github"
+    orgRequest.Scope = strings.Replace(request.Scope, base, newBase, 1)
+    return orgRequest
 }
 
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
