@@ -39,12 +39,13 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, orgTrustPolicy bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		atr:      atr,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
+		orgTrustPolicy: orgTrustPolicy,
 	}
 }
 
@@ -61,6 +62,7 @@ type sts struct {
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
+	orgTrustPolicy  bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -134,25 +136,29 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
-	orgRequest := createOrgScope(request)
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, request.Identity)
-	if err != nil {
-		return nil, err
-	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
+	if s.orgTrustPolicy {
+		orgRequest := createOrgScope(request)
+		clog.FromContext(ctx).Infof("org exchange request: %#v", orgRequest)
+		e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, request.Identity)
+		if err != nil {
+			return nil, err
+		}
+		clog.FromContext(ctx).Infof("org trust policy: %#v", e.TrustPolicy)
 
-	// Check the token against the organization federation rules.
-	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
-	if err != nil {
-		clog.FromContext(ctx).Warnf("token does not match org trust policy: %v", err)
-		return nil, err
+		// Check the token against the organization federation rules.
+		e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
+		if err != nil {
+			clog.FromContext(ctx).Warnf("token does not match org trust policy: %v", err)
+			return nil, err
+		}
 	}
 
+	clog.FromContext(ctx).Infof("repo exchange request: %#v", request)
 	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
 		return nil, err
 	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
+	clog.FromContext(ctx).Infof("repo trust policy: %#v", e.TrustPolicy)
 
 	// Check the token against the repository federation rules.
 	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
