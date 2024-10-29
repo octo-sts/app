@@ -37,6 +37,10 @@ func main() {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
+	if baseCfg.OrgTrustPolicy {
+		clog.FromContext(ctx).Infof("Required Org Policy Active")
+	}
+
 	if baseCfg.Metrics {
 		go metrics.ServeMetrics()
 
