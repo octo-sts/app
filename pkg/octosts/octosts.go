@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -137,7 +138,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	if s.orgTrustPolicy {
-		orgRequest := createOrgScope(request)
+		var orgRequest *pboidc.ExchangeRequest
+		err := deepCopy(&request, &orgRequest)
+		createOrgScope(orgRequest)
 		clog.FromContext(ctx).Infof("org exchange request: %#v", orgRequest)
 		e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, request.Identity)
 		if err != nil {
@@ -205,6 +208,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	return &pboidc.RawToken{
 		Token: token,
 	}, nil
+}
+
+func deepCopy(src **pboidc.ExchangeRequest, dst **pboidc.ExchangeRequest) error {
+	bytes, err := json.Marshal(src)
+	if err != nil {
+	 return err
+	}
+	return json.Unmarshal(bytes, dst)
 }
 
 func createOrgScope(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
