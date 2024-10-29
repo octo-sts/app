@@ -42,10 +42,10 @@ const (
 
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, orgTrustPolicy bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		atr:      atr,
-		ceclient: ceclient,
-		domain:   domain,
-		metrics:  metrics,
+		atr:            atr,
+		ceclient:       ceclient,
+		domain:         domain,
+		metrics:        metrics,
 		orgTrustPolicy: orgTrustPolicy,
 	}
 }
@@ -59,11 +59,11 @@ var (
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
-	ceclient cloudevents.Client
-	domain   string
-	metrics  bool
-	orgTrustPolicy  bool
+	atr            *ghinstallation.AppsTransport
+	ceclient       cloudevents.Client
+	domain         string
+	metrics        bool
+	orgTrustPolicy bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -216,17 +216,17 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 func deepCopy(src **pboidc.ExchangeRequest, dst **pboidc.ExchangeRequest) error {
 	bytes, err := json.Marshal(src)
 	if err != nil {
-	 return err
+		return err
 	}
 	return json.Unmarshal(bytes, dst)
 }
 
 func createOrgRequest(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
-    base := path.Base(request.Scope)
-    newBase := ".github"
+	base := path.Base(request.Scope)
+	newBase := ".github"
 	request.Identity = "org"
-    request.Scope = strings.Replace(request.Scope, base, newBase, 1)
-    return request
+	request.Scope = strings.Replace(request.Scope, base, newBase, 1)
+	return request
 }
 
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
