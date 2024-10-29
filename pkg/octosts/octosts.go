@@ -140,7 +140,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if s.orgTrustPolicy {
 		var orgRequest *pboidc.ExchangeRequest
 		err := deepCopy(&request, &orgRequest)
-		createOrgScope(orgRequest)
+		createOrgRequest(orgRequest)
 		clog.FromContext(ctx).Infof("org exchange request: %#v", orgRequest)
 		e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, request.Identity)
 		if err != nil {
@@ -218,12 +218,12 @@ func deepCopy(src **pboidc.ExchangeRequest, dst **pboidc.ExchangeRequest) error 
 	return json.Unmarshal(bytes, dst)
 }
 
-func createOrgScope(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
-    orgRequest := request
+func createOrgRequest(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
     base := path.Base(request.Scope)
     newBase := ".github"
-    orgRequest.Scope = strings.Replace(request.Scope, base, newBase, 1)
-    return orgRequest
+	request.Identity = "org"
+    request.Scope = strings.Replace(request.Scope, base, newBase, 1)
+    return request
 }
 
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
