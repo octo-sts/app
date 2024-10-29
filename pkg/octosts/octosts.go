@@ -140,6 +140,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if s.orgTrustPolicy {
 		var orgRequest *pboidc.ExchangeRequest
 		err := deepCopy(&request, &orgRequest)
+		if err != nil {
+			return nil, err
+		}
 		createOrgRequest(orgRequest)
 		clog.FromContext(ctx).Infof("org exchange request: %#v", orgRequest)
 		e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, orgRequest.Identity)
