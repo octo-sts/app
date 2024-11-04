@@ -91,3 +91,85 @@ An issue will be created to explain what permissions is being added or removed.
 
 Special cases will be discussed in a GitHub issue in https://github.com/octo-sts/app/issues and we might apply more than
 one change during the quarter.
+
+### Octo-STS GitHub Permissions
+
+The following permissions are the currently enabled in octo-Sts and will be available when installing the GitHub APP
+
+#### Repository Permissions:
+
+  - **Actions**: `Read/Write`
+  - **Administration** : `Read-only`
+  - **Attestations**: `No Access`
+  - **Checks**: `Read/Write`
+  - **Code Scanning Alerts**: `No Access`
+  - **Codespaces**: `No Access`
+  - **Codespaces lifecycle admin**: `No Access`
+  - **Codespaces metadata**: `No Access`
+  - **Codespaces secrets**: `No Access`
+  - **Commit statuses**: `Read/Write`
+  - **Contents**: `Read/Write`
+  - **Custom properties**: `No Access`
+  - **Dependabot alerts**: `No Access`
+  - **Dependabot secrets**: `No Access`
+  - **Deployments**: `Read/Write`
+  - **Discussions**: `Read/Write`
+  - **Environments**: `No Access`
+  - **Issues**: `Read/Write`
+  - **Merge queues**: `No Access`
+  - **Metadata (Mandatory)**: `Read-only`
+  - **Packages**: `Read/Write`
+  - **Pages**: `No Access`
+  - **Projects**: `Read/Write`
+  - **Pull requests**: `Read/Write`
+  - **Repository security advisories**: `No Access`
+  - **Secret scanning alerts**: `No Access`
+  - **Secrets**: `No Access`
+  - **Single file**: `No Access`
+  - **Variables**: `No Access`
+  - **Webhooks**: `No Access`
+  - **Workflows**: `Read/Write`
+
+#### Organization Permissions:
+
+- **API Insights**: `No Access`
+- **Administration**: `Read-only`
+- **Blocking users**: `No Access`
+- **Custom organizations roles**: `No Access`
+- **Custom properties**: `No Access`
+- **Custom repository roles**: `No Access`
+- **Events**: `Read-only`
+- **GitHub Copilot Business**: `No Access`
+- **Knowledge bases**: `No Access`
+- **Members**: `Read-only`
+- **Organization codespaces**: `No Access`
+- **Organization codespaces secrets**: `No Access`
+- **Organization codespaces settings**: `No Access`
+- **Organization dependabot secrets**: `No Access`
+- **Personal access token requests**: `No Access`
+- **Personal access tokens**: `No Access`
+- **Plan**: `No Access`
+- **Projects**: `Read/Write`
+- **Secrets**: `No Access`
+- **Self-hosted runners**: `No Access`
+- **Team discussions**: `No Access`
+- **Variables**: `No Access`
+- **Webhooks**: `No Access`
+
+#### Account Permissions:
+
+- **Block another user**: `No Access`
+- **Codespaces user secrets**: `No Access`
+- **Copilot Chat**: `No Access`
+- **Email addresses**: `No Access`
+- **Events**: `No Access`
+- **Followers**: `No Access`
+- **GPG keys**: `No Access`
+- **Gists**: `No Access`
+- **Git SSH keys**: `No Access`
+- **Interaction limits**: `No Access`
+- **Plan**: `No Access`
+- **Profile**: `No Access`
+- **SSH signing keys**: `No Access`
+- **Starring**: `No Access`
+- **Watching**: `No Access`
