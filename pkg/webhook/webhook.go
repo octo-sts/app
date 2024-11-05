@@ -246,7 +246,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	log.Infof("%+v\n%+v", resp, resp.Files)
 	var files []string
 	for _, file := range resp.Files {
-		if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") {
+		if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") && strings.HasSuffix(file.GetFilename(), ".yaml") {
 			files = append(files, file.GetFilename())
 		}
 	}
@@ -306,7 +306,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	}
 	var files []string
 	for _, file := range resp {
-		if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") {
+		if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") && strings.HasSuffix(file.GetFilename(), ".yaml") {
 			files = append(files, file.GetFilename())
 		}
 	}
@@ -395,7 +395,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp {
-			if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") {
+			if strings.HasPrefix(file.GetFilename(), ".github/chainguard/") && strings.HasSuffix(file.GetFilename(), ".yaml") {
 				files = append(files, file.GetFilename())
 			}
 		}
