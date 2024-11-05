@@ -71,7 +71,11 @@ func main() {
 		log.Panicf("failed to create cloudevents client: %v", err)
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
+	var opts []octosts.ServerOption
+	if baseCfg.OrgTrustPolicy {
+		opts = append(opts, octosts.WithOrgTrustPolicy())
+	}
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics, opts...))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

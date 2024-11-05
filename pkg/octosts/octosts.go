@@ -39,13 +39,29 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
-	return &sts{
+type ServerOption func(*sts)
+
+// WithOrgTrustPolicy is an option that configures to use organization level trust policies
+// only instead of per-repo policies, e.g. all requests will be attempted to be resolved against
+// the organization .github repository.
+// This is useful when you want all trust policies for your organization to be in a centralized location.
+func WithOrgTrustPolicy() ServerOption {
+	return func(s *sts) {
+		s.orgTrustPolicy = true
+	}
+}
+
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, opts ...ServerOption) pboidc.SecurityTokenServiceServer {
+	s := &sts{
 		atr:      atr,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var (
@@ -61,6 +77,8 @@ type sts struct {
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
+	// Always use org-level trust policy over the repo-level trust policy.
+	orgTrustPolicy bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -134,7 +152,12 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
+	var opts []lookupOption
+	if s.orgTrustPolicy {
+		opts = append(opts, withOrgDelegation())
+	}
+
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +210,20 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}, nil
 }
 
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
+type lookupOptions struct {
+	repo string
+}
+
+type lookupOption func(*lookupOptions)
+
+// withOrgDelegation is an option to rely on the organization level trust policy instead of per-repo policies.
+func withOrgDelegation() lookupOption {
+	return func(o *lookupOptions) {
+		o.repo = ".github"
+	}
+}
+
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string, opts ...lookupOption) (int64, *OrgTrustPolicy, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -210,7 +246,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		identity: identity,
 	}
 
-	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp); err != nil {
+	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp, opts...); err != nil {
 		return id, nil, err
 	}
 	return id, otp, nil
@@ -256,7 +292,12 @@ type trustPolicy interface {
 	Compile() error
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy, opts ...lookupOption) error {
+	o := &lookupOptions{}
+	for _, fn := range opts {
+		fn(o)
+	}
+
 	raw := ""
 	// check the LRU cache for the TrustPolicy
 	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
@@ -292,8 +333,13 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 			Transport: atr,
 		})
 
+		// Override the repo if specified.
+		repo := trustPolicyKey.repo
+		if o.repo != "" {
+			repo = o.repo
+		}
 		file, _, _, err := client.Repositories.GetContents(ctx,
-			trustPolicyKey.owner, trustPolicyKey.repo,
+			trustPolicyKey.owner, repo,
 			fmt.Sprintf(".github/chainguard/%s.sts.yaml", trustPolicyKey.identity),
 			&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
 		)
