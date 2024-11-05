@@ -300,7 +300,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 		if err != nil {
 			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 			// Don't leak the error to the client.
-			return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", trustPolicyKey.identity)
+			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
 		}
 
 		raw, err = file.GetContent()
