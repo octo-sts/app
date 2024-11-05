@@ -12,14 +12,12 @@ require (
 	github.com/chainguard-dev/terraform-infra-common v0.6.85
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.11.0
-	github.com/go-jose/go-jose/v3 v3.0.3
 	github.com/golang-jwt/jwt/v4 v4.5.0
 	github.com/google/go-cmp v0.6.0
 	github.com/google/go-github/v62 v62.0.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
-	go.step.sm/crypto v0.54.0
 	golang.org/x/oauth2 v0.23.0
 	google.golang.org/api v0.199.0
 	google.golang.org/grpc v1.67.0
@@ -31,14 +29,12 @@ require (
 	cloud.google.com/go v0.115.1 // indirect
 	cloud.google.com/go/longrunning v0.6.1 // indirect
 	cloud.google.com/go/trace v1.11.0 // indirect
-	filippo.io/edwards25519 v1.1.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.24.1 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.24.2 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.48.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/sethvargo/go-envconfig v1.1.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.30.0 // indirect
@@ -54,7 +50,7 @@ require (
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/go-jose/go-jose/v4 v4.0.4 // indirect
+	github.com/go-jose/go-jose/v4 v4.0.4
 	github.com/go-logr/logr v1.4.2 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect

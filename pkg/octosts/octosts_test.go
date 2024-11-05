@@ -30,12 +30,12 @@ import (
 	v1 "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	josejwt "github.com/go-jose/go-jose/v3/jwt"
+	"github.com/go-jose/go-jose/v4"
+	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v62/github"
 	"github.com/octo-sts/app/pkg/provider"
-	"go.step.sm/crypto/jose"
 	"google.golang.org/grpc/metadata"
 )
 
@@ -113,7 +113,7 @@ func TestExchange(t *testing.T) {
 		Issuer:   iss,
 		Audience: josejwt.Audience{"octosts"},
 		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
-	}).CompactSerialize()
+	}).Serialize()
 	if err != nil {
 		t.Fatalf("CompactSerialize failed: %v", err)
 	}
