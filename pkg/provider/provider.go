@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"testing"
 
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
@@ -24,10 +25,14 @@ const MaximumResponseSize = 100 * 1024 // 100KiB
 
 var (
 	// providers is an LRU cache of recently used providers.
-	providers, _ = lru.New2Q[string, *oidc.Provider](100)
+	providers, _ = lru.New2Q[string, VerifierProvider](100)
 )
 
-func Get(ctx context.Context, issuer string) (provider *oidc.Provider, err error) {
+type VerifierProvider interface {
+	Verifier(config *oidc.Config) *oidc.IDTokenVerifier
+}
+
+func Get(ctx context.Context, issuer string) (provider VerifierProvider, err error) {
 	// Return any verifiers that we have already constructed
 	// to avoid paying for discovery again.
 	if v, ok := providers.Get(issuer); ok {
@@ -50,4 +55,22 @@ func Get(ctx context.Context, issuer string) (provider *oidc.Provider, err error
 	providers.Add(issuer, provider)
 
 	return provider, nil
+}
+
+type keysetProvider struct {
+	issuer string
+	keySet oidc.KeySet
+}
+
+func (s *keysetProvider) Verifier(config *oidc.Config) *oidc.IDTokenVerifier {
+	return oidc.NewVerifier(s.issuer, s.keySet, config)
+}
+
+// AddTestKeySetVerifier adds a test key set verifier to the provider cachef or the issuer.
+// This is primarily intended for testing - the static key set is not verified against the upstream issuer.
+func AddTestKeySetVerifier(t *testing.T, issuer string, keySet oidc.KeySet) {
+	providers.Add(issuer, &keysetProvider{
+		issuer: issuer,
+		keySet: keySet,
+	})
 }
