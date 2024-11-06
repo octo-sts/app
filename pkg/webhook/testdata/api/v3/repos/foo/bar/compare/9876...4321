@@ -1,0 +1,282 @@
+{
+  "url": "https://api.github.com/repos/honk/honk/compare/d8cae53e2e6cfc3ae8411895252dbc5137a84e11...f7d76624a7495b6d769bb533d996cb25765dd71e",
+  "html_url": "https://github.com/honk/honk/compare/d8cae53e2e6cfc3ae8411895252dbc5137a84e11...f7d76624a7495b6d769bb533d996cb25765dd71e",
+  "permalink_url": "https://github.com/honk/honk/compare/xoxo-dev:d8cae53...xoxo-dev:f7d7892",
+  "diff_url": "https://github.com/honk/honk/compare/d8cae53e2e6cfc3ae8411895252dbc5137a84e11...f7d76624a7495b6d769bb533d996cb25765dd71e.diff",
+  "patch_url": "https://github.com/honk/honk/compare/d8cae53e2e6cfc3ae8411895252dbc5137a84e11...f7d76624a7495b6d769bb533d996cb25765dd71e.patch",
+  "base_commit": {
+    "sha": "d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "node_id": "C_kwDOH9LtsNoAKGQ4Y2FlNTNlMmU2Y2ZjM2FlODQxMTg5NTI1MmRiYzUxMzdhODRlMTY",
+    "commit": {
+      "author": {
+        "name": "octo-sts[bot]",
+        "email": "157150467+octo-sts[bot]@users.noreply.github.com",
+        "date": "2024-11-06T09:03:51Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2024-11-06T09:03:51Z"
+      },
+      "message": "blablabla\n\n<p align=\"center\">\n<img\nsrc=\"https://raw.githubusercontent.com/nop/.github/b535a42419ce0edb3c144c0edcff55a62b8ec1dd/profile/light-mode.svg\"\n/>\n</p>\n\nSigned-off-by: xoxox-bot <11111+xoxox-bot@users.noreply.github.com>\nCo-authored-by: xoxo-bot <11111+xoxo-bot@users.noreply.github.com>",
+      "tree": {
+        "sha": "e9a224606353911107336ddddc680637178581f",
+        "url": "https://api.github.com/repos/honk/honk/git/trees/e9a224606ddd11107336fc782c680637178581f"
+      },
+      "url": "https://api.github.com/repos/honk/honk/git/commits/d8cae53e2dddd252dbc5137a84e11",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBQJnKzD3C2pPNeTlF7q90w4\nj+oNtflsezIpkias33x8q02PNu6plJDcEkwS0jYJcqbBqAgY/wJQrw6Aa/JCaxVPGDtz1QxljFd\nWrLmM232X8mUznr4gDMKXUmS55rwYuUEqbGxZgxAivGOqk9V45mrwlSmA2EVF2gu\ng7gKp0BWr56N3IwbIpOXsnJQYnJFgg30I6epKRXZqAYRVje9RqYSzVAMxhCy6w0q\n3tzc1mO6UrE0TgLlpagt/3iriSOBxK42SCzOzfMFzFrAatJPQpmgbrYlQeuo5brU\npZoUz45JxId/omUaFuRlyjqU8XE4qDoXw8RSu9E61i9lX3zaWjX554i6tOEjGrdV\n+RnFAu5ql6t0afmo1PsFOqdxQd1uo2Y6qIoWnwcLXVdWmvIFucuKoWK0hiNhGeVa\ntRJcuyWEuI23/XC7PfCavIripsv5M763eRKdMw/8WjcnLu+URK4UkDtB1sUVLegM\nVwaOdEowOr7maq5rcCptJNorKDr7Y/mO5fmbW6wmL34tBlaIH3XWBS8zzrxTDjF7\np80k+Kh95clu59xp4JSrsffUErdruGc\nnkDsrei9+otXYtCK2rgL\n=utVh\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree e9a224606353911107336fc782c680637178581f\nparent a11cd51fed27f10f1f01dbee91c00f58896e9e39\nauthor octo-sts[bot] <157150467+octo-sts[bot]@users.noreply.github.com> 2222 +0000\ncommitter GitHub <noreply@github.com> 222 +0000\n\n\n<p align=\"center\">\n<img\nsrc=\"https://raw.githubusercontent.com/xoxo/.github/b535a42419ce0edb3c144c0ed22222a62b8ec1f8/profile/light-mode.svg\"\n/>\n</p>\n\nSigned-off-by: xoxo-bot <1111+xoxox-bot@users.noreply.github.com>\nCo-authored-by: xoxo-bot <1111+xoxo-bot@users.noreply.github.com>"
+      }
+    },
+    "url": "https://api.github.com/repos/honk/honk/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "html_url": "https://github.com/honk/honk/commit/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "comments_url": "https://api.github.com/repos/honk/honk/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11/comments",
+    "author": {
+      "login": "octo-sts[bot]",
+      "id": 22222,
+      "node_id": "BOT_kgDOCV3tAw",
+      "avatar_url": "https://avatars.githubusercontent.com/in/8ddd23?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/octo-sts%5Bbot%5D",
+      "html_url": "https://github.com/apps/octo-sts",
+      "followers_url": "https://api.github.com/users/octo-sts%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/octo-sts%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/octo-sts%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/octo-sts%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/octo-sts%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/octo-sts%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/octo-sts%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/octo-sts%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/octo-sts%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "a11cd51fed27f10f1f01dbee91c00f58896e9e39",
+        "url": "https://api.github.com/repos/honk/honk/commits/a11cd51fed27f10f1f01dbee91c00f58896e9e39",
+        "html_url": "https://github.com/honk/honk/commit/a11cd51fed27f10f1f01dbee91c00f58896e9e39"
+      }
+    ]
+  },
+  "merge_base_commit": {
+    "sha": "d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "node_id": "C_kwDOH9LtsNoAKGQ4Y2FlNTNlMmU2Y2ZjM2FlODQxMTg5NTI1MmRiYzUxMzdhODRlMTY",
+    "commit": {
+      "author": {
+        "name": "octo-sts[bot]",
+        "email": "d333s+octo-sts[bot]@users.noreply.github.com",
+        "date": "2024-11-06T09:03:51Z"
+      },
+      "committer": {
+        "name": "GitHub",
+        "email": "noreply@github.com",
+        "date": "2024-11-06T09:03:51Z"
+      },
+      "message": "blablabla p align=\"center\">\n<img\nsrc=\"https://raw.githubusercontent.com/xoxo/.github/b535a42419ce0cccccc0edcff55a62b8ec1f8/profile/light-mode.svg\"\n/>\n</p>\n\nSigned-off-by: xoxo-bot <1111+xoxo-bot@users.noreply.github.com>\nCo-authored-by: xoxo-bot <1111+xoxo-bot@users.noreply.github.com>",
+      "tree": {
+        "sha": "e9a2246063539111sss80637178581f",
+        "url": "https://api.github.com/repos/honk/honk/git/trees/e9a224606353911107336fc782c680637178581f"
+      },
+      "url": "https://api.github.com/repos/honk/honk/git/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+      "comment_count": 0,
+      "verification": {
+        "verified": true,
+        "reason": "valid",
+        "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCAAQBPNeTlF7q90w4\nj+oNtflsezIpkias33x8q02PNu6K7wgNMMjEceiSK3YZCFfxeYLFkNufACNaWr4+\n7p4j2Ijbj8anTUeoplJDcEkwS0jYJcqbBqAgY/wJQrw6Aa/JCaxVPGDtz1QxljFd\nWrLmM232X8mUznr4gDMKXUmS55rwYuUEqbGxZgxAivGOqk9V45mrwlSmA2EVF2gu\ng7gKp0BWr56N3IwbIpOXsnJQYnJFgg30I6epKRXZqAYRVje9RqYSzVAMxhCy6w0q\n3tzc1mO6UrE0TgLlpagt/3iriSOBxK42SCzOzfMFzFrAatJPQpmgbrYlQeuo5brU\npZoUz45JxId/omUaFuRlyjqU8XE4qDoXw8RSu9E61i9lX3zaWjX554i6tOEjGrdV\n+RnFAu5ql6t0a6qIoWnwcLXVdWmvIFucuKoWK0hiNhGeVa\ntRJcuyWEuI23/XC7PfCavIripsv5M763eRKdMw/8WjcnLu+URK4UkDtB1sUVLegM\nVwaOdEowOr7maq5rcCptJNorKDr7Y/mO5fmbW6wmL34tBlaIH3XWBS8zzrxTDjF7\np80k+KxRiJju/4pvUWBpn2AVCuPp5u9aNycrwJDh95clu59xp4JSrsffUErdruGc\nnkDsrei9+otXYtCK2rgL\n=utVh\n-----END PGP SIGNATURE-----\n",
+        "payload": "tree e9a224606353911107336fc782c680637178581f\nparent a11cd51fed27f10f1f01dbee91c00f58896e9e39\nauthor octo-sts[bot] <1111+octo-sts[bot]@users.noreply.github.com> 333 +0000\ncommitter GitHub <noreply@github.com> 33333 +0000\n\nblablabal\n\n<p align=\"center\">\n<img\nsrc=\"https://raw.githubusercontent.com/xoxo-dev/.github/b535a42419c3333144c0edcff55a62b8ec1f8/profile/light-mode.svg\"\n/>\n</p>\n\nSigned-off-by: xoxo-bot <121097084+xoxo-bot@users.noreply.github.com>\nCo-authored-by: xoxo-bot <121097084+xoxo-bot@users.noreply.github.com>"
+      }
+    },
+    "url": "https://api.github.com/repos/honk/honk/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "html_url": "https://github.com/honk/honk/commit/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+    "comments_url": "https://api.github.com/repos/honk/honk/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11/comments",
+    "author": {
+      "login": "octo-sts[bot]",
+      "id": 157150467,
+      "node_id": "BOT_kgDOCV3tAw",
+      "avatar_url": "https://avatars.githubusercontent.com/in/801323?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/octo-sts%5Bbot%5D",
+      "html_url": "https://github.com/apps/octo-sts",
+      "followers_url": "https://api.github.com/users/octo-sts%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/octo-sts%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/octo-sts%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/octo-sts%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/octo-sts%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/octo-sts%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/octo-sts%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/octo-sts%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/octo-sts%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "committer": {
+      "login": "web-flow",
+      "id": 19864447,
+      "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+      "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/web-flow",
+      "html_url": "https://github.com/web-flow",
+      "followers_url": "https://api.github.com/users/web-flow/followers",
+      "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+      "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+      "organizations_url": "https://api.github.com/users/web-flow/orgs",
+      "repos_url": "https://api.github.com/users/web-flow/repos",
+      "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/web-flow/received_events",
+      "type": "User",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "parents": [
+      {
+        "sha": "a11cd51fed27f10f1f01dbee91c00f58896e9e39",
+        "url": "https://api.github.com/repos/honk/honk/commits/a11cd51fed27f10f1f01dbee91c00f58896e9e39",
+        "html_url": "https://github.com/honk/honk/commit/a11cd51fed27f10f1f01dbee91c00f58896e9e39"
+      }
+    ]
+  },
+  "status": "ahead",
+  "ahead_by": 1,
+  "behind_by": 0,
+  "total_commits": 1,
+  "commits": [
+    {
+      "sha": "f7d76624a7495b6d769bb533d996cb25765dd71e",
+      "node_id": "C_kwDOH9LtsNoAKGY3ZDc4OTI0YTc0OTViNmQ3NjliYjUzM2Q5OTZjYjI1NzY1ZGQ3MWU",
+      "commit": {
+        "author": {
+          "name": "Honk",
+          "email": "Honk@example.dev",
+          "date": "2024-11-06T09:48:39Z"
+        },
+        "committer": {
+          "name": "GitHub",
+          "email": "noreply@github.com",
+          "date": "2024-11-06T09:48:39Z"
+        },
+        "message": "honk\n\n",
+        "tree": {
+          "sha": "43af49a6af0801dc11c691117b999c283a40c2a0",
+          "url": "https://api.github.com/repos/honk/honk/git/trees/43af49a6af0801dc11c691117b999c283a40c2a0"
+        },
+        "url": "https://api.github.com/repos/honk/honk/git/commits/f7d76624a7495b6d769bb533d996cb25765dd71e",
+        "comment_count": 0,
+        "verification": {
+          "verified": true,
+          "reason": "valid",
+          "signature": "-----BEGIN PGP SIGNATURE-----\n\nwsFcBAABCcBa/0lHm7p1\n7wtlxN8vYyK1KgN1tbjopR03QIusJSgtGlh9oe3iwvJgGat7m1eYVNgxwrGRFxKr\n5yxmGPR0D8z7uf7IaNWKRCRQyJdyDjvPX6RPJQT/8H+5YpMqBUu3RsKX7ppBeGIn\nCf7pWMlI5qtj8RslKiZr0+L7SkFxy1lTAvXKGrVDmz1Vp0/8ajnQUu1o/F2wgzBz\n4iNNq/UFoLZFyRVmoion9wILbXu7MXHn5txohqdsqz+pe4fw9o6W04prBVfw0JRL\n+fYPz0eeGtlx1YkD8mOjtQBm1y1RjhqBCrowhZl/G/ZYfdy/reA79JLQvP3qpoQF\nYXEczpCHDg+x+LbsKxRSXgfATo1zkW3EMahVkgtXrTTwiDD8FoXJFg3wS7MNYexa\nyIQxGdXCw6NKHZCz9hZq8NIupk7qhHUlArKwp2sNzB3W2MC+S/G8DmQ9fq7AHtRG\nvHQAXTS2X+h4fjdLE7yUILJT6lHoVl8+TC9X89MA76Ac43KhyOgnKxti/IPaN9yT\nxxBmjrHsKcP3T2wAcW6gtnW6iSsgfmNxwkARSraok+4ceRTbMPVSz9NZVKDWQH0T\nRrYZgM3xWteUAYgLqcUBbU/qf9xy03AwvSBwt9HH5WLsHpYGP9dT1Pq66PzrMiss\nlfurgdW5v/V0CFRgWArP\n=gMvu\n-----END PGP SIGNATURE-----\n",
+          "payload": "tree 43af49a6af0801dc11c691117b999c283a40c2a0\nparent d8cae53e2e6cfc3ae8411895252dbc5137a84e11\nauthor Honk <honk@example.dev> 3333 +0000\ncommitter GitHub <noreply@github.com> 3333 +0000\n\nhonk message (#3333)\n\nSigned-off-by: Honk <honk@example.dev>"
+        }
+      },
+      "url": "https://api.github.com/repos/honk/honk/commits/f7d76624a7495b6d769bb533d996cb25765dd71e",
+      "html_url": "https://github.com/honk/honk/commit/f7d76624a7495b6d769bb533d996cb25765dd71e",
+      "comments_url": "https://api.github.com/repos/honk/honk/commits/f7d76624a7495b6d769bb533d996cb25765dd71e/comments",
+      "author": {
+        "login": "honk",
+        "id": 11111,
+        "node_id": "MDQ6VXNlcjE0NTcxODA=",
+        "avatar_url": "https://avatars.githubusercontent.com/u/222?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/honk",
+        "html_url": "https://github.com/honk",
+        "followers_url": "https://api.github.com/users/honk/followers",
+        "following_url": "https://api.github.com/users/honk/following{/other_user}",
+        "gists_url": "https://api.github.com/users/honk/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/honk/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/honk/subscriptions",
+        "organizations_url": "https://api.github.com/users/honk/orgs",
+        "repos_url": "https://api.github.com/users/honk/repos",
+        "events_url": "https://api.github.com/users/honk/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/honk/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "committer": {
+        "login": "web-flow",
+        "id": 19864447,
+        "node_id": "MDQ6VXNlcjE5ODY0NDQ3",
+        "avatar_url": "https://avatars.githubusercontent.com/u/19864447?v=4",
+        "gravatar_id": "",
+        "url": "https://api.github.com/users/web-flow",
+        "html_url": "https://github.com/web-flow",
+        "followers_url": "https://api.github.com/users/web-flow/followers",
+        "following_url": "https://api.github.com/users/web-flow/following{/other_user}",
+        "gists_url": "https://api.github.com/users/web-flow/gists{/gist_id}",
+        "starred_url": "https://api.github.com/users/web-flow/starred{/owner}{/repo}",
+        "subscriptions_url": "https://api.github.com/users/web-flow/subscriptions",
+        "organizations_url": "https://api.github.com/users/web-flow/orgs",
+        "repos_url": "https://api.github.com/users/web-flow/repos",
+        "events_url": "https://api.github.com/users/web-flow/events{/privacy}",
+        "received_events_url": "https://api.github.com/users/web-flow/received_events",
+        "type": "User",
+        "user_view_type": "public",
+        "site_admin": false
+      },
+      "parents": [
+        {
+          "sha": "d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+          "url": "https://api.github.com/repos/honk/honk/commits/d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+          "html_url": "https://github.com/honk/honk/commit/d8cae53e2e6cfc3ae8411895252dbc5137a84e11"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "sha": "a3b28c5604db0beb3c2263ca4f6a7784f1c35dad",
+      "filename": ".github/chainguard/test2.sts.yaml",
+      "status": "added",
+      "additions": 9,
+      "deletions": 0,
+      "changes": 9,
+      "blob_url": "https://github.com/honk/honk/blob/f7d76624a7495b6d769bb533d996cb25765dd71e/.github%2Fchainguard%2Ftest2.sts.yaml",
+      "raw_url": "https://github.com/honk/honk/raw/f7d76624a7495b6d769bb533d996cb25765dd71e/.github%2Fchainguard%2Ftest2.sts.yaml",
+      "contents_url": "https://api.github.com/repos/honk/honk/contents/.github%2Fchainguard%2Ftest2.sts.yaml?ref=f7d76624a7495b6d769bb533d996cb25765dd71e",
+      "patch": "@@ -0,0 +1,9 @@\n+issuer: https://accounts.google.com\n+\n+# cdcds: @cd\n+subject: \"ddddd\"\n+\n+permissions:\n+  contents: read\n+  pull_requests: write"
+    },
+    {
+      "sha": "a68218715fb54742a65eea31e0e39958f5a374da",
+      "filename": ".github/chainguard/removed-example.sts.yaml",
+      "status": "removed",
+      "additions": 0,
+      "deletions": 9,
+      "changes": 9,
+      "blob_url": "https://github.com/honk/honk/blob/d8cae53e2e6cfc3ae8411895252dbc5137a84e11/.github%2Fchainguard%2Flifecycle-gpt.sts.yaml",
+      "raw_url": "https://github.com/honk/honk/raw/d8cae53e2e6cfc3ae8411895252dbc5137a84e11/.github%2Fchainguard%2Flifecycle-gpt.sts.yaml",
+      "contents_url": "https://api.github.com/repos/honk/honk/contents/.github%2Fchainguard%2Flifecycle-gpt.sts.yaml?ref=d8cae53e2e6cfc3ae8411895252dbc5137a84e11",
+      "patch": "@@ -1,9 +0,0 @@\n-issuer:"
+    }
+  ]
+}
