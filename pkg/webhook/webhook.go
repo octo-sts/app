@@ -248,7 +248,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	var files []string
 	for _, file := range resp.Files {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			files = append(files, file.GetFilename())
+			if file.GetStatus() != "removed" {
+				files = append(files, file.GetFilename())
+			}
 		}
 	}
 	if len(files) == 0 {
@@ -299,7 +301,9 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	}
 	for _, file := range resp {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			files = append(files, file.GetFilename())
+			if file.GetStatus() != "removed" {
+				files = append(files, file.GetFilename())
+			}
 		}
 	}
 	if len(files) == 0 {
@@ -367,7 +371,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		for _, file := range resp.Files {
 			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-				files = append(files, file.GetFilename())
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}
@@ -379,7 +385,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		for _, file := range resp {
 			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-				files = append(files, file.GetFilename())
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}
