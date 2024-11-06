@@ -41,3 +41,4 @@ jobs:
         with:
           extension: ${{ matrix.extension }}
           language: ${{ matrix.language }}
+          exclude: pkg/webhook/testdata
