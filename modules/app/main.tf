@@ -73,9 +73,10 @@ module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
   version = "0.6.98"
 
-  project_id = var.project_id
-  name       = var.name
-  regions    = var.regions
+  project_id    = var.project_id
+  name          = var.name
+  regions       = var.regions
+  require_squad = false
 
   deletion_protection = var.deletion_protection
 
