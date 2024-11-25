@@ -34,9 +34,10 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v62/github"
-	"github.com/octo-sts/app/pkg/provider"
+	"github.com/google/go-github/v66/github"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/octo-sts/app/pkg/provider"
 )
 
 type fakeGitHub struct {
