@@ -11,11 +11,12 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v66/github"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/octo-sts/app/pkg/octosts"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
+
+	"github.com/octo-sts/app/pkg/octosts"
 )
 
 type envConfig struct {

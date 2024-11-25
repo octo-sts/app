@@ -24,7 +24,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v66/github"
 )
 
 func TestValidatePolicy(t *testing.T) {

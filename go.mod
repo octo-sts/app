@@ -14,7 +14,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
 	github.com/google/go-cmp v0.6.0
-	github.com/google/go-github/v62 v62.0.0
+	github.com/google/go-github/v66 v66.0.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
@@ -35,7 +35,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ebitengine/purego v0.8.1 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
-	github.com/google/go-github/v66 v66.0.0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
