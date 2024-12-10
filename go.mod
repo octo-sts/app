@@ -4,12 +4,12 @@ go 1.23.3
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.7
-	chainguard.dev/sdk v0.1.28
+	chainguard.dev/sdk v0.1.29
 	cloud.google.com/go/kms v1.20.2
 	cloud.google.com/go/secretmanager v1.14.2
 	github.com/bradleyfalzon/ghinstallation/v2 v2.12.0
 	github.com/chainguard-dev/clog v1.5.1
-	github.com/chainguard-dev/terraform-infra-common v0.6.107
+	github.com/chainguard-dev/terraform-infra-common v0.6.108
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
@@ -65,7 +65,7 @@ require (
 	github.com/googleapis/gax-go/v2 v2.14.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.1-0.20210315223345-82c243799c99 // indirect
-	github.com/grpc-ecosystem/grpc-gateway/v2 v2.23.0 // indirect
+	github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect

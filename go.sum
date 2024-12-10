@@ -1,7 +1,7 @@
 chainguard.dev/go-grpc-kit v0.17.7 h1:TqHua7er5k8m6WM96y0Tm7IoLLkuZ5vh3+5SR1gruKg=
 chainguard.dev/go-grpc-kit v0.17.7/go.mod h1:JroMzTY9mdhKe/bvtyChgfECaNh80+bMZH3HS+TGXHw=
-chainguard.dev/sdk v0.1.28 h1:xLQv0JxiGhqVKOL059DmTReTjrKFhUsP5U1W6cgr+jQ=
-chainguard.dev/sdk v0.1.28/go.mod h1:9EvGI9GY5UPDbZ5AhGbMO8865ixNu36afQYCZ5M95NM=
+chainguard.dev/sdk v0.1.29 h1:GNcCw5NoyvylhlUbVD8JMmrPaeYyrshaHHjEWnvcCGI=
+chainguard.dev/sdk v0.1.29/go.mod h1:DqywTjZ5glB/gUCKkrecO0LywyfcAd5v7IPo2+d91qA=
 cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
 cloud.google.com/go v0.116.0 h1:B3fRrSDkLRt5qSHWe40ERJvhvnQwdZiHu0bJOpldweE=
 cloud.google.com/go v0.116.0/go.mod h1:cEPSRWPzZEswwdr9BxE6ChEn01dWlTaF05LiC2Xs70U=
@@ -47,8 +47,8 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/chainguard-dev/clog v1.5.1 h1:LeFeVlxiicswuTevtaXc0MXH1zV1iWkbg+H8iUuBTtQ=
 github.com/chainguard-dev/clog v1.5.1/go.mod h1:4+WFhRMsGH79etYXY3plYdp+tCz/KCkU8fAr0HoaPvs=
-github.com/chainguard-dev/terraform-infra-common v0.6.107 h1:6lyvoVjBSnphC7D1QV0fv8xAC/1MBZTL4p7Z/5eQZ70=
-github.com/chainguard-dev/terraform-infra-common v0.6.107/go.mod h1:Nvz65Eps64T+NqN9zL2v+VEWfRZae3m4HYdTDRhuZYw=
+github.com/chainguard-dev/terraform-infra-common v0.6.108 h1:Wa1FUoX63j1veMONyOeE7/wbZV5/4CLtGt9vNO9vzZg=
+github.com/chainguard-dev/terraform-infra-common v0.6.108/go.mod h1:YrZpm/0H+eeAUnSYUc/SMlnYkWDBmSLHCjLwIpxqMUY=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/cloudevents/sdk-go/v2 v2.15.2 h1:54+I5xQEnI73RBhWHxbI1XJcqOFOVJN85vb41+8mHUc=
 github.com/cloudevents/sdk-go/v2 v2.15.2/go.mod h1:lL7kSWAE/V8VI4Wh0jbL2v/jvqsm6tjmaQBSvxcv4uE=
@@ -113,8 +113,8 @@ github.com/grpc-ecosystem/go-grpc-middleware v1.4.0 h1:UH//fgunKIs4JdUbpDl1VZCDa
 github.com/grpc-ecosystem/go-grpc-middleware v1.4.0/go.mod h1:g5qyo/la0ALbONm6Vbp88Yd8NsDy6rZz+RcrMPxvld8=
 github.com/grpc-ecosystem/go-grpc-prometheus v1.2.1-0.20210315223345-82c243799c99 h1:JYghRBlGCZyCF2wNUJ8W0cwaQdtpcssJ4CgC406g+WU=
 github.com/grpc-ecosystem/go-grpc-prometheus v1.2.1-0.20210315223345-82c243799c99/go.mod h1:3bDW6wMZJB7tiONtC/1Xpicra6Wp5GgbTbQWCbI5fkc=
-github.com/grpc-ecosystem/grpc-gateway/v2 v2.23.0 h1:ad0vkEBuk23VJzZR9nkLVG0YAoN9coASF1GusYX6AlU=
-github.com/grpc-ecosystem/grpc-gateway/v2 v2.23.0/go.mod h1:igFoXX2ELCW06bol23DWPB5BEWfZISOzSP5K2sbLea0=
+github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0 h1:TmHmbvxPmaegwhDubVz0lICL0J5Ka2vwTzhoePEXsGE=
+github.com/grpc-ecosystem/grpc-gateway/v2 v2.24.0/go.mod h1:qztMSjm835F2bXf+5HKAPIS5qsmQDqZna/PgVt4rWtI=
 github.com/hashicorp/errwrap v1.0.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
 github.com/hashicorp/errwrap v1.1.0 h1:OxrOeh75EUXMY8TBjag2fzXGZ40LB6IKw45YeGUDY2I=
 github.com/hashicorp/errwrap v1.1.0/go.mod h1:YH+1FKiLXxHSkmPseP+kNlulaMuP3n2brvKWEqk/Jc4=
