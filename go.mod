@@ -21,7 +21,7 @@ require (
 	golang.org/x/oauth2 v0.24.0
 	google.golang.org/api v0.211.0
 	google.golang.org/grpc v1.69.0
-	k8s.io/apimachinery v0.31.4
+	k8s.io/apimachinery v0.32.0
 	sigs.k8s.io/yaml v1.4.0
 )
 
