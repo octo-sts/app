@@ -24,6 +24,7 @@ module "github-wif" {
 
   project_id = var.project_id
   name       = "github-pool"
+  github_org = "octo-sts"
 
   notification_channels = local.notification_channels
 }
