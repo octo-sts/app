@@ -20,10 +20,11 @@ locals {
 
 module "github-wif" {
   source  = "chainguard-dev/common/infra//modules/github-wif-provider"
-  version = "0.6.110"
+  version = "0.6.112"
 
   project_id = var.project_id
   name       = "github-pool"
+  github_org = "octo-sts"
 
   notification_channels = local.notification_channels
 }
@@ -40,7 +41,7 @@ moved {
 
 module "github_identity" {
   source  = "chainguard-dev/common/infra//modules/github-gsa"
-  version = "0.6.110"
+  version = "0.6.112"
 
   project_id = var.project_id
   name       = "github-identity"
@@ -67,7 +68,7 @@ resource "google_project_iam_member" "github_owner" {
 
 module "github_pull_requests" {
   source  = "chainguard-dev/common/infra//modules/github-gsa"
-  version = "0.6.110"
+  version = "0.6.112"
 
   project_id = var.project_id
   name       = "github-pull-requests"
