@@ -7,7 +7,7 @@ require (
 	chainguard.dev/sdk v0.1.29
 	cloud.google.com/go/kms v1.20.4
 	cloud.google.com/go/secretmanager v1.14.3
-	github.com/bradleyfalzon/ghinstallation/v2 v2.12.0
+	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
 	github.com/chainguard-dev/clog v1.5.1
 	github.com/chainguard-dev/terraform-infra-common v0.6.112
 	github.com/cloudevents/sdk-go/v2 v2.15.2
@@ -35,6 +35,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ebitengine/purego v0.8.1 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
+	github.com/google/go-github/v68 v68.0.0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
