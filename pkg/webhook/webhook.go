@@ -150,14 +150,14 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	opts := github.CreateCheckRunOptions{
 		Name:        "Trust Policy Validation",
 		HeadSHA:     sha,
-		ExternalID:  github.String(sha),
-		Status:      github.String("completed"),
-		Conclusion:  github.String(conclusion),
+		ExternalID:  github.Ptr(sha),
+		Status:      github.Ptr("completed"),
+		Conclusion:  github.Ptr(conclusion),
 		StartedAt:   &github.Timestamp{Time: time.Now()},
 		CompletedAt: &github.Timestamp{Time: time.Now()},
 		Output: &github.CheckRunOutput{
-			Title:   github.String(title),
-			Summary: github.String(summary),
+			Title:   github.Ptr(title),
+			Summary: github.Ptr(summary),
 		},
 	}
 

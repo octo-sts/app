@@ -48,9 +48,9 @@ func newFakeGitHub() *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID: github.Int64(1234),
+			ID: github.Ptr(int64(1234)),
 			Account: &github.User{
-				Login: github.String("org"),
+				Login: github.Ptr("org"),
 			},
 		}})
 	})
@@ -62,7 +62,7 @@ func newFakeGitHub() *fakeGitHub {
 		}
 
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.String(base64.StdEncoding.EncodeToString(b)),
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -73,9 +73,9 @@ func newFakeGitHub() *fakeGitHub {
 			fmt.Fprintf(io.MultiWriter(w, os.Stdout), "ReadFile failed: %v\n", err)
 		}
 		json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  github.String(base64.StdEncoding.EncodeToString(b)),
-			Type:     github.String("file"),
-			Encoding: github.String("base64"),
+			Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Type:     github.Ptr("file"),
+			Encoding: github.Ptr("base64"),
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -140,7 +140,7 @@ func TestExchange(t *testing.T) {
 			want: &github.InstallationTokenOptions{
 				Repositories: []string{"repo"},
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.String("write"),
+					PullRequests: github.Ptr("write"),
 				},
 			},
 		},
@@ -152,7 +152,7 @@ func TestExchange(t *testing.T) {
 			},
 			want: &github.InstallationTokenOptions{
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.String("write"),
+					PullRequests: github.Ptr("write"),
 				},
 			},
 		},
