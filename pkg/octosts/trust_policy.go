@@ -10,7 +10,7 @@ import (
 	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v68/github"
 )
 
 type TrustPolicy struct {

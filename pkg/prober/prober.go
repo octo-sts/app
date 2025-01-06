@@ -11,7 +11,7 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v66/github"
+	"github.com/google/go-github/v68/github"
 	"github.com/kelseyhightower/envconfig"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
