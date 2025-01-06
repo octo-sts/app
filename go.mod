@@ -7,14 +7,14 @@ require (
 	chainguard.dev/sdk v0.1.29
 	cloud.google.com/go/kms v1.20.4
 	cloud.google.com/go/secretmanager v1.14.3
-	github.com/bradleyfalzon/ghinstallation/v2 v2.12.0
+	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
 	github.com/chainguard-dev/clog v1.5.1
 	github.com/chainguard-dev/terraform-infra-common v0.6.112
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.11.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
 	github.com/google/go-cmp v0.6.0
-	github.com/google/go-github/v66 v66.0.0
+	github.com/google/go-github/v68 v68.0.0
 	github.com/hashicorp/go-multierror v1.1.1
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
