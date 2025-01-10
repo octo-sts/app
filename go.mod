@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/secretmanager v1.14.3
 	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
 	github.com/chainguard-dev/clog v1.5.1
-	github.com/chainguard-dev/terraform-infra-common v0.6.113
+	github.com/chainguard-dev/terraform-infra-common v0.6.114
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
@@ -97,5 +97,5 @@ require (
 	google.golang.org/genproto v0.0.0-20241118233622-e639e219e697 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20241209162323-e6fa225c2576 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250102185135-69823020774d // indirect
-	google.golang.org/protobuf v1.36.1 // indirect
+	google.golang.org/protobuf v1.36.2 // indirect
 )
