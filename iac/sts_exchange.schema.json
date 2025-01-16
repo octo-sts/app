@@ -102,6 +102,11 @@
                 "name": "base_ref",
                 "type": "STRING",
                 "mode": "NULLABLE"
+            },
+            {
+                "name": "aud",
+                "type": "STRING",
+                "mode": "NULLABLE"
             }
           ]
         },
