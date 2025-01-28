@@ -102,7 +102,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
   - **Administration** : `Read-only`
   - **Attestations**: `No Access`
   - **Checks**: `Read/Write`
-  - **Code Scanning Alerts**: `No Access`
+  - **Code Scanning Alerts**: `Read/Write`
   - **Codespaces**: `No Access`
   - **Codespaces lifecycle admin**: `No Access`
   - **Codespaces metadata**: `No Access`
@@ -114,7 +114,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
   - **Dependabot secrets**: `No Access`
   - **Deployments**: `Read/Write`
   - **Discussions**: `Read/Write`
-  - **Environments**: `No Access`
+  - **Environments**: `Read/Write`
   - **Issues**: `Read/Write`
   - **Merge queues**: `No Access`
   - **Metadata (Mandatory)**: `Read-only`
