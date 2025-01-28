@@ -8,7 +8,7 @@ require (
 	cloud.google.com/go/kms v1.20.5
 	cloud.google.com/go/secretmanager v1.14.3
 	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
-	github.com/chainguard-dev/clog v1.6.0
+	github.com/chainguard-dev/clog v1.6.1
 	github.com/chainguard-dev/terraform-infra-common v0.6.116
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.12.0
