@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/secretmanager v1.14.4
 	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
 	github.com/chainguard-dev/clog v1.6.1
-	github.com/chainguard-dev/terraform-infra-common v0.6.117
+	github.com/chainguard-dev/terraform-infra-common v0.6.118
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
