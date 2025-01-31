@@ -11,11 +11,12 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v68/github"
 	"github.com/kelseyhightower/envconfig"
-	"github.com/octo-sts/app/pkg/octosts"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
+
+	"github.com/octo-sts/app/pkg/octosts"
 )
 
 type envConfig struct {
@@ -87,8 +88,8 @@ func Func(ctx context.Context) error {
 	if _, _, err := ghc.Issues.Create(ctx,
 		"octo-sts", "prober",
 		&github.IssueRequest{
-			Title: github.String("octo-sts prober was able to create an issue"),
-			Body:  github.String("This should fail!"),
+			Title: github.Ptr("octo-sts prober was able to create an issue"),
+			Body:  github.Ptr("This should fail!"),
 		}); err == nil {
 		return fmt.Errorf("expected to fail creating an issue")
 	}

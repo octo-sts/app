@@ -19,7 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v68/github"
 	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
@@ -300,7 +300,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 		if err != nil {
 			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 			// Don't leak the error to the client.
-			return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", trustPolicyKey.identity)
+			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
 		}
 
 		raw, err = file.GetContent()
