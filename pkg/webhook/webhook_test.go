@@ -391,19 +391,19 @@ func TestWebhook_NonSTSFiles(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Int64(1111),
+			ID: github.Ptr(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.String("foo"),
+			Login: github.Ptr("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.String("foo"),
+				Login: github.Ptr("foo"),
 			},
-			Name: github.String("bar"),
+			Name: github.Ptr("bar"),
 		},
-		Before: github.String("1234"),
-		After:  github.String("2345"),
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("2345"),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -431,15 +431,15 @@ func TestWebhook_NonSTSFiles(t *testing.T) {
 	want := []*github.CreateCheckRunOptions{{
 		Name:       "Trust Policy Validation",
 		HeadSHA:    "2345",
-		ExternalID: github.String("2345"),
-		Status:     github.String("completed"),
-		Conclusion: github.String("failure"),
+		ExternalID: github.Ptr("2345"),
+		Status:     github.Ptr("completed"),
+		Conclusion: github.Ptr("failure"),
 		// Use time from the response to ignore it.
 		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
 		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
 		Output: &github.CheckRunOutput{
-			Title:   github.String("Non-STS YAML file(s)."),
-			Summary: github.String("Found non-STS YAML files in `.github/chainguard` directory:\n\n.github/chainguard/test.yaml"),
+			Title:   github.Ptr("Non-STS YAML file(s)."),
+			Summary: github.Ptr("Found non-STS YAML files in `.github/chainguard` directory:\n\n.github/chainguard/test.yaml"),
 		},
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {

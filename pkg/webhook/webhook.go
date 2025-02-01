@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -454,14 +455,14 @@ func (e *Validator) handleNonSTSFiles(ctx context.Context, client *github.Client
 	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
 		Name:        "Trust Policy Validation",
 		HeadSHA:     sha,
-		ExternalID:  github.String(sha),
-		Status:      github.String("completed"),
-		Conclusion:  github.String("failure"),
+		ExternalID:  github.Ptr(sha),
+		Status:      github.Ptr("completed"),
+		Conclusion:  github.Ptr("failure"),
 		StartedAt:   &github.Timestamp{Time: time.Now()},
 		CompletedAt: &github.Timestamp{Time: time.Now()},
 		Output: &github.CheckRunOutput{
-			Title:   github.String("Non-STS YAML file(s)."),
-			Summary: github.String("Found non-STS YAML files in `.github/chainguard` directory:\n\n" + strings.Join(nonSTSFiles, "\n")),
+			Title:   github.Ptr("Non-STS YAML file(s)."),
+			Summary: github.Ptr("Found non-STS YAML files in `.github/chainguard` directory:\n\n" + strings.Join(nonSTSFiles, "\n")),
 		},
 	})
 	if err != nil {
