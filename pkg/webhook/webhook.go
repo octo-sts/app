@@ -255,9 +255,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		}
 	}
 	var nonSTSFiles []string
-	for _, f := range files {
-		if !strings.HasSuffix(f, ".sts.yaml") {
-			nonSTSFiles = append(nonSTSFiles, f)
+	for _, f := range resp.Files {
+		// Check for YAML files in .github/chainguard/ that are not *.sts.yaml files.
+		sts, _ := filepath.Match(".github/chainguard/*.sts.yaml", f.GetFilename())
+		nonsts, _ := filepath.Match(".github/chainguard/*.yaml", f.GetFilename())
+		if nonsts && !sts {
+			nonSTSFiles = append(nonSTSFiles, f.GetFilename())
 		}
 	}
 	if len(nonSTSFiles) > 0 {
