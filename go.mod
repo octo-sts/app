@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/secretmanager v1.14.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.13.0
 	github.com/chainguard-dev/clog v1.6.1
-	github.com/chainguard-dev/terraform-infra-common v0.6.122
+	github.com/chainguard-dev/terraform-infra-common v0.6.123
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
@@ -21,7 +21,7 @@ require (
 	golang.org/x/oauth2 v0.26.0
 	google.golang.org/api v0.221.0
 	google.golang.org/grpc v1.70.0
-	k8s.io/apimachinery v0.32.1
+	k8s.io/apimachinery v0.32.2
 	sigs.k8s.io/yaml v1.4.0
 )
 
@@ -39,7 +39,7 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/power-devops/perfstat v0.0.0-20210106213030-5aafc221ea8c // indirect
-	github.com/sethvargo/go-envconfig v1.1.0 // indirect
+	github.com/sethvargo/go-envconfig v1.1.1 // indirect
 	github.com/shirou/gopsutil/v4 v4.25.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
