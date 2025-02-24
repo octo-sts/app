@@ -18,9 +18,8 @@ linters:
     - unconvert
     - unparam
     - whitespace
-output:
-  uniq-by-line: false
 issues:
+  uniq-by-line: false
   exclude-rules:
     - path: _test\.go
       linters:
