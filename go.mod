@@ -1,7 +1,6 @@
 module github.com/octo-sts/app
 
 go 1.24
-
 require (
 	chainguard.dev/go-grpc-kit v0.17.7
 	chainguard.dev/sdk v0.1.31
@@ -9,7 +8,7 @@ require (
 	cloud.google.com/go/secretmanager v1.14.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.14.0
 	github.com/chainguard-dev/clog v1.6.1
-	github.com/chainguard-dev/terraform-infra-common v0.6.125
+	github.com/chainguard-dev/terraform-infra-common v0.6.127
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.12.0
 	github.com/golang-jwt/jwt/v4 v4.5.1
@@ -30,8 +29,8 @@ require (
 	cloud.google.com/go/longrunning v0.6.4 // indirect
 	cloud.google.com/go/trace v1.11.3 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.25.0 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.26.0 // indirect
-	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.50.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.27.0 // indirect
+	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.51.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ebitengine/purego v0.8.2 // indirect
 	github.com/go-ole/go-ole v1.2.6 // indirect
