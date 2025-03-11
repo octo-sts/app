@@ -1,6 +1,9 @@
 module github.com/octo-sts/app
 
-go 1.24
+go 1.24.0
+
+toolchain go1.24.1
+
 require (
 	chainguard.dev/go-grpc-kit v0.17.7
 	chainguard.dev/sdk v0.1.31
