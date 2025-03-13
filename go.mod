@@ -21,7 +21,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.28.0
-	google.golang.org/api v0.224.0
+	google.golang.org/api v0.225.0
 	google.golang.org/grpc v1.71.0
 	k8s.io/apimachinery v0.32.3
 	sigs.k8s.io/yaml v1.4.0
@@ -98,6 +98,6 @@ require (
 	golang.org/x/time v0.11.0 // indirect
 	google.golang.org/genproto v0.0.0-20250122153221-138b5a5a4fd4 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250219182151-9fdb1cabc7b2 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20250227231956-55c901821b1e // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20250303144028-a0af3efb3deb // indirect
 	google.golang.org/protobuf v1.36.5 // indirect
 )
