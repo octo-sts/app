@@ -14,7 +14,7 @@ require (
 	github.com/chainguard-dev/terraform-infra-common v0.6.131
 	github.com/cloudevents/sdk-go/v2 v2.15.2
 	github.com/coreos/go-oidc/v3 v3.13.0
-	github.com/golang-jwt/jwt/v4 v4.5.1
+	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-github/v69 v69.2.0
 	github.com/hashicorp/go-multierror v1.1.1
