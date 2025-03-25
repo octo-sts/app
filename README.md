@@ -141,7 +141,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 - **Events**: `Read-only`
 - **GitHub Copilot Business**: `No Access`
 - **Knowledge bases**: `No Access`
-- **Members**: `Read-only`
+- **Members**: `Read/Write`
 - **Organization codespaces**: `No Access`
 - **Organization codespaces secrets**: `No Access`
 - **Organization codespaces settings**: `No Access`
