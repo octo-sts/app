@@ -21,7 +21,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.28.0
-	google.golang.org/api v0.227.0
+	google.golang.org/api v0.228.0
 	google.golang.org/grpc v1.71.0
 	k8s.io/apimachinery v0.32.3
 	sigs.k8s.io/yaml v1.4.0
@@ -51,7 +51,7 @@ require (
 
 require (
 	cloud.google.com/go/auth v0.15.0 // indirect
-	cloud.google.com/go/auth/oauth2adapt v0.2.7 // indirect
+	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.6.0 // indirect
 	cloud.google.com/go/iam v1.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -99,5 +99,5 @@ require (
 	google.golang.org/genproto v0.0.0-20250303144028-a0af3efb3deb // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250303144028-a0af3efb3deb // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250313205543-e70fdf4c4cb4 // indirect
-	google.golang.org/protobuf v1.36.5 // indirect
+	google.golang.org/protobuf v1.36.6 // indirect
 )
