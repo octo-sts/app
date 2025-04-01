@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"log"
 	"log/slog"
 	"os"
@@ -20,7 +21,7 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/credentials"
 )
 
 func main() {
@@ -63,7 +64,9 @@ func main() {
 		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		// grpc.ChainStreamInterceptor(grpc_prometheus.StreamServerInterceptor),
 		// grpc.ChainUnaryInterceptor(grpc_prometheus.UnaryServerInterceptor, interceptors.ServerErrorInterceptor),
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+			MinVersion: tls.VersionTLS12,
+		})),
 	)
 
 	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
