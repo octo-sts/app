@@ -19,6 +19,8 @@ import (
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -61,6 +63,7 @@ func main() {
 		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
 		// grpc.ChainStreamInterceptor(grpc_prometheus.StreamServerInterceptor),
 		// grpc.ChainUnaryInterceptor(grpc_prometheus.UnaryServerInterceptor, interceptors.ServerErrorInterceptor),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
 	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
