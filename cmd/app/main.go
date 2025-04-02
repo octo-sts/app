@@ -7,6 +7,7 @@ import (
 	"context"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 
@@ -74,6 +75,17 @@ func main() {
 	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
+	}
+
+	if err := d.MUX.HandlePath(http.MethodGet, "/", func(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+		w.Header().Set("Content-Type", "application/json")
+		s := `{"msg": "please check documentation for usage: https://github.com/octo-sts/app"}`
+		if _, err := w.Write([]byte(s)); err != nil {
+			log.Printf("Failed to write bytes back to client: %v", err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	}); err != nil {
+		log.Panicf("failed to register root GET handler: %v", err)
 	}
 
 	if err := d.ListenAndServe(ctx); err != nil {
