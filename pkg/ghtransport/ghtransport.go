@@ -9,13 +9,12 @@ import (
 	"net/http"
 	"os"
 
-	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
-	"github.com/octo-sts/app/pkg/gcpkms"
+	"github.com/octo-sts/app/pkg/kms"
 )
 
-func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
+func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient kms.KMS) (*ghinstallation.AppsTransport, error) {
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
 		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(os.Getenv(env.AppSecretCertificateEnvVar)))
@@ -37,7 +36,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 			return nil, fmt.Errorf("failed to process env var: %q", env.KMSKey)
 		}
 
-		signer, err := gcpkms.New(ctx, kmsClient, env.KMSKey)
+		signer, err := kmsClient.NewSigner()
 		if err != nil {
 			return nil, fmt.Errorf("error creating signer: %w", err)
 		}
