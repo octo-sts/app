@@ -31,6 +31,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	"github.com/octo-sts/app/pkg/jwks"
 	"github.com/octo-sts/app/pkg/provider"
 )
 
@@ -57,10 +58,11 @@ var (
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
-	ceclient cloudevents.Client
-	domain   string
-	metrics  bool
+	atr            *ghinstallation.AppsTransport
+	ceclient       cloudevents.Client
+	domain         string
+	metrics        bool
+	jwksConfigOpts []jwks.ConfigOption
 }
 
 type cacheTrustPolicyKey struct {
@@ -107,22 +109,42 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 	bearer := strings.TrimPrefix(auth[0], "Bearer ")
 
-	// Validate the Bearer token.
-	issuer, err := apiauth.ExtractIssuer(bearer)
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
+		return nil, err
+	}
+	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
+
+	var verifier *oidc.IDTokenVerifier
+
+	// If a JWKS is set on the trust policy, we need to use it to validate the
+	// incoming token. This is for supporting OIDC discovery endpoints that are
+	// not reachable from the Internet, such as a Kubernetes cluster with a
+	// private API server/OIDC discovery endpoint.
+	if e.TrustPolicy.JWKS != "" {
+		var err error
+		verifier, err = jwks.NewVerifier(e.TrustPolicy.JWKS, s.jwksConfigOpts...)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "failed to parse JWKS: %v", err)
+		}
+	} else {
+		// Validate the Bearer token.
+		issuer, err := apiauth.ExtractIssuer(bearer)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
+		}
+
+		// Fetch the provider from the cache or create a new one and add to the cache
+		p, err := provider.Get(ctx, issuer)
+		if err != nil {
+			return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
+		}
+		verifier = p.Verifier(&oidc.Config{
+			// The audience is verified later on by the trust policy.
+			SkipClientIDCheck: true,
+		})
 	}
 
-	// Fetch the provider from the cache or create a new one and add to the cache
-	p, err := provider.Get(ctx, issuer)
-	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
-	}
-
-	verifier := p.Verifier(&oidc.Config{
-		// The audience is verified later on by the trust policy.
-		SkipClientIDCheck: true,
-	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
 		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
@@ -133,12 +155,6 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Issuer:  tok.Issuer,
 		Subject: tok.Subject,
 	}
-
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
-	if err != nil {
-		return nil, err
-	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
 
 	// Check the token against the federation rules.
 	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)

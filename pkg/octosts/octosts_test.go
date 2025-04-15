@@ -37,6 +37,7 @@ import (
 	"github.com/google/go-github/v69/github"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/octo-sts/app/pkg/jwks"
 	"github.com/octo-sts/app/pkg/provider"
 )
 
@@ -121,17 +122,26 @@ func TestExchange(t *testing.T) {
 	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
 		PublicKeys: []crypto.PublicKey{pk.Public()},
 	})
-	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+	signedTokenCtx := metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	// This is an expired token.
+	const jwksToken = `eyJhbGciOiJSUzI1NiIsImtpZCI6IkxIVkdQOGtxek4xTXVLUk1Uc3JvSWNSLTdoZGljWFdkcGFxdUVXY0FoOVEifQ.eyJhdWQiOlsiaHR0cHM6Ly9rdWJlcm5ldGVzLmRlZmF1bHQuc3ZjLmNsdXN0ZXIubG9jYWwiXSwiZXhwIjoxNzQ0NzYzODI0LCJpYXQiOjE3NDQ3NjMyMjQsImlzcyI6Imh0dHBzOi8va3ViZXJuZXRlcy5kZWZhdWx0LnN2Yy5jbHVzdGVyLmxvY2FsIiwianRpIjoiODU2YTA2OWItZmUyZi00OTI4LTgzNGMtOTUwNGYwMmU4MzQzIiwia3ViZXJuZXRlcy5pbyI6eyJuYW1lc3BhY2UiOiJkZWZhdWx0Iiwic2VydmljZWFjY291bnQiOnsibmFtZSI6ImRlZmF1bHQiLCJ1aWQiOiIxYjg3OTNjZC02YTYyLTQ2ZmYtOWNmNy1lN2ZlOWU3Y2RiODYifX0sIm5iZiI6MTc0NDc2MzIyNCwic3ViIjoic3lzdGVtOnNlcnZpY2VhY2NvdW50OmRlZmF1bHQ6ZGVmYXVsdCJ9.NF8UW6O8nqQ0HIKNxc2UuRBOZ5QRQhosS9_2zd0I9sCdE5OL6YWarYLb9-1_hDqEZkve5drvTTUx6fcgP3_mn10RKDg18mxbHL1dGHNTm3ZnfeTEw6XBndBocLs_Ytb8E_du_PozoKkEKDktVb98YTdgF-J3mhJTt_KBPNTkwSaFSzH6RDMq38LQaF-SKDcv2qzdzj8L6edUHNWZxf4UvqFLlEwVcmXjkh1XWmNQ-rvgc4oK7NGPuWQThkozrIsjlgKsG8ueFiATUx7I9SuRRGiOl4Vz6KfMUoCkeKLFfLXNRdVSP1C3KNtOOZWdlIJBye7pz-9VydB3DzkWVtsfAA`
+	jwksTokenCtx := metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + jwksToken}})
 
 	sts := &sts{
 		atr: atr,
+		jwksConfigOpts: []jwks.ConfigOption{
+			func(c *oidc.Config) { c.SkipExpiryCheck = true },
+		},
 	}
 	for _, tc := range []struct {
+		ctx  context.Context
 		name string
 		req  *v1.ExchangeRequest
 		want *github.InstallationTokenOptions
 	}{
 		{
+			ctx:  signedTokenCtx,
 			name: "repo",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
@@ -145,6 +155,7 @@ func TestExchange(t *testing.T) {
 			},
 		},
 		{
+			ctx:  signedTokenCtx,
 			name: "org",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
@@ -156,9 +167,23 @@ func TestExchange(t *testing.T) {
 				},
 			},
 		},
+		{
+			ctx:  jwksTokenCtx,
+			name: "repo with jwks",
+			req: &v1.ExchangeRequest{
+				Identity: "jwks",
+				Scope:    "org/repo",
+			},
+			want: &github.InstallationTokenOptions{
+				Repositories: []string{"repo"},
+				Permissions: &github.InstallationPermissions{
+					PullRequests: github.Ptr("write"),
+				},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			tok, err := sts.Exchange(ctx, tc.req)
+			tok, err := sts.Exchange(tc.ctx, tc.req)
 			if err != nil {
 				t.Fatalf("Exchange failed: %v", err)
 			}
