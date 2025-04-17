@@ -12,6 +12,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+
   - package-ecosystem: gomod
     directory: "./"
     schedule:
@@ -20,24 +21,12 @@ updates:
       all:
         update-types:
           - "patch"
+
   - package-ecosystem: terraform
-    directory: "/iac"
-    schedule:
-      interval: "daily"
-    groups:
-      all:
-        update-types:
-          - "patch"
-  - package-ecosystem: terraform
-    directory: "/modules/app"
-    schedule:
-      interval: "daily"
-    groups:
-      all:
-        update-types:
-          - "patch"
-  - package-ecosystem: terraform
-    directory: "/iac/bootstrap"
+    directories:
+      - "/iac"
+      - "/iac/bootstrap"
+      - "/modules/app"
     schedule:
       interval: "daily"
     groups:
