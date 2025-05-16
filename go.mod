@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/secretmanager v1.14.7
 	github.com/bradleyfalzon/ghinstallation/v2 v2.15.0
 	github.com/chainguard-dev/clog v1.7.0
-	github.com/chainguard-dev/terraform-infra-common v0.6.144
+	github.com/chainguard-dev/terraform-infra-common v0.6.145
 	github.com/cloudevents/sdk-go/v2 v2.16.0
 	github.com/coreos/go-oidc/v3 v3.14.1
 	github.com/golang-jwt/jwt/v4 v4.5.2
@@ -21,7 +21,7 @@ require (
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.233.0
 	google.golang.org/grpc v1.72.1
-	k8s.io/apimachinery v0.33.0
+	k8s.io/apimachinery v0.33.1
 	sigs.k8s.io/yaml v1.4.0
 )
 
