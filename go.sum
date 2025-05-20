@@ -47,8 +47,8 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/chainguard-dev/clog v1.7.0 h1:guPznsK8vLHvzz1QJe2yU6MFeYaiSOFOQBYw4OXu+g8=
 github.com/chainguard-dev/clog v1.7.0/go.mod h1:4+WFhRMsGH79etYXY3plYdp+tCz/KCkU8fAr0HoaPvs=
-github.com/chainguard-dev/terraform-infra-common v0.6.145 h1:lG3/AB9AIiNYPlsEduURK1nPDr52vPnTaYEJATVFY2w=
-github.com/chainguard-dev/terraform-infra-common v0.6.145/go.mod h1:pyClKpivQs3jFMyHlxsboe3ANEP31mLRUbWbKjK/fB0=
+github.com/chainguard-dev/terraform-infra-common v0.6.147 h1:RUAqBNWBDt6bCxwj6JGtf9+qRraKOGNbF92zZu1qLPc=
+github.com/chainguard-dev/terraform-infra-common v0.6.147/go.mod h1:faSha1/kHYmg/twcT0nc9ZwcnH3g3ihGTdbohUox1pQ=
 github.com/client9/misspell v0.3.4/go.mod h1:qj6jICC3Q7zFZvVWo7KLAzC3yx5G7kyvSDkc90ppPyw=
 github.com/cloudevents/sdk-go/v2 v2.16.0 h1:wnunjgiLQCfYlyo+E4+mFlZtAh7pKn7vT8MMD3lSwCg=
 github.com/cloudevents/sdk-go/v2 v2.16.0/go.mod h1:5YWqklyhDSmGzBK/JENKKXdulbPq0JFf3c/KEnMLqgg=
