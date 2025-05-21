@@ -133,7 +133,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 #### Organization Permissions:
 
 - **API Insights**: `No Access`
-- **Administration**: `Read-only`
+- **Administration**: `Read/Write`
 - **Blocking users**: `No Access`
 - **Custom organizations roles**: `No Access`
 - **Custom properties**: `No Access`
