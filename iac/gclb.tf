@@ -23,7 +23,7 @@ resource "google_dns_managed_zone" "top-level-zone" {
 // Put the above domain in front of our regional services.
 module "serverless-gclb" {
   source  = "chainguard-dev/common/infra//modules/serverless-gclb"
-  version = "0.6.147"
+  version = "0.6.148"
 
   name       = var.name
   project_id = var.project_id
