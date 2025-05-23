@@ -14,7 +14,7 @@ The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-
 
 For the App to produce credentials that work with resources in your organization
 it must be installed into the organization and have access to any repositories
-that you will want workloads to be able to interact with.  Unfortunately due to
+that you will want workloads to be able to interact with. Unfortunately due to
 limitations with GitHub Apps, the App must ask for a superset of the permissions
 needed for federation, so the full set of permissions the App requests will be
 large, but with one exception (`contents: read` reading policy files) the App
@@ -25,6 +25,7 @@ configured.
 
 Trust policies are checked into `.github/chainguard/{name}.sts.yaml`, and
 consist of a few key parts:
+
 1. The claim matching criteria for federation,
 2. The permissions to grant the identity, and
 3. (for Org-level policies) The list of repositories to grant access.
@@ -43,7 +44,7 @@ permissions:
 ```
 
 The Trust Policy can also match the issuer, subject, and even custom claims with
-regular expressions.  For example:
+regular expressions. For example:
 
 ```yaml
 issuer: https://accounts.google.com
@@ -64,6 +65,7 @@ The GitHub App implements the Chainguard `SecurityTokenService` GRPC service
 definition [here](https://github.com/chainguard-dev/sdk/blob/main/proto/platform/oidc/v1/oidc.platform.proto#L13-L28).
 
 If a `${TOKEN}` suitable for federation is sent like so:
+
 ```
 curl -H "Authorization: Bearer ${TOKEN}" \
   "https://octo-sts.dev/sts/exchange?scope=${REPO}&identity=${NAME}"
@@ -78,6 +80,32 @@ policy.
 
 Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
 we will might make a new release.
+
+### Best Practices
+
+To ensure secure and effective use of octo-sts, follow these recommended practices:
+
+#### Repository Security
+
+- **Enable branch protection**: Configure branch protection rules on your main/default branch to prevent direct commits and require pull request reviews before merging changes. This prevents OctoSTS clients from bypassing security controls by directly merging changes to main without review.
+
+- **Restrict who can approve pull requests**: Limit pull request approval permissions to trusted team members or repository administrators.
+
+### Trust Policy Management
+
+- **Principle of least privilege**: Grant only the minimum permissions necessary for your workloads to function. Start with read-only permissions and add write permissions only when required.
+
+- **Scope policies narrowly**: Create specific trust policies for different workloads rather than using broad, catch-all policies.
+
+- **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements.
+
+- **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org/repo:ref:refs/heads/main` instead of `repo:org/repo:.*`.
+
+#### Token Management
+
+- **Rotate regularly**: While octo-sts tokens are short-lived, ensure your OIDC token sources (like GitHub Actions) are properly configured and rotated according to best practices.
+
+- **Secure OIDC token handling**: Ensure your workloads properly secure and handle OIDC tokens before exchanging them with octo-sts.
 
 ### Permission updates
 
@@ -96,41 +124,41 @@ one change during the quarter.
 
 The following permissions are the currently enabled in octo-Sts and will be available when installing the GitHub APP
 
-#### Repository Permissions:
+#### Repository Permissions
 
-  - **Actions**: `Read/Write`
-  - **Administration** : `Read-only`
-  - **Attestations**: `No Access`
-  - **Checks**: `Read/Write`
-  - **Code Scanning Alerts**: `Read/Write`
-  - **Codespaces**: `No Access`
-  - **Codespaces lifecycle admin**: `No Access`
-  - **Codespaces metadata**: `No Access`
-  - **Codespaces secrets**: `No Access`
-  - **Commit statuses**: `Read/Write`
-  - **Contents**: `Read/Write`
-  - **Custom properties**: `No Access`
-  - **Dependabot alerts**: `No Access`
-  - **Dependabot secrets**: `No Access`
-  - **Deployments**: `Read/Write`
-  - **Discussions**: `Read/Write`
-  - **Environments**: `Read/Write`
-  - **Issues**: `Read/Write`
-  - **Merge queues**: `No Access`
-  - **Metadata (Mandatory)**: `Read-only`
-  - **Packages**: `Read/Write`
-  - **Pages**: `No Access`
-  - **Projects**: `Read/Write`
-  - **Pull requests**: `Read/Write`
-  - **Repository security advisories**: `No Access`
-  - **Secret scanning alerts**: `No Access`
-  - **Secrets**: `No Access`
-  - **Single file**: `No Access`
-  - **Variables**: `No Access`
-  - **Webhooks**: `No Access`
-  - **Workflows**: `Read/Write`
+- **Actions**: `Read/Write`
+- **Administration** : `Read-only`
+- **Attestations**: `No Access`
+- **Checks**: `Read/Write`
+- **Code Scanning Alerts**: `Read/Write`
+- **Codespaces**: `No Access`
+- **Codespaces lifecycle admin**: `No Access`
+- **Codespaces metadata**: `No Access`
+- **Codespaces secrets**: `No Access`
+- **Commit statuses**: `Read/Write`
+- **Contents**: `Read/Write`
+- **Custom properties**: `No Access`
+- **Dependabot alerts**: `No Access`
+- **Dependabot secrets**: `No Access`
+- **Deployments**: `Read/Write`
+- **Discussions**: `Read/Write`
+- **Environments**: `Read/Write`
+- **Issues**: `Read/Write`
+- **Merge queues**: `No Access`
+- **Metadata (Mandatory)**: `Read-only`
+- **Packages**: `Read/Write`
+- **Pages**: `No Access`
+- **Projects**: `Read/Write`
+- **Pull requests**: `Read/Write`
+- **Repository security advisories**: `No Access`
+- **Secret scanning alerts**: `No Access`
+- **Secrets**: `No Access`
+- **Single file**: `No Access`
+- **Variables**: `No Access`
+- **Webhooks**: `No Access`
+- **Workflows**: `Read/Write`
 
-#### Organization Permissions:
+#### Organization Permissions
 
 - **API Insights**: `No Access`
 - **Administration**: `Read/Write`
