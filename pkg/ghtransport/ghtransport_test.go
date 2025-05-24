@@ -19,7 +19,7 @@ import (
 	gcpKMS "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/octo-sts/app/pkg/envconfig"
-	kmsGCP "github.com/octo-sts/app/pkg/gcpkms"
+	"github.com/octo-sts/app/pkg/kms/gcp"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -181,5 +181,5 @@ type testKMSSigner struct {
 
 func (k *testKMSSigner) NewSigner() (ghinstallation.Signer, error) {
 	client := generateKMSClient(k.ctx, k.t)
-	return kmsGCP.New(k.ctx, client, k.key)
+	return gcp.New(k.ctx, client, k.key)
 }
