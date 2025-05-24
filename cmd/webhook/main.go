@@ -14,13 +14,13 @@ import (
 	"strings"
 	"time"
 
-	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
+	"github.com/octo-sts/app/pkg/kms"
 	"github.com/octo-sts/app/pkg/webhook"
 )
 
@@ -45,16 +45,16 @@ func main() {
 		defer metrics.SetupTracer(ctx)()
 	}
 
-	var client *kms.KeyManagementClient
+	var kmsClient kms.KMS
 
 	if baseCfg.KMSKey != "" {
-		client, err = kms.NewKeyManagementClient(ctx)
+		kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, baseCfg.KMSKey)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
+	atr, err := ghtransport.New(ctx, baseCfg, kmsClient)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
