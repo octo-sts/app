@@ -1,4 +1,4 @@
-// Copyright 2024 Chainguard, Inc.
+// Copyright 2025 Chainguard, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 package kms
@@ -12,8 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	kmsAWS "github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/octo-sts/app/pkg/awskms"
-	"github.com/octo-sts/app/pkg/gcpkms"
+	"github.com/octo-sts/app/pkg/kms/aws"
+	"github.com/octo-sts/app/pkg/kms/gcp"
 )
 
 const (
@@ -64,9 +64,9 @@ func NewKMS(ctx context.Context, provider, kmsKey string) (KMS, error) {
 func (k *kmsProvider) NewSigner() (ghinstallation.Signer, error) {
 	switch k.provider {
 	case GCP:
-		return gcpkms.New(k.ctx, k.gcpClient, k.kmsKey)
+		return gcp.New(k.ctx, k.gcpClient, k.kmsKey)
 	case AWS:
-		return awskms.New(k.ctx, k.awsClient, k.kmsKey)
+		return aws.New(k.ctx, k.awsClient, k.kmsKey)
 	default:
 		return nil, errors.New("unsupported kms provider")
 	}
