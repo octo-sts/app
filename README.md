@@ -59,6 +59,34 @@ permissions:
 This policy will allow OIDC tokens from Google accounts of folks with a
 Chainguard email address to federate and read the repo contents.
 
+## Organization Trusted Token Issuers
+
+Octo-STS supports organization-wide trusted token issuer validation as an additional security layer. Organizations can centrally control which OIDC issuers are permitted to federate with their repositories by creating a configuration file at `.github/chainguard/trusted-token-issuers.yaml` in their organization's `.github` repository.
+
+When enabled, octo-sts validates the issuer against the organization's trusted issuers list before proceeding with individual trust policy validation. If no configuration exists or it's disabled, all issuers are accepted (maintaining backward compatibility).
+
+### Example Configuration
+
+```yaml
+# Organization OIDC Trusted Token Issuers Configuration
+description: "Organization OIDC trusted token issuers configuration"
+enabled: true
+
+# List of exact trusted issuer URLs
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+  - "https://accounts.google.com"
+
+# List of issuer regex patterns for flexible matching
+issuer_patterns:
+  # GitHub Actions from any domain
+  - "https://.*\\.github(usercontent)?\\.com"
+  # AWS EKS OIDC issuers
+  - "https://oidc\\.eks\\.[a-z0-9-]+\\.amazonaws\\.com/id/[A-Z0-9]+"
+```
+
+This provides defense-in-depth security by adding organization-wide issuer validation before trust policy evaluation.
+
 ### Federating a token
 
 The GitHub App implements the Chainguard `SecurityTokenService` GRPC service
@@ -100,6 +128,8 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 - **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements.
 
 - **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org/repo:ref:refs/heads/main` instead of `repo:org/repo:.*`.
+
+- **Configure trusted token issuers**: Use the organization-wide trusted token issuers feature to add an additional security layer that validates OIDC issuers before individual trust policy evaluation. See the [Organization Trusted Token Issuers](#organization-trusted-token-issuers) section for details.
 
 #### Token Management
 
