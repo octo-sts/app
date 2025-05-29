@@ -79,8 +79,6 @@ trusted_issuers:
 
 # List of issuer regex patterns for flexible matching
 issuer_patterns:
-  # GitHub Actions from any domain
-  - "https://.*\\.github(usercontent)?\\.com"
   # AWS EKS OIDC issuers
   - "https://oidc\\.eks\\.[a-z0-9-]+\\.amazonaws\\.com/id/[A-Z0-9]+"
 ```
