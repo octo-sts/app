@@ -51,8 +51,9 @@ func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient c
 
 var (
 	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
-	installationIDs, _ = lru.New2Q[string, int64](200)
-	trustPolicies      = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+	installationIDs, _  = lru.New2Q[string, int64](200)
+	trustPolicies       = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+	trustedTokenIssuers = expirablelru.NewLRU[string, string](50, nil, time.Minute*5)
 )
 
 type sts struct {

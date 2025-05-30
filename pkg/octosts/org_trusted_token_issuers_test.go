@@ -6,10 +6,8 @@ package octosts
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/google/go-github/v71/github"
 )
@@ -43,12 +41,8 @@ func TestNewOrgTrustedTokenIssuersValidator(t *testing.T) {
 		t.Errorf("Expected configFile to be 'test-config.yaml', got %s", validator.configFile)
 	}
 
-	if validator.maxCacheSize != 50 {
-		t.Errorf("Expected maxCacheSize to be 50, got %d", validator.maxCacheSize)
-	}
-
-	if validator.cacheTTL != 5*time.Minute {
-		t.Errorf("Expected cacheTTL to be 5 minutes, got %v", validator.cacheTTL)
+	if validator.githubClients == nil {
+		t.Errorf("Expected githubClients to be initialized")
 	}
 }
 
@@ -180,133 +174,66 @@ func TestValidateIssuer_NoClient(t *testing.T) {
 	}
 }
 
-func TestValidateIssuer_DisabledConfig(t *testing.T) {
+func TestParseConfig(t *testing.T) {
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
-	ctx := context.Background()
-
-	// Create a GitHub client
-	client := &github.Client{}
-
-	// Set the client for the validator
-	validator.SetGithubClient("testorg", client)
-
-	// Manually set cache with disabled config
-	validator.cache["testorg"] = &CacheEntry{
-		config: &OrgTrustedTokenIssuersConfig{
-			Enabled: false,
-		},
-		timestamp: time.Now(),
-	}
-
-	err := validator.ValidateIssuer(ctx, "testorg", "https://any-issuer.com")
-	if err != nil {
-		t.Errorf("Expected no error for disabled config, got %v", err)
-	}
-}
-
-func TestValidateIssuer_EnabledConfig(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
-	ctx := context.Background()
-
-	client := &github.Client{}
-	validator.SetGithubClient("testorg", client)
 
 	tests := []struct {
-		name      string
-		config    *OrgTrustedTokenIssuersConfig
-		issuer    string
-		expectErr bool
+		name        string
+		content     string
+		expectErr   bool
+		expectEmpty bool
 	}{
 		{
-			name: "Exact match allowed",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled: true,
-				TrustedIssuers: []string{
-					"https://token.actions.githubusercontent.com",
-					"https://accounts.google.com",
-				},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: false,
+			name: "Valid config",
+			content: `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+issuer_patterns:
+  - "https://.*\\.github.*\\.com"
+`,
+			expectErr:   false,
+			expectEmpty: false,
 		},
 		{
-			name: "Exact match not found",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled: true,
-				TrustedIssuers: []string{
-					"https://accounts.google.com",
-				},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: true,
+			name: "Disabled config",
+			content: `
+enabled: false
+`,
+			expectErr:   false,
+			expectEmpty: false,
 		},
 		{
-			name: "Pattern match allowed",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled:        true,
-				IssuerPatterns: []string{"https://.*\\.githubusercontent\\.com"},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: false,
+			name: "Invalid issuer",
+			content: `
+enabled: true
+trusted_issuers:
+  - "http://insecure.com"
+`,
+			expectErr:   true,
+			expectEmpty: false,
 		},
 		{
-			name: "Pattern match not found",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled:        true,
-				IssuerPatterns: []string{"https://.*\\.google\\.com"},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: true,
+			name: "Invalid regex pattern",
+			content: `
+enabled: true
+issuer_patterns:
+  - "[invalid regex"
+`,
+			expectErr:   true,
+			expectEmpty: false,
 		},
 		{
-			name: "Multiple patterns, one matches",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled: true,
-				IssuerPatterns: []string{
-					"https://.*\\.google\\.com",
-					"https://.*\\.githubusercontent\\.com",
-				},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: false,
-		},
-		{
-			name: "Mix of exact and pattern matches",
-			config: &OrgTrustedTokenIssuersConfig{
-				Enabled: true,
-				TrustedIssuers: []string{
-					"https://accounts.google.com",
-				},
-				IssuerPatterns: []string{
-					"https://.*\\.githubusercontent\\.com",
-				},
-			},
-			issuer:    "https://token.actions.githubusercontent.com",
-			expectErr: false,
+			name:        "Invalid YAML",
+			content:     `enabled: true\ninvalid yaml: [`,
+			expectErr:   true,
+			expectEmpty: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Compile patterns if they exist
-			if len(tt.config.IssuerPatterns) > 0 {
-				tt.config.compiledPatterns = make([]*regexp.Regexp, len(tt.config.IssuerPatterns))
-				for i, pattern := range tt.config.IssuerPatterns {
-					compiled, err := regexp.Compile(pattern)
-					if err != nil {
-						t.Fatalf("Failed to compile test pattern: %v", err)
-					}
-					tt.config.compiledPatterns[i] = compiled
-				}
-			}
-
-			// Set cache with test config
-			validator.cache["testorg"] = &CacheEntry{
-				config:    tt.config,
-				timestamp: time.Now(),
-			}
-
-			err := validator.ValidateIssuer(ctx, "testorg", tt.issuer)
+			config, err := validator.parseConfig(tt.content)
 			if tt.expectErr {
 				if err == nil {
 					t.Errorf("Expected error, got nil")
@@ -314,6 +241,9 @@ func TestValidateIssuer_EnabledConfig(t *testing.T) {
 			} else {
 				if err != nil {
 					t.Errorf("Expected no error, got %v", err)
+				}
+				if config == nil {
+					t.Errorf("Expected config, got nil")
 				}
 			}
 		})
@@ -321,66 +251,71 @@ func TestValidateIssuer_EnabledConfig(t *testing.T) {
 }
 
 func TestValidateIssuer_ComplexPatterns(t *testing.T) {
+	// Clear cache to avoid interference
+	trustedTokenIssuers.Purge()
+
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
 	ctx := context.Background()
 
-	client := &github.Client{}
-	validator.SetGithubClient("testorg", client)
-
 	tests := []struct {
 		name      string
-		patterns  []string
+		content   string
 		issuer    string
 		expectErr bool
 	}{
 		{
-			name:      "AWS EKS pattern",
-			patterns:  []string{"https://oidc\\.eks\\.[a-z0-9-]+\\.amazonaws\\.com/id/[A-Z0-9]+"},
+			name: "AWS EKS pattern",
+			content: `
+enabled: true
+issuer_patterns:
+  - "https://oidc\\.eks\\.[a-z0-9-]+\\.amazonaws\\.com/id/[A-Z0-9]+"
+`,
 			issuer:    "https://oidc.eks.us-west-2.amazonaws.com/id/ABCDEF123456",
 			expectErr: false,
 		},
 		{
-			name:      "Azure AD pattern",
-			patterns:  []string{"https://login\\.microsoftonline\\.com/[a-f0-9-]+/v2\\.0"},
+			name: "Azure AD pattern",
+			content: `
+enabled: true
+issuer_patterns:
+  - "https://login\\.microsoftonline\\.com/[a-f0-9-]+/v2\\.0"
+`,
 			issuer:    "https://login.microsoftonline.com/12345678-1234-1234-1234-123456789abc/v2.0",
 			expectErr: false,
 		},
 		{
-			name:      "Google Cloud pattern",
-			patterns:  []string{"https://gcp\\.google\\.com/projects/[0-9]+/locations/[a-z0-9-]+/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+"},
-			issuer:    "https://gcp.google.com/projects/123456789/locations/us-central1/workloadIdentityPools/my-pool/providers/my-provider",
+			name: "Exact match",
+			content: `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+`,
+			issuer:    "https://token.actions.githubusercontent.com",
 			expectErr: false,
 		},
 		{
-			name:      "Pattern doesn't match",
-			patterns:  []string{"https://specific\\.domain\\.com"},
-			issuer:    "https://other.domain.com",
+			name: "No match",
+			content: `
+enabled: true
+trusted_issuers:
+  - "https://other.com"
+`,
+			issuer:    "https://token.actions.githubusercontent.com",
 			expectErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config := &OrgTrustedTokenIssuersConfig{
-				Enabled:        true,
-				IssuerPatterns: tt.patterns,
-			}
+			// Clear cache for this test
+			trustedTokenIssuers.Purge()
 
-			// Compile patterns
-			config.compiledPatterns = make([]*regexp.Regexp, len(tt.patterns))
-			for i, pattern := range tt.patterns {
-				compiled, err := regexp.Compile(pattern)
-				if err != nil {
-					t.Fatalf("Failed to compile test pattern: %v", err)
-				}
-				config.compiledPatterns[i] = compiled
-			}
+			// Create a mock client
+			mockClient := &github.Client{}
+			validator.SetGithubClient("testorg", mockClient)
 
-			// Set cache with test config
-			validator.cache["testorg"] = &CacheEntry{
-				config:    config,
-				timestamp: time.Now(),
-			}
+			// Add the config content to cache directly
+			trustedTokenIssuers.Add("testorg", tt.content)
 
 			err := validator.ValidateIssuer(ctx, "testorg", tt.issuer)
 			if tt.expectErr {
@@ -393,32 +328,6 @@ func TestValidateIssuer_ComplexPatterns(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestValidateIssuer_InvalidPatterns(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
-
-	client := &github.Client{}
-	validator.SetGithubClient("testorg", client)
-
-	// Test with invalid regex pattern
-	config := &OrgTrustedTokenIssuersConfig{
-		Enabled:        true,
-		IssuerPatterns: []string{"[invalid regex"},
-	}
-
-	// Manually set cache to simulate loading config with invalid pattern
-	validator.cache["testorg"] = &CacheEntry{
-		config:    config,
-		timestamp: time.Now(),
-	}
-
-	// This should fail when trying to compile the pattern
-	// We'll simulate this by testing the pattern compilation directly
-	_, err := regexp.Compile("[invalid regex")
-	if err == nil {
-		t.Errorf("Expected invalid regex to fail compilation")
 	}
 }
 
@@ -451,74 +360,57 @@ func TestConfigurableFilename(t *testing.T) {
 	}
 }
 
-func TestCacheEviction(t *testing.T) {
+func TestValidateIssuer_InvalidPatterns(t *testing.T) {
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
-	validator.maxCacheSize = 2 // Set small cache size for testing
 
-	// Add entries to fill cache
-	validator.cache["org1"] = &CacheEntry{
-		config:    &OrgTrustedTokenIssuersConfig{Enabled: false},
-		timestamp: time.Now().Add(-10 * time.Minute), // Oldest
-	}
-	validator.cache["org2"] = &CacheEntry{
-		config:    &OrgTrustedTokenIssuersConfig{Enabled: false},
-		timestamp: time.Now().Add(-5 * time.Minute),
-	}
+	// Test with invalid regex pattern
+	invalidContent := `
+enabled: true
+issuer_patterns:
+  - "[invalid regex"
+`
 
-	// Verify cache is full
-	if len(validator.cache) != 2 {
-		t.Errorf("Expected cache size 2, got %d", len(validator.cache))
-	}
-
-	// Add third entry, should evict oldest (org1)
-	validator.cache["org3"] = &CacheEntry{
-		config:    &OrgTrustedTokenIssuersConfig{Enabled: false},
-		timestamp: time.Now(),
-	}
-
-	// Manually trigger LRU eviction logic
-	if len(validator.cache) > validator.maxCacheSize {
-		var oldestOrg string
-		var oldestTime time.Time
-		for org, entry := range validator.cache {
-			if oldestOrg == "" || entry.timestamp.Before(oldestTime) {
-				oldestOrg = org
-				oldestTime = entry.timestamp
-			}
-		}
-		delete(validator.cache, oldestOrg)
-	}
-
-	// Verify org1 was evicted
-	if _, exists := validator.cache["org1"]; exists {
-		t.Errorf("Expected org1 to be evicted from cache")
-	}
-
-	// Verify org2 and org3 remain
-	if _, exists := validator.cache["org2"]; !exists {
-		t.Errorf("Expected org2 to remain in cache")
-	}
-	if _, exists := validator.cache["org3"]; !exists {
-		t.Errorf("Expected org3 to remain in cache")
+	// This should fail when trying to parse the configuration
+	_, err := validator.parseConfig(invalidContent)
+	if err == nil {
+		t.Errorf("Expected error for invalid regex pattern, got nil")
 	}
 }
 
-func TestCacheTTL(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
-	validator.cacheTTL = 1 * time.Millisecond // Very short TTL for testing
+func TestSharedCacheUsage(t *testing.T) {
+	// Clear cache to start fresh
+	trustedTokenIssuers.Purge()
 
-	// Add entry to cache
-	validator.cache["testorg"] = &CacheEntry{
-		config:    &OrgTrustedTokenIssuersConfig{Enabled: false},
-		timestamp: time.Now(),
+	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	ctx := context.Background()
+
+	// Create a mock client
+	mockClient := &github.Client{}
+	validator.SetGithubClient("testorg", mockClient)
+
+	configContent := `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+`
+
+	// Add config to shared cache
+	trustedTokenIssuers.Add("testorg", configContent)
+
+	// First call should use cache
+	err1 := validator.ValidateIssuer(ctx, "testorg", "https://token.actions.githubusercontent.com")
+	if err1 != nil {
+		t.Errorf("Expected no error on first call, got %v", err1)
 	}
 
-	// Wait for TTL to expire
-	time.Sleep(2 * time.Millisecond)
+	// Second call should also use cache (no additional GitHub API call)
+	err2 := validator.ValidateIssuer(ctx, "testorg", "https://token.actions.githubusercontent.com")
+	if err2 != nil {
+		t.Errorf("Expected no error on second call, got %v", err2)
+	}
 
-	// Check if entry is considered expired
-	entry := validator.cache["testorg"]
-	if time.Since(entry.timestamp) < validator.cacheTTL {
-		t.Errorf("Expected cache entry to be expired")
+	// Verify cache contains the entry
+	if _, ok := trustedTokenIssuers.Get("testorg"); !ok {
+		t.Errorf("Expected cache to contain entry for testorg")
 	}
 }

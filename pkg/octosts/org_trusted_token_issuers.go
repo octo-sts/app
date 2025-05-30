@@ -9,8 +9,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/google/go-github/v71/github"
 	"gopkg.in/yaml.v3"
@@ -25,18 +23,8 @@ type OrgTrustedTokenIssuersConfig struct {
 	compiledPatterns []*regexp.Regexp
 }
 
-// CacheEntry represents a cached configuration entry
-type CacheEntry struct {
-	config    *OrgTrustedTokenIssuersConfig
-	timestamp time.Time
-}
-
 // OrgTrustedTokenIssuersValidator provides organization-wide trusted token issuer validation
 type OrgTrustedTokenIssuersValidator struct {
-	cache         map[string]*CacheEntry
-	cacheMutex    sync.RWMutex
-	maxCacheSize  int
-	cacheTTL      time.Duration
 	configFile    string
 	githubClients map[string]*github.Client
 }
@@ -44,9 +32,6 @@ type OrgTrustedTokenIssuersValidator struct {
 // NewOrgTrustedTokenIssuersValidator creates a new validator instance
 func NewOrgTrustedTokenIssuersValidator(configFile string) *OrgTrustedTokenIssuersValidator {
 	return &OrgTrustedTokenIssuersValidator{
-		cache:         make(map[string]*CacheEntry),
-		maxCacheSize:  50,
-		cacheTTL:      5 * time.Minute,
 		configFile:    configFile,
 		githubClients: make(map[string]*github.Client),
 	}
@@ -89,15 +74,10 @@ func isValidIssuerFormat(issuer string) error {
 
 // loadOrgConfig loads the trusted token issuers configuration for an organization
 func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org string) (*OrgTrustedTokenIssuersConfig, error) {
-	// Check cache first
-	v.cacheMutex.RLock()
-	if entry, exists := v.cache[org]; exists {
-		if time.Since(entry.timestamp) < v.cacheTTL {
-			v.cacheMutex.RUnlock()
-			return entry.config, nil
-		}
+	// Check cache first using the shared trustedTokenIssuers cache
+	if cachedRaw, ok := trustedTokenIssuers.Get(org); ok {
+		return v.parseConfig(cachedRaw)
 	}
-	v.cacheMutex.RUnlock()
 
 	// Get GitHub client for this organization
 	client, exists := v.githubClients[org]
@@ -109,11 +89,13 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 	file, _, _, err := client.Repositories.GetContents(ctx, org, ".github", v.configFile, nil)
 	if err != nil {
 		// If file doesn't exist, return empty config (disabled)
-		return &OrgTrustedTokenIssuersConfig{Enabled: false}, nil
+		emptyConfig := &OrgTrustedTokenIssuersConfig{Enabled: false}
+		return emptyConfig, nil
 	}
 
 	if file == nil {
-		return &OrgTrustedTokenIssuersConfig{Enabled: false}, nil
+		emptyConfig := &OrgTrustedTokenIssuersConfig{Enabled: false}
+		return emptyConfig, nil
 	}
 
 	content, err := file.GetContent()
@@ -121,6 +103,14 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 		return nil, fmt.Errorf("failed to get file content: %v", err)
 	}
 
+	// Add to cache
+	trustedTokenIssuers.Add(org, content)
+
+	return v.parseConfig(content)
+}
+
+// parseConfig parses the raw YAML content into a configuration struct
+func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrustedTokenIssuersConfig, error) {
 	// Parse YAML
 	var config OrgTrustedTokenIssuersConfig
 	if err := yaml.Unmarshal([]byte(content), &config); err != nil {
@@ -143,27 +133,6 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 		}
 		config.compiledPatterns[i] = compiled
 	}
-
-	// Update cache
-	v.cacheMutex.Lock()
-	// LRU eviction if cache is full
-	if len(v.cache) >= v.maxCacheSize {
-		var oldestOrg string
-		var oldestTime time.Time
-		for org, entry := range v.cache {
-			if oldestOrg == "" || entry.timestamp.Before(oldestTime) {
-				oldestOrg = org
-				oldestTime = entry.timestamp
-			}
-		}
-		delete(v.cache, oldestOrg)
-	}
-
-	v.cache[org] = &CacheEntry{
-		config:    &config,
-		timestamp: time.Now(),
-	}
-	v.cacheMutex.Unlock()
 
 	return &config, nil
 }
