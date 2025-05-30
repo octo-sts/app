@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v71/github"
 	"gopkg.in/yaml.v3"
 )
@@ -76,6 +77,7 @@ func isValidIssuerFormat(issuer string) error {
 func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org string) (*OrgTrustedTokenIssuersConfig, error) {
 	// Check cache first using the shared trustedTokenIssuers cache
 	if cachedRaw, ok := trustedTokenIssuers.Get(org); ok {
+		clog.InfoContextf(ctx, "found trusted token issuers in cache for %s", org)
 		return v.parseConfig(cachedRaw)
 	}
 
@@ -86,7 +88,10 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 	}
 
 	// Fetch file from GitHub
-	file, _, _, err := client.Repositories.GetContents(ctx, org, ".github", v.configFile, nil)
+	file, _, _, err := client.Repositories.GetContents(ctx,
+		org, ".github", v.configFile,
+		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
+	)
 	if err != nil {
 		// If file doesn't exist, return empty config (disabled)
 		emptyConfig := &OrgTrustedTokenIssuersConfig{Enabled: false}
@@ -104,7 +109,9 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 	}
 
 	// Add to cache
-	trustedTokenIssuers.Add(org, content)
+	if evicted := trustedTokenIssuers.Add(org, content); evicted {
+		clog.InfoContextf(ctx, "evicted trusted token issuers cache key %s", org)
+	}
 
 	return v.parseConfig(content)
 }

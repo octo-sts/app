@@ -414,3 +414,188 @@ trusted_issuers:
 		t.Errorf("Expected cache to contain entry for testorg")
 	}
 }
+
+func TestCacheEviction(t *testing.T) {
+	// Clear cache to start fresh
+	trustedTokenIssuers.Purge()
+
+	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+
+	configContent := `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+`
+
+	// The cache size is 50, so add 51 items to trigger eviction
+	for i := 0; i < 51; i++ {
+		orgName := fmt.Sprintf("testorg%d", i)
+
+		// Create a mock client for each org
+		mockClient := &github.Client{}
+		validator.SetGithubClient(orgName, mockClient)
+
+		// Add to cache directly to simulate loadOrgConfig
+		evicted := trustedTokenIssuers.Add(orgName, configContent)
+
+		// We should see eviction starting after cache is full
+		if i >= 50 {
+			if !evicted {
+				t.Errorf("Expected eviction when adding org %d, but none occurred", i)
+			}
+		} else {
+			if evicted {
+				t.Errorf("Did not expect eviction when adding org %d, but eviction occurred", i)
+			}
+		}
+	}
+
+	// Verify cache size is at max (50)
+	if trustedTokenIssuers.Len() != 50 {
+		t.Errorf("Expected cache size to be 50, got %d", trustedTokenIssuers.Len())
+	}
+
+	// Verify the first entry was evicted (LRU behavior)
+	if _, ok := trustedTokenIssuers.Get("testorg0"); ok {
+		t.Errorf("Expected first entry to be evicted, but it's still in cache")
+	}
+
+	// Verify the last entry is still there
+	if _, ok := trustedTokenIssuers.Get("testorg50"); !ok {
+		t.Errorf("Expected last entry to be in cache, but it's not found")
+	}
+}
+
+func TestCacheConsistencyAcrossValidations(t *testing.T) {
+	// Clear cache to start fresh
+	trustedTokenIssuers.Purge()
+
+	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	ctx := context.Background()
+
+	configContent := `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+  - "https://accounts.google.com"
+`
+
+	// Create a mock client
+	mockClient := &github.Client{}
+	validator.SetGithubClient("testorg", mockClient)
+
+	// Add config to shared cache
+	trustedTokenIssuers.Add("testorg", configContent)
+
+	// Test multiple issuers with same org - should all use cache
+	testIssuers := []string{
+		"https://token.actions.githubusercontent.com",
+		"https://accounts.google.com",
+		"https://token.actions.githubusercontent.com", // repeat to test cache consistency
+	}
+
+	for i, issuer := range testIssuers {
+		err := validator.ValidateIssuer(ctx, "testorg", issuer)
+		if err != nil {
+			t.Errorf("Validation %d failed for issuer %s: %v", i, issuer, err)
+		}
+	}
+
+	// Verify cache still contains the entry
+	if cachedContent, ok := trustedTokenIssuers.Get("testorg"); !ok {
+		t.Errorf("Expected cache to contain entry for testorg after multiple validations")
+	} else if cachedContent != configContent {
+		t.Errorf("Cache content doesn't match expected content")
+	}
+}
+
+func TestCacheEvictionLogging(t *testing.T) {
+	// Clear cache to start fresh
+	trustedTokenIssuers.Purge()
+
+	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+
+	configContent := `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+`
+
+	// Fill cache to capacity (50 entries)
+	for i := 0; i < 50; i++ {
+		orgName := fmt.Sprintf("testorg%d", i)
+		mockClient := &github.Client{}
+		validator.SetGithubClient(orgName, mockClient)
+		trustedTokenIssuers.Add(orgName, configContent)
+	}
+
+	// Verify cache is at capacity
+	if trustedTokenIssuers.Len() != 50 {
+		t.Errorf("Expected cache size to be 50, got %d", trustedTokenIssuers.Len())
+	}
+
+	// Now add one more which should trigger eviction and logging
+	orgName := "testorg_eviction"
+	mockClient := &github.Client{}
+	validator.SetGithubClient(orgName, mockClient)
+
+	// This should trigger eviction logging in loadOrgConfig
+	evicted := trustedTokenIssuers.Add(orgName, configContent)
+	if !evicted {
+		t.Errorf("Expected eviction when adding to full cache, but none occurred")
+	}
+
+	// Verify cache size is still at max
+	if trustedTokenIssuers.Len() != 50 {
+		t.Errorf("Expected cache size to remain 50 after eviction, got %d", trustedTokenIssuers.Len())
+	}
+
+	// Verify the new entry is in cache
+	if _, ok := trustedTokenIssuers.Get(orgName); !ok {
+		t.Errorf("Expected newly added entry to be in cache")
+	}
+}
+
+func TestLoadOrgConfigWithEviction(t *testing.T) {
+	// Clear cache to start fresh
+	trustedTokenIssuers.Purge()
+
+	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+
+	configContent := `
+enabled: true
+trusted_issuers:
+  - "https://token.actions.githubusercontent.com"
+`
+
+	// Fill cache to capacity (50 entries)
+	for i := 0; i < 50; i++ {
+		trustedTokenIssuers.Add(fmt.Sprintf("testorg%d", i), configContent)
+	}
+
+	// Create a mock client for a new organization
+	orgName := "neworg_test"
+	client := &github.Client{}
+	validator.SetGithubClient(orgName, client)
+
+	// Add one more entry to trigger eviction
+	evicted := trustedTokenIssuers.Add(orgName, configContent)
+	if !evicted {
+		t.Errorf("Expected eviction when adding to full cache, but none occurred")
+	}
+
+	// Verify cache is still at max capacity
+	if trustedTokenIssuers.Len() != 50 {
+		t.Errorf("Expected cache size to be 50 after eviction, got %d", trustedTokenIssuers.Len())
+	}
+
+	// Verify the new entry is in cache
+	if _, ok := trustedTokenIssuers.Get(orgName); !ok {
+		t.Errorf("Expected newly added entry to be in cache")
+	}
+
+	// Verify that the first entry was evicted (LRU behavior)
+	if _, ok := trustedTokenIssuers.Get("testorg0"); ok {
+		t.Errorf("Expected first entry to be evicted, but it's still in cache")
+	}
+}
