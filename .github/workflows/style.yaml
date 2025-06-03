@@ -57,7 +57,7 @@ jobs:
           go-version-file: './go.mod'
           check-latest: true
 
-      - uses: chainguard-dev/actions/goimports@ce51233d303aed2394a9976e7f5642fd2158f693 # v1.1.1
+      - uses: chainguard-dev/actions/goimports@5363dd9eb48083bbf7674a4bbe62d71c3b230edd # v1.1.2
 
   golangci-lint:
     name: golangci-lint
@@ -101,10 +101,10 @@ jobs:
           go-version-file: './go.mod'
           check-latest: true
 
-      - uses: chainguard-dev/actions/trailing-space@ce51233d303aed2394a9976e7f5642fd2158f693 # v1.1.1
+      - uses: chainguard-dev/actions/trailing-space@5363dd9eb48083bbf7674a4bbe62d71c3b230edd # v1.1.2
         if: ${{ always() }}
 
-      - uses: chainguard-dev/actions/eof-newline@ce51233d303aed2394a9976e7f5642fd2158f693 # v1.1.1
+      - uses: chainguard-dev/actions/eof-newline@5363dd9eb48083bbf7674a4bbe62d71c3b230edd # v1.1.2
         if: ${{ always() }}
 
       - uses: reviewdog/action-tflint@92ecd5bdf3d31ada4ac26a702666986f67385fda # master
