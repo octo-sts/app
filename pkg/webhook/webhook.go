@@ -17,7 +17,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v71/github"
+	"github.com/google/go-github/v72/github"
 	"github.com/hashicorp/go-multierror"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"

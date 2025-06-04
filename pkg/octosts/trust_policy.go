@@ -10,7 +10,7 @@ import (
 	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v71/github"
+	"github.com/google/go-github/v72/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
