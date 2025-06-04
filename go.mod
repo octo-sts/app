@@ -10,6 +10,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
 	github.com/aws/aws-sdk-go-v2/service/kms v1.38.3
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.35.4
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/chainguard-dev/terraform-infra-common v0.6.154
