@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	GCP = "gcp"
 	AWS = "aws"
+	GCP = "gcp"
 )
 
 type kmsProvider struct {
