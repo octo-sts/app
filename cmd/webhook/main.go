@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/octo-sts/app/pkg/secrets"
 	"log"
 	"log/slog"
 	"net/http"
@@ -20,6 +19,7 @@ import (
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/kms"
+	"github.com/octo-sts/app/pkg/secrets"
 	"github.com/octo-sts/app/pkg/webhook"
 )
 
