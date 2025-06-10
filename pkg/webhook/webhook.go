@@ -89,7 +89,7 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Errorf("error handling event %T: %v", event, err)
+		log.Errorf("error handling event: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -245,7 +245,6 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	if err != nil {
 		return nil, err
 	}
-	log.Infof("%+v\n%+v", resp, resp.Files)
 	var files []string
 	for _, file := range resp.Files {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
