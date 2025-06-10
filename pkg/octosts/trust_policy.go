@@ -28,6 +28,8 @@ type TrustPolicy struct {
 	AudiencePattern string         `json:"audience_pattern,omitempty"`
 	audiencePattern *regexp.Regexp `json:"-"`
 
+	JWKS string `json:"jwks,omitempty"`
+
 	ClaimPattern map[string]string         `json:"claim_pattern,omitempty"`
 	claimPattern map[string]*regexp.Regexp `json:"-"`
 
