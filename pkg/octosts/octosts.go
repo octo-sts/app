@@ -71,7 +71,7 @@ type cacheTrustPolicyKey struct {
 
 // Exchange implements pboidc.SecurityTokenServiceServer
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
-	clog.FromContext(ctx).Infof("exchange request: %#v", request)
+	clog.FromContext(ctx).Infof("exchange request: %#v", request.GetIdentity())
 	e := Event{
 		Scope:    request.Scope,
 		Identity: request.Identity,
