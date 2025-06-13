@@ -127,7 +127,7 @@ func TestValidIssuerFormat(t *testing.T) {
 	}
 }
 
-func TestValidateIssuer_EmptyParams(t *testing.T) {
+func TestValidateIssuerEmptyParams(t *testing.T) {
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
 	ctx := context.Background()
 
@@ -163,7 +163,7 @@ func TestValidateIssuer_EmptyParams(t *testing.T) {
 	}
 }
 
-func TestValidateIssuer_NoClient(t *testing.T) {
+func TestValidateIssuerNoClient(t *testing.T) {
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
 	ctx := context.Background()
 
@@ -171,6 +171,36 @@ func TestValidateIssuer_NoClient(t *testing.T) {
 	expectedErr := "no GitHub client configured for organization: testorg"
 	if err == nil || !strings.Contains(err.Error(), expectedErr) {
 		t.Errorf("Expected error containing '%s', got %v", expectedErr, err)
+	}
+}
+
+// assertParseConfigResult is a helper function to reduce cognitive complexity
+func assertParseConfigResult(t *testing.T, config *OrgTrustedTokenIssuersConfig, err error, expectErr bool) {
+	if expectErr {
+		if err == nil {
+			t.Errorf("Expected error, got nil")
+		}
+		return
+	}
+
+	if err != nil {
+		t.Errorf("Expected no error, got %v", err)
+	}
+	if config == nil {
+		t.Errorf("Expected config, got nil")
+	}
+}
+
+// assertValidationResult is a helper function to reduce cognitive complexity
+func assertValidationResult(t *testing.T, err error, expectErr bool) {
+	if expectErr {
+		if err == nil {
+			t.Errorf("Expected error, got nil")
+		}
+	} else {
+		if err != nil {
+			t.Errorf("Expected no error, got %v", err)
+		}
 	}
 }
 
@@ -234,23 +264,12 @@ issuer_patterns:
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			config, err := validator.parseConfig(tt.content)
-			if tt.expectErr {
-				if err == nil {
-					t.Errorf("Expected error, got nil")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Expected no error, got %v", err)
-				}
-				if config == nil {
-					t.Errorf("Expected config, got nil")
-				}
-			}
+			assertParseConfigResult(t, config, err, tt.expectErr)
 		})
 	}
 }
 
-func TestValidateIssuer_ComplexPatterns(t *testing.T) {
+func TestValidateIssuerComplexPatterns(t *testing.T) {
 	// Clear cache to avoid interference
 	trustedTokenIssuers.Purge()
 
@@ -318,15 +337,7 @@ trusted_issuers:
 			trustedTokenIssuers.Add("testorg", tt.content)
 
 			err := validator.ValidateIssuer(ctx, "testorg", tt.issuer)
-			if tt.expectErr {
-				if err == nil {
-					t.Errorf("Expected error, got nil")
-				}
-			} else {
-				if err != nil {
-					t.Errorf("Expected no error, got %v", err)
-				}
-			}
+			assertValidationResult(t, err, tt.expectErr)
 		})
 	}
 }
@@ -360,7 +371,7 @@ func TestConfigurableFilename(t *testing.T) {
 	}
 }
 
-func TestValidateIssuer_InvalidPatterns(t *testing.T) {
+func TestValidateIssuerInvalidPatterns(t *testing.T) {
 	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
 
 	// Test with invalid regex pattern
