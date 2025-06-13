@@ -12,16 +12,16 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v72/github"
-	"gopkg.in/yaml.v3"
+	"sigs.k8s.io/yaml"
 )
 
 // OrgTrustedTokenIssuersConfig represents the organization-wide trusted token issuers configuration
 type OrgTrustedTokenIssuersConfig struct {
-	Description      string   `yaml:"description,omitempty"`
-	Enabled          bool     `yaml:"enabled"`
-	TrustedIssuers   []string `yaml:"trusted_issuers,omitempty"`
-	IssuerPatterns   []string `yaml:"issuer_patterns,omitempty"`
-	compiledPatterns []*regexp.Regexp
+	Description      string           `json:"description,omitempty"`
+	Enabled          bool             `json:"enabled"`
+	TrustedIssuers   []string         `json:"trusted_issuers,omitempty"`
+	IssuerPatterns   []string         `json:"issuer_patterns,omitempty"`
+	compiledPatterns []*regexp.Regexp `json:"-"`
 }
 
 // OrgTrustedTokenIssuersValidator provides organization-wide trusted token issuer validation
@@ -120,7 +120,7 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrustedTokenIssuersConfig, error) {
 	// Parse YAML
 	var config OrgTrustedTokenIssuersConfig
-	if err := yaml.Unmarshal([]byte(content), &config); err != nil {
+	if err := yaml.UnmarshalStrict([]byte(content), &config); err != nil {
 		return nil, fmt.Errorf("failed to parse trusted token issuers config: %w", err)
 	}
 
