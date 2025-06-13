@@ -12,6 +12,14 @@ import (
 	"github.com/google/go-github/v72/github"
 )
 
+const (
+	errMsgExpectedErrorGotNil = "Expected error, got nil"
+	errMsgHTTPSScheme         = "issuer must use HTTPS scheme"
+	fileTestConfig            = "test-config.yaml"
+	patternTestOrg            = "testorg%d"
+	urlGitHubActionsIssuer    = "https://token.actions.githubusercontent.com"
+)
+
 // MockGitHubClient is a mock implementation of GitHub client for testing
 type MockGitHubClient struct {
 	files map[string]string
@@ -35,10 +43,10 @@ func (m *MockGitHubClient) GetContents(ctx context.Context, owner, repo, path st
 }
 
 func TestNewOrgTrustedTokenIssuersValidator(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
-	if validator.configFile != "test-config.yaml" {
-		t.Errorf("Expected configFile to be 'test-config.yaml', got %s", validator.configFile)
+	if validator.configFile != fileTestConfig {
+		t.Errorf("Expected configFile to be '%s', got %s", fileTestConfig, validator.configFile)
 	}
 
 	if validator.githubClients == nil {
@@ -55,7 +63,7 @@ func TestValidIssuerFormat(t *testing.T) {
 	}{
 		{
 			name:   "Valid HTTPS URL",
-			issuer: "https://token.actions.githubusercontent.com",
+			issuer: urlGitHubActionsIssuer,
 		},
 		{
 			name:   "Valid HTTPS URL with path",
@@ -71,13 +79,13 @@ func TestValidIssuerFormat(t *testing.T) {
 			name:      "HTTP URL (not HTTPS)",
 			issuer:    "http://token.actions.githubusercontent.com",
 			expectErr: true,
-			errStr:    "issuer must use HTTPS scheme",
+			errStr:    errMsgHTTPSScheme,
 		},
 		{
 			name:      "Invalid URL format",
 			issuer:    "not-a-url",
 			expectErr: true,
-			errStr:    "issuer must use HTTPS scheme",
+			errStr:    errMsgHTTPSScheme,
 		},
 		{
 			name:      "URL without host",
@@ -99,7 +107,7 @@ func TestValidIssuerFormat(t *testing.T) {
 			name:      "FTP protocol",
 			issuer:    "ftp://example.com",
 			expectErr: true,
-			errStr:    "issuer must use HTTPS scheme",
+			errStr:    errMsgHTTPSScheme,
 		},
 		{
 			name:      "Malformed URL with spaces",
@@ -128,7 +136,7 @@ func TestValidIssuerFormat(t *testing.T) {
 }
 
 func TestValidateIssuerEmptyParams(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -140,7 +148,7 @@ func TestValidateIssuerEmptyParams(t *testing.T) {
 		{
 			name:      "Empty organization",
 			org:       "",
-			issuer:    "https://token.actions.githubusercontent.com",
+			issuer:    urlGitHubActionsIssuer,
 			expectErr: "organization cannot be empty",
 		},
 		{
@@ -155,7 +163,7 @@ func TestValidateIssuerEmptyParams(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validator.ValidateIssuer(ctx, tt.org, tt.issuer)
 			if err == nil {
-				t.Errorf("Expected error, got nil")
+				t.Errorf(errMsgExpectedErrorGotNil)
 			} else if !strings.Contains(err.Error(), tt.expectErr) {
 				t.Errorf("Expected error to contain '%s', got '%s'", tt.expectErr, err.Error())
 			}
@@ -164,10 +172,10 @@ func TestValidateIssuerEmptyParams(t *testing.T) {
 }
 
 func TestValidateIssuerNoClient(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 	ctx := context.Background()
 
-	err := validator.ValidateIssuer(ctx, "testorg", "https://token.actions.githubusercontent.com")
+	err := validator.ValidateIssuer(ctx, "testorg", urlGitHubActionsIssuer)
 	expectedErr := "no GitHub client configured for organization: testorg"
 	if err == nil || !strings.Contains(err.Error(), expectedErr) {
 		t.Errorf("Expected error containing '%s', got %v", expectedErr, err)
@@ -178,7 +186,7 @@ func TestValidateIssuerNoClient(t *testing.T) {
 func assertParseConfigResult(t *testing.T, config *OrgTrustedTokenIssuersConfig, err error, expectErr bool) {
 	if expectErr {
 		if err == nil {
-			t.Errorf("Expected error, got nil")
+			t.Errorf(errMsgExpectedErrorGotNil)
 		}
 		return
 	}
@@ -195,7 +203,7 @@ func assertParseConfigResult(t *testing.T, config *OrgTrustedTokenIssuersConfig,
 func assertValidationResult(t *testing.T, err error, expectErr bool) {
 	if expectErr {
 		if err == nil {
-			t.Errorf("Expected error, got nil")
+			t.Errorf(errMsgExpectedErrorGotNil)
 		}
 	} else {
 		if err != nil {
@@ -205,7 +213,7 @@ func assertValidationResult(t *testing.T, err error, expectErr bool) {
 }
 
 func TestParseConfig(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
 	tests := []struct {
 		name        string
@@ -218,7 +226,7 @@ func TestParseConfig(t *testing.T) {
 			content: `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 issuer_patterns:
   - "https://.*\\.github.*\\.com"
 `,
@@ -273,7 +281,7 @@ func TestValidateIssuerComplexPatterns(t *testing.T) {
 	// Clear cache to avoid interference
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -307,9 +315,9 @@ issuer_patterns:
 			content: `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 `,
-			issuer:    "https://token.actions.githubusercontent.com",
+			issuer:    urlGitHubActionsIssuer,
 			expectErr: false,
 		},
 		{
@@ -319,7 +327,7 @@ enabled: true
 trusted_issuers:
   - "https://other.com"
 `,
-			issuer:    "https://token.actions.githubusercontent.com",
+			issuer:    urlGitHubActionsIssuer,
 			expectErr: true,
 		},
 	}
@@ -372,7 +380,7 @@ func TestConfigurableFilename(t *testing.T) {
 }
 
 func TestValidateIssuerInvalidPatterns(t *testing.T) {
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
 	// Test with invalid regex pattern
 	invalidContent := `
@@ -392,7 +400,7 @@ func TestSharedCacheUsage(t *testing.T) {
 	// Clear cache to start fresh
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 	ctx := context.Background()
 
 	// Create a mock client
@@ -402,20 +410,20 @@ func TestSharedCacheUsage(t *testing.T) {
 	configContent := `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 `
 
 	// Add config to shared cache
 	trustedTokenIssuers.Add("testorg", configContent)
 
 	// First call should use cache
-	err1 := validator.ValidateIssuer(ctx, "testorg", "https://token.actions.githubusercontent.com")
+	err1 := validator.ValidateIssuer(ctx, "testorg", urlGitHubActionsIssuer)
 	if err1 != nil {
 		t.Errorf("Expected no error on first call, got %v", err1)
 	}
 
 	// Second call should also use cache (no additional GitHub API call)
-	err2 := validator.ValidateIssuer(ctx, "testorg", "https://token.actions.githubusercontent.com")
+	err2 := validator.ValidateIssuer(ctx, "testorg", urlGitHubActionsIssuer)
 	if err2 != nil {
 		t.Errorf("Expected no error on second call, got %v", err2)
 	}
@@ -430,17 +438,17 @@ func TestCacheEviction(t *testing.T) {
 	// Clear cache to start fresh
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
 	configContent := `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 `
 
 	// The cache size is 50, so add 51 items to trigger eviction
 	for i := 0; i < 51; i++ {
-		orgName := fmt.Sprintf("testorg%d", i)
+		orgName := fmt.Sprintf(patternTestOrg, i)
 
 		// Create a mock client for each org
 		mockClient := &github.Client{}
@@ -481,13 +489,13 @@ func TestCacheConsistencyAcrossValidations(t *testing.T) {
 	// Clear cache to start fresh
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 	ctx := context.Background()
 
 	configContent := `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
   - "https://accounts.google.com"
 `
 
@@ -500,9 +508,9 @@ trusted_issuers:
 
 	// Test multiple issuers with same org - should all use cache
 	testIssuers := []string{
-		"https://token.actions.githubusercontent.com",
+		urlGitHubActionsIssuer,
 		"https://accounts.google.com",
-		"https://token.actions.githubusercontent.com", // repeat to test cache consistency
+		urlGitHubActionsIssuer, // repeat to test cache consistency
 	}
 
 	for i, issuer := range testIssuers {
@@ -524,17 +532,17 @@ func TestCacheEvictionLogging(t *testing.T) {
 	// Clear cache to start fresh
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
 	configContent := `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 `
 
 	// Fill cache to capacity (50 entries)
 	for i := 0; i < 50; i++ {
-		orgName := fmt.Sprintf("testorg%d", i)
+		orgName := fmt.Sprintf(patternTestOrg, i)
 		mockClient := &github.Client{}
 		validator.SetGithubClient(orgName, mockClient)
 		trustedTokenIssuers.Add(orgName, configContent)
@@ -571,17 +579,17 @@ func TestLoadOrgConfigWithEviction(t *testing.T) {
 	// Clear cache to start fresh
 	trustedTokenIssuers.Purge()
 
-	validator := NewOrgTrustedTokenIssuersValidator("test-config.yaml")
+	validator := NewOrgTrustedTokenIssuersValidator(fileTestConfig)
 
 	configContent := `
 enabled: true
 trusted_issuers:
-  - "https://token.actions.githubusercontent.com"
+  - "` + urlGitHubActionsIssuer + `"
 `
 
 	// Fill cache to capacity (50 entries)
 	for i := 0; i < 50; i++ {
-		trustedTokenIssuers.Add(fmt.Sprintf("testorg%d", i), configContent)
+		trustedTokenIssuers.Add(fmt.Sprintf(patternTestOrg, i), configContent)
 	}
 
 	// Create a mock client for a new organization
