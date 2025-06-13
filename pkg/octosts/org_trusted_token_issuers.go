@@ -11,7 +11,7 @@ import (
 	"strings"
 
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v71/github"
+	"github.com/google/go-github/v72/github"
 	"gopkg.in/yaml.v3"
 )
 
@@ -52,7 +52,7 @@ func isValidIssuerFormat(issuer string) error {
 	// Parse as URL
 	u, err := url.Parse(issuer)
 	if err != nil {
-		return fmt.Errorf("invalid URL format: %v", err)
+		return fmt.Errorf("invalid URL format: %w", err)
 	}
 
 	// Must be HTTPS
@@ -105,7 +105,7 @@ func (v *OrgTrustedTokenIssuersValidator) loadOrgConfig(ctx context.Context, org
 
 	content, err := file.GetContent()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get file content: %v", err)
+		return nil, fmt.Errorf("failed to get file content: %w", err)
 	}
 
 	// Add to cache
@@ -121,13 +121,13 @@ func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrust
 	// Parse YAML
 	var config OrgTrustedTokenIssuersConfig
 	if err := yaml.Unmarshal([]byte(content), &config); err != nil {
-		return nil, fmt.Errorf("failed to parse trusted token issuers config: %v", err)
+		return nil, fmt.Errorf("failed to parse trusted token issuers config: %w", err)
 	}
 
 	// Validate issuer formats
 	for _, issuer := range config.TrustedIssuers {
 		if err := isValidIssuerFormat(issuer); err != nil {
-			return nil, fmt.Errorf("invalid trusted issuer '%s': %v", issuer, err)
+			return nil, fmt.Errorf("invalid trusted issuer '%s': %w", issuer, err)
 		}
 	}
 
@@ -136,7 +136,7 @@ func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrust
 	for i, pattern := range config.IssuerPatterns {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
-			return nil, fmt.Errorf("invalid issuer pattern '%s': %v", pattern, err)
+			return nil, fmt.Errorf("invalid issuer pattern '%s': %w", pattern, err)
 		}
 		config.compiledPatterns[i] = compiled
 	}
@@ -157,7 +157,7 @@ func (v *OrgTrustedTokenIssuersValidator) ValidateIssuer(ctx context.Context, or
 	// Load organization configuration
 	config, err := v.loadOrgConfig(ctx, org)
 	if err != nil {
-		return fmt.Errorf("failed to load trusted token issuers config for org %s: %v", org, err)
+		return fmt.Errorf("failed to load trusted token issuers config for org %s: %w", org, err)
 	}
 
 	// If not enabled, allow all issuers (backward compatibility)
