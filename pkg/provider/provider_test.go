@@ -127,7 +127,7 @@ func TestNewProviderWithRetry_ContextCancellation(t *testing.T) {
 	if totalAttempts > 10 {
 		t.Fatalf("Expected reasonable number of attempts due to context cancellation, got %d", totalAttempts)
 	}
-	// Should have been cancelled around the timeout duration
+	// Should have been canceled around the timeout duration
 	if duration > 3*time.Second {
 		t.Fatalf("Expected cancellation around 2s, but took %v", duration)
 	}
