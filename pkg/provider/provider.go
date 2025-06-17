@@ -7,8 +7,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/cenkalti/backoff/v5"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -45,7 +48,7 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	})
 
 	// Verify the token before we trust anything about it.
-	provider, err = oidc.NewProvider(ctx, issuer)
+	provider, err = newProviderWithRetry(ctx, issuer)
 	if err != nil {
 		return nil, fmt.Errorf("constructing %q provider: %w", issuer, err)
 	}
@@ -55,6 +58,39 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	providers.Add(issuer, provider)
 
 	return provider, nil
+}
+
+// newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic
+func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider, error) {
+	attempt := 0
+
+	operation := func() (VerifierProvider, error) {
+		attempt++
+		p, err := oidc.NewProvider(ctx, issuer)
+		if err != nil {
+			clog.WarnContext(ctx, "provider creation failed", "attempt", attempt, "issuer", issuer, "error", err)
+			// Check for permanent errors that shouldn't be retried
+			if strings.Contains(err.Error(), "invalid character") ||
+				strings.Contains(err.Error(), "malformed") {
+				return nil, backoff.Permanent(err)
+			}
+			return nil, err
+		}
+		if attempt > 1 {
+			clog.InfoContext(ctx, "provider creation succeeded after retry", "attempts", attempt, "issuer", issuer)
+		}
+		return p, nil
+	}
+
+	// Configure exponential backoff: 1s → 2s → 4s → 8s → 16s → 30s (max)
+	// with ±10% jitter to prevent thundering herd issues
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.InitialInterval = 1 * time.Second
+	expBackoff.MaxInterval = 30 * time.Second
+	expBackoff.Multiplier = 2.0
+	expBackoff.RandomizationFactor = 0.1
+
+	return backoff.Retry(ctx, operation, backoff.WithBackOff(expBackoff))
 }
 
 type keysetProvider struct {
@@ -68,7 +104,7 @@ func (s *keysetProvider) Verifier(config *oidc.Config) *oidc.IDTokenVerifier {
 
 // AddTestKeySetVerifier adds a test key set verifier to the provider cachef or the issuer.
 // This is primarily intended for testing - the static key set is not verified against the upstream issuer.
-func AddTestKeySetVerifier(t *testing.T, issuer string, keySet oidc.KeySet) {
+func AddTestKeySetVerifier(_ *testing.T, issuer string, keySet oidc.KeySet) {
 	providers.Add(issuer, &keysetProvider{
 		issuer: issuer,
 		keySet: keySet,
