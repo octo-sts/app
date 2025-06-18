@@ -70,8 +70,7 @@ func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider,
 		if err != nil {
 			clog.WarnContext(ctx, "provider creation failed", "attempt", attempt, "issuer", issuer, "error", err)
 			// Check for permanent errors that shouldn't be retried
-			if strings.Contains(err.Error(), "invalid character") ||
-				strings.Contains(err.Error(), "malformed") {
+			if isPermanentError(err) {
 				return nil, backoff.Permanent(err)
 			}
 			return nil, err
@@ -91,6 +90,27 @@ func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider,
 	expBackoff.RandomizationFactor = 0.1
 
 	return backoff.Retry(ctx, operation, backoff.WithBackOff(expBackoff))
+}
+
+// isPermanentError checks if an error should not be retried based on HTTP status codes
+func isPermanentError(err error) bool {
+	// String matching for HTTP status codes embedded in error messages
+	// This matches go-oidc's pattern: fmt.Errorf("%s: %s", resp.Status, body)
+	errMsg := err.Error()
+	if strings.Contains(errMsg, "400 Bad Request") ||
+		strings.Contains(errMsg, "401 Unauthorized") ||
+		strings.Contains(errMsg, "403 Forbidden") ||
+		strings.Contains(errMsg, "404 Not Found") ||
+		strings.Contains(errMsg, "405 Method Not Allowed") ||
+		strings.Contains(errMsg, "406 Not Acceptable") ||
+		strings.Contains(errMsg, "410 Gone") ||
+		strings.Contains(errMsg, "415 Unsupported Media Type") ||
+		strings.Contains(errMsg, "422 Unprocessable Entity") ||
+		strings.Contains(errMsg, "501 Not Implemented") {
+		return true // Don't retry these permanent client/server errors
+	}
+
+	return false // Retry all other errors
 }
 
 type keysetProvider struct {
