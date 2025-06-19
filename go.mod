@@ -8,6 +8,7 @@ require (
 	cloud.google.com/go/kms v1.22.0
 	cloud.google.com/go/secretmanager v1.14.7
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0
+	github.com/cenkalti/backoff/v5 v5.0.2
 	github.com/chainguard-dev/clog v1.7.0
 	github.com/chainguard-dev/terraform-infra-common v0.6.159
 	github.com/cloudevents/sdk-go/v2 v2.16.1
@@ -19,7 +20,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.30.0
-	google.golang.org/api v0.237.0
+	google.golang.org/api v0.238.0
 	google.golang.org/grpc v1.73.0
 	k8s.io/apimachinery v0.33.1
 	sigs.k8s.io/yaml v1.4.0
@@ -32,7 +33,6 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.27.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.28.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.52.0 // indirect
-	github.com/cenkalti/backoff/v5 v5.0.2 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ebitengine/purego v0.8.4 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
