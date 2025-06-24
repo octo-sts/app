@@ -56,6 +56,33 @@ permissions:
   contents: read
 ```
 
+It's also possible to set a static JWKS JSON document for verifying the token
+signature. This is useful for cases where the OIDC discovery endpoint is not
+reachable from the Internet, e.g. a Kubernetes cluster with a private API
+server/OIDC discovery endpoint. Example:
+
+```yaml
+issuer: https://kubernetes.default.svc.cluster.local
+audience: https://kubernetes.default.svc.cluster.local
+subject: system:serviceaccount:my-app:my-app
+jwks: |
+  {
+    "keys": [
+      {
+        "use": "sig",
+        "kty": "RSA",
+        "kid": "LHVGP8kqzN1MuKRMTsroIcR-7hdicXWdpaquEWcAh9Q",
+        "alg": "RS256",
+        "n": "s5XuFpodwhj6my_gTUHDKbHmQIx-3Tf40OduMZRWlU6_B_nSdjX01kS1UQSGw_G5eVQARooI-tY1vj3bBwn4dEEFa2TlnNnAJca0hj2Izef8A8Uw-mT0fgGI4Hs3xS84Mn_WXNlKXEiPLiFyOGNr0GQBKZDyTps8JUlvnwuWCv1gkzudUHa8B0i8ITSEUclK9_LqZj4zXUAN0Wj_4DVfI_PQ0IHci9K5Q9bgCV0j1EvTsyrwGyLFwyhktUmNhjREAfgYmxvbIRhPSP4YuO2Et1KM7YmjA75cQ9oE3i-QLrOZDripyMRop5RmWttQCEdEWLQWPzBd7aZ5CLbmZuIlIQ",
+        "e": "AQAB"
+      }
+    ]
+  }
+
+permissions:
+  contents: read
+```
+
 This policy will allow OIDC tokens from Google accounts of folks with a
 Chainguard email address to federate and read the repo contents.
 
