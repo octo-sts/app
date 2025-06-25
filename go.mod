@@ -23,7 +23,7 @@ require (
 	google.golang.org/api v0.238.0
 	google.golang.org/grpc v1.73.0
 	k8s.io/apimachinery v0.33.2
-	sigs.k8s.io/yaml v1.4.0
+	sigs.k8s.io/yaml v1.5.0
 )
 
 require (
@@ -45,6 +45,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.1.0 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.36.0 // indirect
+	go.yaml.in/yaml/v2 v2.4.2 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
