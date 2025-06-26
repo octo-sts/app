@@ -11,6 +11,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v72/github"
+	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -113,6 +114,19 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 	}
 	if !tp.isCompiled {
 		return act, status.Errorf(codes.Internal, "trust policy: not compiled")
+	}
+
+	// Validate critical token fields
+	if !oidcvalidate.IsValidIssuer(token.Issuer) {
+		return act, status.Errorf(codes.InvalidArgument, "invalid issuer in token")
+	}
+	if !oidcvalidate.IsValidSubject(token.Subject) {
+		return act, status.Errorf(codes.InvalidArgument, "invalid subject in token")
+	}
+	for _, aud := range token.Audience {
+		if !oidcvalidate.IsValidAudience(aud) {
+			return act, status.Errorf(codes.InvalidArgument, "invalid audience in token")
+		}
 	}
 
 	// Check the issuer.

@@ -31,6 +31,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
 )
 
@@ -111,6 +112,11 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	issuer, err := apiauth.ExtractIssuer(bearer)
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
+	}
+
+	// Validate issuer format
+	if !oidcvalidate.IsValidIssuer(issuer) {
+		return nil, status.Error(codes.InvalidArgument, "invalid issuer format")
 	}
 
 	// Fetch the provider from the cache or create a new one and add to the cache
