@@ -111,7 +111,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Validate the Bearer token.
 	issuer, err := apiauth.ExtractIssuer(bearer)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
+		clog.FromContext(ctx).Debugf("invalid bearer token: %v", err)
+		return nil, status.Error(codes.InvalidArgument, "invalid bearer token")
 	}
 
 	// Validate issuer format
@@ -122,7 +123,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Fetch the provider from the cache or create a new one and add to the cache
 	p, err := provider.Get(ctx, issuer)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
+		clog.FromContext(ctx).Debugf("unable to fetch or create the provider: %v", err)
+		return nil, status.Error(codes.InvalidArgument, "unable to fetch or create the provider")
 	}
 
 	verifier := p.Verifier(&oidc.Config{
@@ -131,7 +133,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
+		clog.FromContext(ctx).Debugf("unable to validate token: %v", err)
+		return nil, status.Error(codes.Unauthenticated, "unable to verify bearer token")
 	}
 	// This is typically overwritten below, but we populate this here to enrich
 	// certain error paths with the issuer and subject.
@@ -170,18 +173,23 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			// body typically, so extract that.
 			if herr.Response.StatusCode == http.StatusUnprocessableEntity {
 				if body, err := io.ReadAll(herr.Response.Body); err == nil {
-					return nil, status.Errorf(codes.PermissionDenied, "token exchange failure: %s", body)
+					clog.FromContext(ctx).Debugf("token exchange failure (StatusUnprocessableEntity): %s", body)
+					return nil, status.Error(codes.PermissionDenied, "token exchange failure (StatusUnprocessableEntity)")
 				}
 			} else {
 				body, err := httputil.DumpResponse(herr.Response, true)
 				if err == nil {
-					clog.FromContext(ctx).Warnf("token exchange failure: %s", body)
+					clog.FromContext(ctx).Warn("token exchange failure, redacting body in logs")
+					// Log the response body in debug mode only, as it may contain sensitive information.
+					clog.FromContext(ctx).Debugf("token exchange failure: %s", body)
 				}
 			}
 		} else {
-			clog.FromContext(ctx).Warnf("token exchange failure: %v", err)
+			clog.FromContext(ctx).Debugf("token exchange failure: %v", err)
+			clog.FromContext(ctx).Warn("token exchange failure, redacting error in logs")
 		}
-		return nil, status.Errorf(codes.Internal, "failed to get token: %v", err)
+		clog.FromContext(ctx).Debugf("failed to get token: %v", err)
+		return nil, status.Error(codes.Internal, "failed to get token")
 	}
 
 	// Compute the SHA256 hash of the token and store the hex-encoded value into e.TokenSHA256
