@@ -147,7 +147,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 - **Merge queues**: `No Access`
 - **Metadata (Mandatory)**: `Read-only`
 - **Packages**: `Read/Write`
-- **Pages**: `No Access`
+- **Pages**: `Read/Write`
 - **Projects**: `Read/Write`
 - **Pull requests**: `Read/Write`
 - **Repository security advisories**: `No Access`
