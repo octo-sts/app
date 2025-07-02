@@ -267,6 +267,32 @@ issuer_patterns:
 			expectErr:   true,
 			expectEmpty: false,
 		},
+		{
+			name: "Too many trusted issuers",
+			content: func() string {
+				// Use slice capacity optimization for better memory allocation
+				issuers := make([]string, 0, 26)
+				for i := range 26 {
+					issuers = append(issuers, fmt.Sprintf(`  - "https://issuer%d.example.com"`, i))
+				}
+				return fmt.Sprintf("enabled: true\ntrusted_issuers:\n%s", strings.Join(issuers, "\n"))
+			}(),
+			expectErr:   true,
+			expectEmpty: false,
+		},
+		{
+			name: "Too many issuer patterns",
+			content: func() string {
+				// Use slice capacity optimization for better memory allocation
+				patterns := make([]string, 0, 6)
+				for i := range 6 {
+					patterns = append(patterns, fmt.Sprintf(`  - "https://pattern%d\\.example\\.com"`, i))
+				}
+				return fmt.Sprintf("enabled: true\nissuer_patterns:\n%s", strings.Join(patterns, "\n"))
+			}(),
+			expectErr:   true,
+			expectEmpty: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -446,8 +472,8 @@ trusted_issuers:
   - "` + urlGitHubActionsIssuer + `"
 `
 
-	// The cache size is 50, so add 51 items to trigger eviction
-	for i := 0; i < 51; i++ {
+	// The cache size is 100, so add 101 items to trigger eviction
+	for i := range 101 {
 		orgName := fmt.Sprintf(patternTestOrg, i)
 
 		// Create a mock client for each org
@@ -458,7 +484,7 @@ trusted_issuers:
 		evicted := trustedTokenIssuers.Add(orgName, configContent)
 
 		// We should see eviction starting after cache is full
-		if i >= 50 {
+		if i >= 100 {
 			if !evicted {
 				t.Errorf("Expected eviction when adding org %d, but none occurred", i)
 			}
@@ -469,9 +495,9 @@ trusted_issuers:
 		}
 	}
 
-	// Verify cache size is at max (50)
-	if trustedTokenIssuers.Len() != 50 {
-		t.Errorf("Expected cache size to be 50, got %d", trustedTokenIssuers.Len())
+	// Verify cache size is at max (100)
+	if trustedTokenIssuers.Len() != 100 {
+		t.Errorf("Expected cache size to be 100, got %d", trustedTokenIssuers.Len())
 	}
 
 	// Verify the first entry was evicted (LRU behavior)
@@ -480,7 +506,7 @@ trusted_issuers:
 	}
 
 	// Verify the last entry is still there
-	if _, ok := trustedTokenIssuers.Get("testorg50"); !ok {
+	if _, ok := trustedTokenIssuers.Get("testorg100"); !ok {
 		t.Errorf("Expected last entry to be in cache, but it's not found")
 	}
 }
@@ -540,8 +566,8 @@ trusted_issuers:
   - "` + urlGitHubActionsIssuer + `"
 `
 
-	// Fill cache to capacity (50 entries)
-	for i := 0; i < 50; i++ {
+	// Fill cache to capacity (100 entries)
+	for i := range 100 {
 		orgName := fmt.Sprintf(patternTestOrg, i)
 		mockClient := &github.Client{}
 		validator.SetGithubClient(orgName, mockClient)
@@ -549,8 +575,8 @@ trusted_issuers:
 	}
 
 	// Verify cache is at capacity
-	if trustedTokenIssuers.Len() != 50 {
-		t.Errorf("Expected cache size to be 50, got %d", trustedTokenIssuers.Len())
+	if trustedTokenIssuers.Len() != 100 {
+		t.Errorf("Expected cache size to be 100, got %d", trustedTokenIssuers.Len())
 	}
 
 	// Now add one more which should trigger eviction and logging
@@ -565,8 +591,8 @@ trusted_issuers:
 	}
 
 	// Verify cache size is still at max
-	if trustedTokenIssuers.Len() != 50 {
-		t.Errorf("Expected cache size to remain 50 after eviction, got %d", trustedTokenIssuers.Len())
+	if trustedTokenIssuers.Len() != 100 {
+		t.Errorf("Expected cache size to remain 100 after eviction, got %d", trustedTokenIssuers.Len())
 	}
 
 	// Verify the new entry is in cache
@@ -587,8 +613,8 @@ trusted_issuers:
   - "` + urlGitHubActionsIssuer + `"
 `
 
-	// Fill cache to capacity (50 entries)
-	for i := 0; i < 50; i++ {
+	// Fill cache to capacity (100 entries)
+	for i := range 100 {
 		trustedTokenIssuers.Add(fmt.Sprintf(patternTestOrg, i), configContent)
 	}
 
@@ -604,8 +630,8 @@ trusted_issuers:
 	}
 
 	// Verify cache is still at max capacity
-	if trustedTokenIssuers.Len() != 50 {
-		t.Errorf("Expected cache size to be 50 after eviction, got %d", trustedTokenIssuers.Len())
+	if trustedTokenIssuers.Len() != 100 {
+		t.Errorf("Expected cache size to be 100 after eviction, got %d", trustedTokenIssuers.Len())
 	}
 
 	// Verify the new entry is in cache

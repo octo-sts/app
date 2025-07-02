@@ -8,11 +8,18 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v72/github"
 	"sigs.k8s.io/yaml"
+)
+
+// Error constants to reduce duplication
+const (
+	errOrgCannotBeEmpty    = "organization cannot be empty"
+	errIssuerCannotBeEmpty = "issuer cannot be empty"
 )
 
 // OrgTrustedTokenIssuersConfig represents the organization-wide trusted token issuers configuration
@@ -46,7 +53,7 @@ func (v *OrgTrustedTokenIssuersValidator) SetGithubClient(org string, client *gi
 // isValidIssuerFormat validates the format of an issuer URL
 func isValidIssuerFormat(issuer string) error {
 	if issuer == "" {
-		return fmt.Errorf("issuer cannot be empty")
+		return fmt.Errorf(errIssuerCannotBeEmpty)
 	}
 
 	// Parse as URL
@@ -124,6 +131,37 @@ func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrust
 		return nil, fmt.Errorf("failed to parse trusted token issuers config: %w", err)
 	}
 
+	// Validate configuration limits to prevent DoS and align with cache capacity
+	// With 100 orgs in cache, these limits ensure reasonable memory usage:
+	// 100 orgs × 25 issuers × ~100 bytes = ~250KB for issuer strings
+	// 100 orgs × 5 patterns × compiled regex = manageable regex memory
+	if len(config.TrustedIssuers) > 25 {
+		return nil, fmt.Errorf("too many trusted issuers: maximum 25 allowed, got %d", len(config.TrustedIssuers))
+	}
+	if len(config.IssuerPatterns) > 5 {
+		return nil, fmt.Errorf("too many issuer patterns: maximum 5 allowed, got %d", len(config.IssuerPatterns))
+	}
+
+	// Additional memory-based validation
+	totalMemoryEstimate := 0
+	for _, issuer := range config.TrustedIssuers {
+		totalMemoryEstimate += len(issuer)
+		if len(issuer) > 512 { // Prevent extremely long issuer URLs
+			return nil, fmt.Errorf("issuer URL too long: maximum 512 characters, got %d", len(issuer))
+		}
+	}
+	for _, pattern := range config.IssuerPatterns {
+		totalMemoryEstimate += len(pattern)
+		if len(pattern) > 256 { // Prevent extremely complex regex patterns  
+			return nil, fmt.Errorf("issuer pattern too long: maximum 256 characters, got %d", len(pattern))
+		}
+	}
+	
+	// Limit total configuration memory to ~5KB per organization
+	if totalMemoryEstimate > 5120 {
+		return nil, fmt.Errorf("configuration too large: maximum 5KB per organization, got %d bytes", totalMemoryEstimate)
+	}
+
 	// Validate issuer formats
 	for _, issuer := range config.TrustedIssuers {
 		if err := isValidIssuerFormat(issuer); err != nil {
@@ -131,14 +169,14 @@ func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrust
 		}
 	}
 
-	// Compile regex patterns
-	config.compiledPatterns = make([]*regexp.Regexp, len(config.IssuerPatterns))
-	for i, pattern := range config.IssuerPatterns {
+	// Compile regex patterns with pre-allocated slice for better memory efficiency
+	config.compiledPatterns = make([]*regexp.Regexp, 0, len(config.IssuerPatterns))
+	for _, pattern := range config.IssuerPatterns {
 		compiled, err := regexp.Compile(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("invalid issuer pattern '%s': %w", pattern, err)
 		}
-		config.compiledPatterns[i] = compiled
+		config.compiledPatterns = append(config.compiledPatterns, compiled)
 	}
 
 	return &config, nil
@@ -147,11 +185,11 @@ func (v *OrgTrustedTokenIssuersValidator) parseConfig(content string) (*OrgTrust
 // ValidateIssuer validates if an issuer is trusted for the given organization
 func (v *OrgTrustedTokenIssuersValidator) ValidateIssuer(ctx context.Context, org, issuer string) error {
 	if org == "" {
-		return fmt.Errorf("organization cannot be empty")
+		return fmt.Errorf(errOrgCannotBeEmpty)
 	}
 
 	if issuer == "" {
-		return fmt.Errorf("issuer cannot be empty")
+		return fmt.Errorf(errIssuerCannotBeEmpty)
 	}
 
 	// Load organization configuration
@@ -165,11 +203,9 @@ func (v *OrgTrustedTokenIssuersValidator) ValidateIssuer(ctx context.Context, or
 		return nil
 	}
 
-	// Check exact matches
-	for _, trustedIssuer := range config.TrustedIssuers {
-		if issuer == trustedIssuer {
-			return nil
-		}
+	// Check exact matches using modern slices.Contains (Go 1.21+)
+	if slices.Contains(config.TrustedIssuers, issuer) {
+		return nil
 	}
 
 	// Check pattern matches
