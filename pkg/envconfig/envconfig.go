@@ -20,7 +20,7 @@ type EnvConfig struct {
 
 type EnvConfigApp struct {
 	Domain          string `envconfig:"STS_DOMAIN" required:"true"`
-	EventingIngress string `envconfig:"EVENT_INGRESS_URI" required:"true"`
+	EventingIngress string `envconfig:"EVENT_INGRESS_URI" required:"false"`
 }
 
 type EnvConfigWebhook struct {

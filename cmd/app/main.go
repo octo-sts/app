@@ -17,11 +17,13 @@ import (
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func main() {
@@ -67,9 +69,12 @@ func main() {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
-	ceclient, err := mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
-	if err != nil {
-		log.Panicf("failed to create cloudevents client: %v", err)
+	var ceclient cloudevents.Client
+	if baseCfg.Metrics {
+		ceclient, err = mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
+		if err != nil {
+			log.Panicf("failed to create cloudevents client: %v", err)
+		}
 	}
 
 	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))

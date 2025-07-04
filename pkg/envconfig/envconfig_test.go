@@ -118,7 +118,7 @@ func TestAppConfig(t *testing.T) {
 			envVars: map[string]string{
 				"STS_DOMAIN": "octo-sts-test.local",
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 	}
 
