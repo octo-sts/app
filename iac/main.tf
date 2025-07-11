@@ -7,10 +7,11 @@ module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
   version = "0.6.166"
 
-  name          = var.name
-  project_id    = var.project_id
-  regions       = var.regions
-  netnum_offset = 1
+  name                        = var.name
+  project_id                  = var.project_id
+  regions                     = var.regions
+  netnum_offset               = 1
+  hosted_zone_logging_enabled = false
 }
 
 # For slack need to create the notification manually - https://github.com/hashicorp/terraform-provider-google/issues/11346
