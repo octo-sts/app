@@ -1,10 +1,10 @@
 module github.com/octo-sts/app
 
-go 1.24.2
+go 1.24.5
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.11
-	chainguard.dev/sdk v0.1.34
+	chainguard.dev/sdk v0.1.35
 	cloud.google.com/go/kms v1.22.0
 	cloud.google.com/go/secretmanager v1.15.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0
@@ -77,7 +77,7 @@ require (
 	github.com/prometheus/common v0.63.0 // indirect
 	github.com/prometheus/procfs v0.16.0 // indirect
 	github.com/stretchr/testify v1.10.0
-	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.61.0 // indirect
+	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.62.0 // indirect
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.62.0 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.37.0 // indirect
