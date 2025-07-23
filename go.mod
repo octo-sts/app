@@ -3,14 +3,14 @@ module github.com/octo-sts/app
 go 1.24.5
 
 require (
-	chainguard.dev/go-grpc-kit v0.17.11
+	chainguard.dev/go-grpc-kit v0.17.12
 	chainguard.dev/sdk v0.1.37
 	cloud.google.com/go/kms v1.22.0
 	cloud.google.com/go/secretmanager v1.15.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0
 	github.com/cenkalti/backoff/v5 v5.0.2
 	github.com/chainguard-dev/clog v1.7.0
-	github.com/chainguard-dev/terraform-infra-common v0.6.167
+	github.com/chainguard-dev/terraform-infra-common v0.6.168
 	github.com/cloudevents/sdk-go/v2 v2.16.1
 	github.com/coreos/go-oidc/v3 v3.14.1
 	github.com/golang-jwt/jwt/v4 v4.5.2
@@ -21,7 +21,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.30.0
 	google.golang.org/api v0.243.0
-	google.golang.org/grpc v1.74.0
+	google.golang.org/grpc v1.74.2
 	k8s.io/apimachinery v0.33.3
 	sigs.k8s.io/yaml v1.5.0
 )
@@ -81,7 +81,7 @@ require (
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.62.0 // indirect
 	go.opentelemetry.io/otel v1.37.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.37.0 // indirect
-	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.36.0 // indirect
+	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.37.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp v1.37.0 // indirect
 	go.opentelemetry.io/otel/metric v1.37.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.37.0 // indirect
