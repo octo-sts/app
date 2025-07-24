@@ -42,4 +42,6 @@ module "serverless-gclb" {
       name = module.app.webhook.name
     }
   }
+
+  require_team = false
 }
