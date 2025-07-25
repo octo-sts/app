@@ -21,6 +21,7 @@ module "prober" {
     STS_DOMAIN = "octo-sts.dev"
   }
 
+  require_team          = false
   enable_alert          = true
   notification_channels = local.notification_channels
 }
@@ -48,13 +49,15 @@ module "negative_prober" {
     STS_DOMAIN = "octo-sts.dev"
   }
 
+  require_team          = false
   enable_alert          = true
   notification_channels = local.notification_channels
 }
 
 module "dashboard" {
-  source       = "chainguard-dev/common/infra//modules/dashboard/service"
-  version      = "0.6.170"
+  source  = "chainguard-dev/common/infra//modules/dashboard/service"
+  version = "0.6.170"
+
   service_name = var.name
   project_id   = var.project_id
 
