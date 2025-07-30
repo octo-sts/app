@@ -16,8 +16,10 @@ import (
 	"os"
 	"testing"
 
-	kms "cloud.google.com/go/kms/apiv1"
+	gcpKMS "cloud.google.com/go/kms/apiv1"
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/kms/gcp"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -34,13 +36,19 @@ func TestGCPKMS(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
 	testConfig := &envconfig.EnvConfig{
-		Port:    8080,
-		AppID:   123456,
-		KMSKey:  "test-kms-key",
-		Metrics: true,
+		Port:        8080,
+		AppID:       123456,
+		KMSKey:      "test-kms-key",
+		KMSProvider: "gcp",
+		Metrics:     true,
+	}
+	provider := testKMSSigner{
+		t:   t,
+		key: testConfig.KMSKey,
+		ctx: ctx,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	transport, err := New(ctx, testConfig, &provider)
 
 	assert.NoError(t, err)
 
@@ -59,7 +67,7 @@ func TestCertEnvVar(t *testing.T) {
 		Metrics:                    true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	transport, err := New(ctx, testConfig, nil)
 
 	assert.NoError(t, err)
 
@@ -76,21 +84,21 @@ func TestCertFile(t *testing.T) {
 		Metrics:                  true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	transport, err := New(ctx, testConfig, nil)
 
 	assert.NoError(t, err)
 
 	assert.NotNil(t, transport)
 }
 
-func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {
+func generateKMSClient(ctx context.Context, t *testing.T) *gcpKMS.KeyManagementClient {
 	l, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fakeServerAddr := l.Addr().String()
 
-	client, err := kms.NewKeyManagementClient(ctx,
+	client, err := gcpKMS.NewKeyManagementClient(ctx,
 		option.WithEndpoint(fakeServerAddr),
 		option.WithoutAuthentication(),
 		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
@@ -163,4 +171,15 @@ func generateTestCertificateFile(t *testing.T) string {
 	}
 
 	return tmpFile.Name()
+}
+
+type testKMSSigner struct {
+	t   *testing.T
+	key string
+	ctx context.Context
+}
+
+func (k *testKMSSigner) NewSigner() (ghinstallation.Signer, error) {
+	client := generateKMSClient(k.ctx, k.t)
+	return gcp.New(k.ctx, client, k.key)
 }
