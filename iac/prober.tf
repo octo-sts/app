@@ -21,7 +21,6 @@ module "prober" {
     STS_DOMAIN = "octo-sts.dev"
   }
 
-  require_team          = false
   enable_alert          = true
   notification_channels = local.notification_channels
 }
@@ -49,7 +48,6 @@ module "negative_prober" {
     STS_DOMAIN = "octo-sts.dev"
   }
 
-  require_team          = false
   enable_alert          = true
   notification_channels = local.notification_channels
 }
