@@ -4,13 +4,13 @@ go 1.24.5
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.12
-	chainguard.dev/sdk v0.1.37
+	chainguard.dev/sdk v0.1.38
 	cloud.google.com/go/kms v1.22.0
 	cloud.google.com/go/secretmanager v1.15.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.16.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.7.0
-	github.com/chainguard-dev/terraform-infra-common v0.6.174
+	github.com/chainguard-dev/terraform-infra-common v0.6.176
 	github.com/cloudevents/sdk-go/v2 v2.16.1
 	github.com/coreos/go-oidc/v3 v3.15.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
