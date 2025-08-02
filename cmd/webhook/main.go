@@ -64,9 +64,9 @@ func main() {
 	webhookSecrets := [][]byte{}
 	if baseCfg.KMSKey != "" {
 		// It's probably not ideal to assume the secret provider is the same as the KMS
-		//provider, but because of the support for environment variables before adding a
-		//second cloud provider supported, that complicates adding a new environment variable
-		//for config.
+		// provider, but because of the support for environment variables before adding a
+		// second cloud provider supported, that complicates adding a new environment variable
+		// for config.
 		secretsProvider, err := secrets.NewSecretProvider(ctx, baseCfg.KMSProvider)
 		if err != nil {
 			log.Panicf("could not create secret provider: %v", err)

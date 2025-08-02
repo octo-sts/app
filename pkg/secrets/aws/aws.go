@@ -15,7 +15,7 @@ func GetSecret(ctx context.Context, manager *awsSM.Client, keyID string) ([]byte
 	req := awsSM.GetSecretValueInput{SecretId: aws.String(keyID)}
 	resp, err := manager.GetSecretValue(ctx, &req)
 	if err != nil {
-		return nil, fmt.Errorf("error fetching secret %s: %v", keyID, err)
+		return nil, fmt.Errorf("error fetching secret %s: %w", keyID, err)
 	}
 
 	// Depending on how the secret was stored, it can be either a string or binary.

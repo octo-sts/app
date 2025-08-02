@@ -7,7 +7,7 @@ import (
 	"context"
 	"fmt"
 
-	"cloud.google.com/go/secretmanager/apiv1"
+	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 )
 
@@ -16,7 +16,7 @@ func GetSecret(ctx context.Context, secretmanager *secretmanager.Client, keyID s
 		Name: keyID,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("error fetching secret %s: %v", keyID, err)
+		return nil, fmt.Errorf("error fetching secret %s: %w", keyID, err)
 	}
 	return resp.Payload.Data, nil
 }
