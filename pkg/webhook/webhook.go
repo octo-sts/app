@@ -253,6 +253,18 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 			}
 		}
 	}
+	var nonSTSFiles []string
+	for _, f := range resp.Files {
+		// Check for YAML files in .github/chainguard/ that are not *.sts.yaml files.
+		sts, _ := filepath.Match(".github/chainguard/*.sts.yaml", f.GetFilename())
+		nonsts, _ := filepath.Match(".github/chainguard/*.yaml", f.GetFilename())
+		if nonsts && !sts {
+			nonSTSFiles = append(nonSTSFiles, f.GetFilename())
+		}
+	}
+	if len(nonSTSFiles) > 0 {
+		return e.handleNonSTSFiles(ctx, client, owner, repo, sha, nonSTSFiles)
+	}
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -294,17 +306,26 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	}
 
 	// Check diff
-	var files []string
 	resp, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pr.GetNumber(), &github.ListOptions{})
 	if err != nil {
 		return nil, err
 	}
+	var files []string
 	for _, file := range resp {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
 			if file.GetStatus() != "removed" {
 				files = append(files, file.GetFilename())
 			}
 		}
+	}
+	var nonSTSFiles []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".sts.yaml") {
+			nonSTSFiles = append(nonSTSFiles, f)
+		}
+	}
+	if len(nonSTSFiles) > 0 {
+		return e.handleNonSTSFiles(ctx, client, owner, repo, sha, nonSTSFiles)
 	}
 	if len(files) == 0 {
 		return nil, nil
@@ -391,6 +412,17 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			}
 		}
 	}
+
+	var nonSTSFiles []string
+	for _, f := range files {
+		if !strings.HasSuffix(f, ".sts.yaml") {
+			nonSTSFiles = append(nonSTSFiles, f)
+		}
+	}
+	if len(nonSTSFiles) > 0 {
+		return e.handleNonSTSFiles(ctx, client, owner, repo, sha, nonSTSFiles)
+	}
+
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -418,4 +450,26 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 		}
 	}
 	return true
+}
+
+func (e *Validator) handleNonSTSFiles(ctx context.Context, client *github.Client, owner, repo, sha string, nonSTSFiles []string) (*github.CheckRun, error) {
+	log := clog.FromContext(ctx)
+	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
+		Name:        "Trust Policy Validation",
+		HeadSHA:     sha,
+		ExternalID:  github.Ptr(sha),
+		Status:      github.Ptr("completed"),
+		Conclusion:  github.Ptr("failure"),
+		StartedAt:   &github.Timestamp{Time: time.Now()},
+		CompletedAt: &github.Timestamp{Time: time.Now()},
+		Output: &github.CheckRunOutput{
+			Title:   github.Ptr("Non-STS YAML file(s)."),
+			Summary: github.Ptr("Found non-STS YAML files in `.github/chainguard` directory:\n\n" + strings.Join(nonSTSFiles, "\n")),
+		},
+	})
+	if err != nil {
+		log.Errorf("error creating CheckRun: %v", err)
+		return nil, err
+	}
+	return cr, nil
 }
