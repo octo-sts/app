@@ -40,6 +40,10 @@ func main() {
 		log.Panicf("failed to process env var: %s", err)
 	}
 
+	if baseCfg.OrgTrustPolicy {
+		clog.FromContext(ctx).Infof("Required Org Policy Active")
+	}
+
 	if baseCfg.Metrics {
 		go metrics.ServeMetrics()
 
@@ -77,7 +81,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics, baseCfg.OrgTrustPolicy))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

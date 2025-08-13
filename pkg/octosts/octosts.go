@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -40,12 +41,13 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool, orgTrustPolicy bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		atr:      atr,
-		ceclient: ceclient,
-		domain:   domain,
-		metrics:  metrics,
+		atr:            atr,
+		ceclient:       ceclient,
+		domain:         domain,
+		metrics:        metrics,
+		orgTrustPolicy: orgTrustPolicy,
 	}
 }
 
@@ -58,10 +60,11 @@ var (
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
-	ceclient cloudevents.Client
-	domain   string
-	metrics  bool
+	atr            *ghinstallation.AppsTransport
+	ceclient       cloudevents.Client
+	domain         string
+	metrics        bool
+	orgTrustPolicy bool
 }
 
 type cacheTrustPolicyKey struct {
@@ -143,16 +146,39 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
+	if s.orgTrustPolicy {
+		var orgRequest *pboidc.ExchangeRequest
+		err := deepCopy(&request, &orgRequest)
+		if err != nil {
+			return nil, err
+		}
+		createOrgRequest(orgRequest)
+		clog.FromContext(ctx).Infof("org exchange request: %#v", orgRequest)
+		e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, orgRequest.Scope, orgRequest.Identity)
+		if err != nil {
+			return nil, err
+		}
+		clog.FromContext(ctx).Infof("org trust policy: %#v", e.TrustPolicy)
+
+		// Check the token against the organization federation rules.
+		e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
+		if err != nil {
+			clog.FromContext(ctx).Warnf("token does not match org trust policy: %v", err)
+			return nil, err
+		}
+	}
+
+	clog.FromContext(ctx).Infof("repo exchange request: %#v", request)
 	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
 	if err != nil {
 		return nil, err
 	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
+	clog.FromContext(ctx).Infof("repo trust policy: %#v", e.TrustPolicy)
 
-	// Check the token against the federation rules.
+	// Check the token against the repository federation rules.
 	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
 	if err != nil {
-		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
+		clog.FromContext(ctx).Warnf("token does not match repo trust policy: %v", err)
 		return nil, err
 	}
 
@@ -199,6 +225,22 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	return &pboidc.RawToken{
 		Token: token,
 	}, nil
+}
+
+func deepCopy(src **pboidc.ExchangeRequest, dst **pboidc.ExchangeRequest) error {
+	bytes, err := json.Marshal(src)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(bytes, dst)
+}
+
+func createOrgRequest(request *pboidc.ExchangeRequest) *pboidc.ExchangeRequest {
+	base := path.Base(request.Scope)
+	newBase := ".github"
+	request.Identity = "org"
+	request.Scope = strings.Replace(request.Scope, base, newBase, 1)
+	return request
 }
 
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
