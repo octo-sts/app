@@ -74,14 +74,14 @@ type cacheTrustPolicyKey struct {
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
 	clog.FromContext(ctx).Infof("exchange request: %#v", request.GetIdentity())
 	e := Event{
-		Scope:    request.Scope,
-		Identity: request.Identity,
+		Scope:    request.GetScope(),
+		Identity: request.GetIdentity(),
 	}
 	if s.metrics {
 		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
-			event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
+			event.SetSubject(fmt.Sprintf("%s/%s", request.GetScope(), request.GetIdentity()))
 			event.SetSource(fmt.Sprintf("https://%s", s.domain))
 			if err != nil {
 				e.Error = err.Error()
@@ -143,7 +143,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
+	// Request validation.
+	if request.GetScope() == "" {
+		return nil, status.Error(codes.InvalidArgument, "scope must be provided")
+	}
+	if request.GetIdentity() == "" {
+		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
+	}
+
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.GetScope(), request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
