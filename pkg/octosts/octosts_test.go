@@ -35,7 +35,9 @@ import (
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v72/github"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -173,6 +175,89 @@ func TestExchange(t *testing.T) {
 			}
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Error(diff)
+			}
+		})
+	}
+}
+
+func TestExchangeValidation(t *testing.T) {
+	ctx := context.Background()
+	atr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.RS256,
+		Key:       pk,
+	}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	sts := &sts{
+		atr: atr,
+	}
+
+	tests := []struct {
+		name string
+		req  *v1.ExchangeRequest
+	}{
+		{
+			name: "empty scope",
+			req: &v1.ExchangeRequest{
+				Identity: "foo",
+				Scope:    "",
+			},
+		},
+		{
+			name: "empty identity",
+			req: &v1.ExchangeRequest{
+				Identity: "",
+				Scope:    "org/repo",
+			},
+		},
+		{
+			name: "both empty",
+			req: &v1.ExchangeRequest{
+				Identity: "",
+				Scope:    "",
+			},
+		},
+		{
+			name: "nil",
+			req:  nil,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := sts.Exchange(ctx, tc.req)
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			st, ok := status.FromError(err)
+			if !ok {
+				t.Fatalf("expected gRPC status error, got %T", err)
+			}
+			if st.Code() != codes.InvalidArgument {
+				t.Errorf("expected code InvalidArgument, got %v", st.Code())
 			}
 		})
 	}
