@@ -78,7 +78,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	var requestScope string
 	if len(scopes) == 0 {
 		// TODO: remove this once we upgrade the action and we can make sure we are in sync with the new way
-		requestScope = request.GetScope()
+		requestScope = request.GetScope() //nolint: staticcheck
 	} else {
 		requestScope = scopes[0]
 	}
@@ -127,7 +127,6 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	// Validate issuer format
-
 	if !oidcvalidate.IsValidIssuer(issuer) {
 		return nil, status.Error(codes.InvalidArgument, "invalid issuer format")
 	}
