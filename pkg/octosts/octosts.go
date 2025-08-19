@@ -73,17 +73,8 @@ type cacheTrustPolicyKey struct {
 // Exchange implements pboidc.SecurityTokenServiceServer
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
 	clog.FromContext(ctx).Infof("exchange request: %#v", request.GetIdentity())
-
-	var requestScope string
-	scope := request.GetScopes()
-	if len(scope) == 0 {
-		requestScope = ""
-	} else {
-		requestScope = scope[0]
-	}
-
 	e := Event{
-		Scope:    requestScope,
+		Scope:    request.GetScope(),
 		Identity: request.GetIdentity(),
 	}
 
@@ -91,7 +82,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
-			event.SetSubject(fmt.Sprintf("%s/%s", requestScope, request.GetIdentity()))
+			event.SetSubject(fmt.Sprintf("%s/%s", request.GetScope(), request.GetIdentity()))
 			event.SetSource(fmt.Sprintf("https://%s", s.domain))
 			if err != nil {
 				e.Error = err.Error()
@@ -154,14 +145,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	// Request validation.
-	if requestScope == "" {
+	if request.GetScope() == "" {
 		return nil, status.Error(codes.InvalidArgument, "scope must be provided")
 	}
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.GetScope(), request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
