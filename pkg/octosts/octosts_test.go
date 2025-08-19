@@ -137,7 +137,7 @@ func TestExchange(t *testing.T) {
 			name: "repo",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scopes:   []string{"org/repo"},
+				Scope:    "org/repo",
 			},
 			want: &github.InstallationTokenOptions{
 				Repositories: []string{"repo"},
@@ -150,7 +150,7 @@ func TestExchange(t *testing.T) {
 			name: "org",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scopes:   []string{"org"},
+				Scope:    "org",
 			},
 			want: &github.InstallationTokenOptions{
 				Permissions: &github.InstallationPermissions{
