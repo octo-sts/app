@@ -108,6 +108,16 @@ module "this" {
         name  = "EVENT_INGRESS_URI"
         value = { for k, v in module.sts-emits-events : k => v.uri }
       }]
+
+      startup_probe = {
+        tcp_socket = {
+          port = 8080
+        }
+        initial_delay_seconds = 30
+        timeout_seconds       = 240
+        period_seconds        = 240
+        failure_threshold     = 1
+      }
     }
   }
 
