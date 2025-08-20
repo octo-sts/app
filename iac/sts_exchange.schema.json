@@ -131,6 +131,11 @@
                 "mode": "NULLABLE"
             },
             {
+                "name": "attestations",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
                 "name": "blocking",
                 "type": "STRING",
                 "mode": "NULLABLE"
