@@ -74,6 +74,11 @@
           "mode": "NULLABLE",
           "fields": [
             {
+                "name": "event_name",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
                 "name": "job_workflow_ref",
                 "type": "STRING",
                 "mode": "NULLABLE"
