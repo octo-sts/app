@@ -78,8 +78,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	var requestScope string
 	if len(scopes) == 0 {
 		// TODO: remove this once we upgrade the action and we can make sure we are in sync with the new way
+		clog.FromContext(ctx).Info("scopes not provided, fallback to scope")
 		requestScope = request.GetScope() //nolint: staticcheck
 	} else {
+		clog.FromContext(ctx).Infof("got scopes: %v", scopes)
 		requestScope = scopes[0]
 	}
 
