@@ -76,13 +76,17 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 
 	scopes := request.GetScopes()
 	var requestScope string
-	if len(scopes) == 0 {
+	switch len(scopes) {
+	case 0:
 		// TODO: remove this once we upgrade the action and we can make sure we are in sync with the new way
 		clog.FromContext(ctx).Info("scopes not provided, fallback to scope")
 		requestScope = request.GetScope() //nolint: staticcheck
-	} else {
+	case 1:
 		clog.FromContext(ctx).Infof("got scopes: %v", scopes)
 		requestScope = scopes[0]
+	default:
+		clog.FromContext(ctx).Infof("got more than one scope: %v", scopes)
+		return nil, status.Error(codes.InvalidArgument, "multiple scopes not supported")
 	}
 
 	e := Event{
