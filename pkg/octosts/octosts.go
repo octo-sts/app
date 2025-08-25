@@ -73,8 +73,24 @@ type cacheTrustPolicyKey struct {
 // Exchange implements pboidc.SecurityTokenServiceServer
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
 	clog.FromContext(ctx).Infof("exchange request: %#v", request.GetIdentity())
+
+	scopes := request.GetScopes()
+	var requestScope string
+	switch len(scopes) {
+	case 0:
+		// TODO: remove this once we upgrade the action and we can make sure we are in sync with the new way
+		clog.FromContext(ctx).Info("scopes not provided, fallback to scope")
+		requestScope = request.GetScope() //nolint: staticcheck
+	case 1:
+		clog.FromContext(ctx).Infof("got scopes: %v", scopes)
+		requestScope = scopes[0]
+	default:
+		clog.FromContext(ctx).Infof("got more than one scope: %v", scopes)
+		return nil, status.Error(codes.InvalidArgument, "multiple scopes not supported")
+	}
+
 	e := Event{
-		Scope:    request.GetScope(),
+		Scope:    requestScope,
 		Identity: request.GetIdentity(),
 	}
 
@@ -82,7 +98,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
-			event.SetSubject(fmt.Sprintf("%s/%s", request.GetScope(), request.GetIdentity()))
+			event.SetSubject(fmt.Sprintf("%s/%s", requestScope, request.GetIdentity()))
 			event.SetSource(fmt.Sprintf("https://%s", s.domain))
 			if err != nil {
 				e.Error = err.Error()
@@ -145,14 +161,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	// Request validation.
-	if request.GetScope() == "" {
+	if requestScope == "" {
 		return nil, status.Error(codes.InvalidArgument, "scope must be provided")
 	}
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.GetScope(), request.GetIdentity())
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
