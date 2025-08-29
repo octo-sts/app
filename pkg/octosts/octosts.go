@@ -92,6 +92,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	e := Event{
 		Scope:    requestScope,
 		Identity: request.GetIdentity(),
+		Time:     time.Now(),
 	}
 
 	if s.metrics {

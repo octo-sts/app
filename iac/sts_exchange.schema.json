@@ -348,5 +348,10 @@
         "name": "error",
         "type": "STRING",
         "mode": "NULLABLE"
+    },
+    {
+        "name": "time",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE"
     }
 ]
