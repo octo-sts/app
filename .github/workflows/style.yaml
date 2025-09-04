@@ -107,7 +107,7 @@ jobs:
       - uses: chainguard-dev/actions/eof-newline@3caedd3784c809ba873cbb8c6a12e2bc6bf6ab09 # v1.4.13
         if: ${{ always() }}
 
-      - uses: reviewdog/action-tflint@92ecd5bdf3d31ada4ac26a702666986f67385fda # master
+      - uses: reviewdog/action-tflint@54a5e5aed57dcfbb4662ec548de876df33d6288d # master
         if: ${{ always() }}
         with:
           github_token: ${{ secrets.github_token }}
