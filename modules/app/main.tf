@@ -76,7 +76,6 @@ module "this" {
   project_id    = var.project_id
   name          = var.name
   regions       = var.regions
-  require_squad = false
 
   deletion_protection = var.deletion_protection
 
