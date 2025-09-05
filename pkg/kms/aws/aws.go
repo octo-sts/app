@@ -10,6 +10,7 @@ import (
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -46,24 +47,34 @@ func (s *signingMethodAWS) Alg() string {
 	return "RS256"
 }
 
-type awsSigner struct {
+type Provider struct {
 	ctx    context.Context
 	client *kms.Client
 	key    string
 }
 
-func New(ctx context.Context, client *kms.Client, key string) (ghinstallation.Signer, error) {
-	return &awsSigner{
+func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
+	awsConfig, err := config.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	client := kms.NewFromConfig(awsConfig)
+
+	return &Provider{
 		ctx:    ctx,
 		client: client,
-		key:    key,
+		key:    kmsKey,
 	}, nil
 }
 
-func (s *awsSigner) Sign(claims jwt.Claims) (string, error) {
+func (p *Provider) NewSigner() (ghinstallation.Signer, error) {
+	return p, nil
+}
+
+func (p *Provider) Sign(claims jwt.Claims) (string, error) {
 	method := &signingMethodAWS{
-		ctx:    s.ctx,
-		client: s.client,
+		ctx:    p.ctx,
+		client: p.client,
 	}
-	return jwt.NewWithClaims(method, claims).SignedString(s.key)
+	return jwt.NewWithClaims(method, claims).SignedString(p.key)
 }
