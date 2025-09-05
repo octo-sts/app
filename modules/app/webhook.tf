@@ -25,7 +25,6 @@ module "webhook" {
   project_id    = var.project_id
   name          = "${var.name}-webhook"
   regions       = var.regions
-  require_squad = false
 
   deletion_protection = var.deletion_protection
 
