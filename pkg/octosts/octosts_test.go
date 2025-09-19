@@ -125,9 +125,7 @@ func TestExchange(t *testing.T) {
 	})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	sts := &sts{
-		atr: atr,
-	}
+	sts := NewSecurityTokenServiceServer(atr, nil, "test.example.com", false).(*sts)
 	for _, tc := range []struct {
 		name string
 		req  *v1.ExchangeRequest
