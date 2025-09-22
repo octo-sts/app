@@ -234,9 +234,15 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 	owner, repo := path.Dir(scope), path.Base(scope)
 	if owner == "." {
 		owner, repo = repo, ".github"
-		tp = otp
 	} else {
 		otp.Repositories = []string{repo}
+	}
+
+	// If the repo is .github, then parse with an org policy even if the repo
+	// was specified as .github because we will reject the repositories field
+	// in policies otherwise.
+	if repo == ".github" {
+		tp = otp
 	}
 
 	id, err := s.lookupInstall(ctx, owner)
