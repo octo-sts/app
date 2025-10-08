@@ -93,6 +93,12 @@ func main() {
 		log.Panicf("failed to register root GET handler: %v", err)
 	}
 
+	if err := d.MUX.HandlePath(http.MethodGet, "/healthcheck", func(w http.ResponseWriter, r *http.Request, _ map[string]string) {
+		w.WriteHeader(http.StatusOK)
+	}); err != nil {
+		log.Panicf("failed to register healthcheck GET handler: %v", err)
+	}
+
 	if err := d.ListenAndServe(ctx); err != nil {
 		log.Panicf("ListenAndServe() = %v", err)
 	}
