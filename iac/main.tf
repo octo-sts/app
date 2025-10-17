@@ -5,7 +5,7 @@ provider "ko" { repo = "gcr.io/${var.project_id}" }
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "0.7.8"
+  version = "0.7.10"
 
   name                        = var.name
   project_id                  = var.project_id
