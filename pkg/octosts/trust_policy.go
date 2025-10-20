@@ -17,21 +17,30 @@ import (
 )
 
 type TrustPolicy struct {
-	Issuer        string         `json:"issuer,omitempty"`
+	// Issuer to match against (exact match).
+	Issuer string `json:"issuer,omitempty"`
+	// Issuer regex pattern to match against.
 	IssuerPattern string         `json:"issuer_pattern,omitempty"`
 	issuerPattern *regexp.Regexp `json:"-"`
 
-	Subject        string         `json:"subject,omitempty"`
+	// Subject to match against (exact match).
+	Subject string `json:"subject,omitempty"`
+	// Subject regex pattern to match against.
 	SubjectPattern string         `json:"subject_pattern,omitempty"`
 	subjectPattern *regexp.Regexp `json:"-"`
 
-	Audience        string         `json:"audience,omitempty"`
+	// Audience to match against (exact match).
+	Audience string `json:"audience,omitempty"`
+	// Audience regex pattern to match against.
 	AudiencePattern string         `json:"audience_pattern,omitempty"`
 	audiencePattern *regexp.Regexp `json:"-"`
 
+	// ClaimPattern is a map of claim names to regex patterns to match against.
 	ClaimPattern map[string]string         `json:"claim_pattern,omitempty"`
 	claimPattern map[string]*regexp.Regexp `json:"-"`
 
+	// GitHub App installation permissions to request tokens with.
+	// See https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
 
 	isCompiled bool `json:"-"`
@@ -40,6 +49,9 @@ type TrustPolicy struct {
 type OrgTrustPolicy struct {
 	TrustPolicy `json:",inline"`
 
+	// Repositories is an optional scoping of repositories within the organization.
+	// If not provided, all repositories available to the GitHub App within the organization
+	// are included.
 	Repositories []string `json:"repositories,omitempty"`
 }
 
