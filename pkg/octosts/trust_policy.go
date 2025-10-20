@@ -133,7 +133,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 	switch {
 	case tp.issuerPattern != nil:
 		if !tp.issuerPattern.MatchString(token.Issuer) {
-			return act, status.Errorf(codes.PermissionDenied, "trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: issuer %q did not match pattern %q", token.Issuer, tp.IssuerPattern)
 		}
 
 	case tp.Issuer != "":
@@ -150,7 +150,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 	switch {
 	case tp.subjectPattern != nil:
 		if !tp.subjectPattern.MatchString(token.Subject) {
-			return act, status.Errorf(codes.PermissionDenied, "trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: subject %q did not match pattern %q", token.Subject, tp.SubjectPattern)
 		}
 
 	case tp.Subject != "":
