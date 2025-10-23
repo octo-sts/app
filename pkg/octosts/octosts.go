@@ -41,33 +41,52 @@ const (
 )
 
 func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+	// Initialize organization trusted token issuers validator
+	orgValidator := NewOrgTrustedTokenIssuersValidator(".github/chainguard/trusted-token-issuers.yaml")
+	
 	return &sts{
-		atr:      atr,
-		ceclient: ceclient,
-		domain:   domain,
-		metrics:  metrics,
+		atr:                        atr,
+		ceclient:                   ceclient,
+		domain:                     domain,
+		metrics:                    metrics,
+		orgTrustedIssuersValidator: orgValidator,
 	}
 }
 
 var (
 	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
-	installationIDs, _ = lru.New2Q[string, int64](200)
-	trustPolicies      = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+	installationIDs, _  = lru.New2Q[string, int64](200)
+	trustPolicies       = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+	// trustedTokenIssuers cache sized to balance memory usage with performance
+	// 100 orgs × (25 issuers + 5 patterns) = ~3000 items max, reasonable memory footprint
+	trustedTokenIssuers = expirablelru.NewLRU[string, string](100, nil, time.Minute*5)
 )
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
-	ceclient cloudevents.Client
-	domain   string
-	metrics  bool
+	atr                           *ghinstallation.AppsTransport
+	ceclient                      cloudevents.Client
+	domain                        string
+	metrics                       bool
+	orgTrustedIssuersValidator    *OrgTrustedTokenIssuersValidator
 }
 
 type cacheTrustPolicyKey struct {
 	owner    string
 	repo     string
 	identity string
+}
+
+// extractOrgFromScope extracts the organization name from the scope parameter.
+// Scope format is "owner/repo" where owner is the organization.
+func extractOrgFromScope(scope string) string {
+	owner, _ := path.Dir(scope), path.Base(scope)
+	if owner == "." {
+		// For organization-level policies, the scope is just the org name
+		return path.Base(scope)
+	}
+	return owner
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
@@ -136,6 +155,24 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Validate issuer format
 	if !oidcvalidate.IsValidIssuer(issuer) {
 		return nil, status.Error(codes.InvalidArgument, "invalid issuer format")
+	}
+
+	// Validate organization trusted token issuers
+	org := extractOrgFromScope(request.Scope)
+	if org != "" {
+		// Set up GitHub client for the validator if not already configured
+		if _, exists := s.orgTrustedIssuersValidator.githubClients[org]; !exists {
+			client := github.NewClient(&http.Client{
+				Transport: s.atr,
+			})
+			s.orgTrustedIssuersValidator.SetGithubClient(org, client)
+		}
+		
+		if err := s.orgTrustedIssuersValidator.ValidateIssuer(ctx, org, issuer); err != nil {
+			clog.FromContext(ctx).Warnf("organization trusted issuer validation failed for org %s, issuer %s: %v", org, issuer, err)
+			return nil, status.Error(codes.PermissionDenied, "issuer not trusted by organization")
+		}
+		clog.FromContext(ctx).Infof("organization trusted issuer validation passed for org %s, issuer %s", org, issuer)
 	}
 
 	// Fetch the provider from the cache or create a new one and add to the cache
