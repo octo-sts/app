@@ -48,9 +48,9 @@ regular expressions. For example:
 
 ```yaml
 issuer: https://accounts.google.com
-subject_pattern: '[0-9]+'
+subject_pattern: "[0-9]+"
 claim_pattern:
-  email: '.*@chainguard.dev'
+  email: ".*@chainguard.dev"
 
 permissions:
   contents: read
@@ -58,6 +58,23 @@ permissions:
 
 This policy will allow OIDC tokens from Google accounts of folks with a
 Chainguard email address to federate and read the repo contents.
+
+#### Autocomplete
+
+[JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:
+
+- [TrustPolicy](./pkg/octosts/octosts.TrustPolicy.json)
+- [OrgTrustPolicy](pkg/octosts/octosts.OrgTrustPolicy.json)
+
+##### VSCode
+
+We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml?tab=readme-ov-file):
+
+```json
+"yaml.schemas": {
+    "https://github.com/octo-sts/app/blob/main/pkg/octosts/octosts.TrustPolicy.json": "/.github/chainguard/*"
+}
+```
 
 ### Federating a token
 
