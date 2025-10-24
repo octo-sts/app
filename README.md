@@ -72,7 +72,7 @@ We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml
 
 ```json
 "yaml.schemas": {
-    "https://github.com/octo-sts/app/blob/main/pkg/octosts/octosts.TrustPolicy.json": "/.github/chainguard/*"
+    "https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json": "/.github/chainguard/*"
 }
 ```
 
