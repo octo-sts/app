@@ -64,7 +64,7 @@ Chainguard email address to federate and read the repo contents.
 [JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:
 
 - [TrustPolicy](./pkg/octosts/octosts.TrustPolicy.json)
-- [OrgTrustPolicy](pkg/octosts/octosts.TrustPolicy.json)
+- [OrgTrustPolicy](pkg/octosts/octosts.OrgTrustPolicy.json)
 
 ##### VSCode
 
