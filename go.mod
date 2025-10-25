@@ -6,7 +6,7 @@ require (
 	chainguard.dev/go-grpc-kit v0.17.15
 	chainguard.dev/sdk v0.1.43
 	cloud.google.com/go/kms v1.23.2
-	cloud.google.com/go/secretmanager v1.15.1
+	cloud.google.com/go/secretmanager v1.16.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.7.0
