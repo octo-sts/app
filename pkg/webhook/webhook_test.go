@@ -89,11 +89,11 @@ func TestOrgFilter(t *testing.T) {
 		{"bar", http.StatusOK},
 	} {
 		t.Run(tc.org, func(t *testing.T) {
-			body, err := json.Marshal(github.PushEvent{
+			body, err := json.Marshal(github.PullRequestEvent{
 				Organization: &github.Organization{
 					Login: github.Ptr(tc.org),
 				},
-				Repo: &github.PushEventRepository{
+				Repo: &github.Repository{
 					Owner: &github.User{
 						Login: github.Ptr(tc.org),
 					},
@@ -107,7 +107,7 @@ func TestOrgFilter(t *testing.T) {
 				t.Fatal(err)
 			}
 			req.Header.Set("X-Hub-Signature", signature(secret, body))
-			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("X-GitHub-Event", "pull_request")
 			req.Header.Set("Content-Type", "application/json")
 			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 			if err != nil {
@@ -192,6 +192,9 @@ func TestWebhookOK(t *testing.T) {
 		},
 		Before: github.Ptr("1234"),
 		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test.sts.yaml"},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -298,6 +301,11 @@ func TestWebhookDeletedSTS(t *testing.T) {
 		},
 		Before: github.Ptr("9876"),
 		After:  github.Ptr("4321"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test2.sts.yaml"},
+		}, {
+			Removed: []string{".github/chainguard/removed-example.sts.yaml"},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
