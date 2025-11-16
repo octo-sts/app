@@ -13,7 +13,6 @@ import (
 
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
-	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
@@ -23,6 +22,7 @@ import (
 
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
+	"github.com/octo-sts/app/pkg/kms"
 	"github.com/octo-sts/app/pkg/octosts"
 )
 
