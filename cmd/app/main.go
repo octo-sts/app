@@ -14,7 +14,6 @@ import (
 
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
-	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
@@ -25,6 +24,7 @@ import (
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/ghtransport"
+	"github.com/octo-sts/app/pkg/kms"
 	"github.com/octo-sts/app/pkg/octosts"
 	"github.com/octo-sts/app/pkg/stickystore"
 )
@@ -50,15 +50,6 @@ func main() {
 		defer metrics.SetupTracer(ctx)()
 	}
 
-	var client *kms.KeyManagementClient
-
-	if len(baseCfg.KMSKeys) > 0 {
-		client, err = kms.NewKeyManagementClient(ctx)
-		if err != nil {
-			log.Panicf("could not create kms client: %v", err)
-		}
-	}
-
 	// Capacity-aware routing: a shared QuotaStore is populated by the
 	// transport tap (X-RateLimit-Remaining headers on every GitHub response)
 	// and read by NewRoundRobinWithQuota. Cold start (no quota data yet)
@@ -74,14 +65,19 @@ func main() {
 	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
 	for i, appID := range baseCfg.AppIDs {
 		var kmsKey string
+		var kmsClient kms.KMS
 		if len(baseCfg.KMSKeys) > 0 {
 			kmsKey = baseCfg.KMSKeys[i]
 			if kmsKey == "" {
 				log.Printf("skipping app %d: no KMS key configured", appID)
 				continue
 			}
+			kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, kmsKey)
+			if err != nil {
+				log.Panicf("could not create kms client for app %d: %v", appID, err)
+			}
 		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, quotaStore)
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, kmsClient, quotaStore)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}

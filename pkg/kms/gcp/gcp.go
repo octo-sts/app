@@ -1,7 +1,7 @@
-// Copyright 2024 Chainguard, Inc.
+// Copyright 2025 Chainguard, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-package gcpkms
+package gcp
 
 import (
 	"context"
@@ -16,6 +16,7 @@ import (
 )
 
 type signingMethodGCP struct {
+	ctx    context.Context
 	client *kms.KeyManagementClient
 }
 
@@ -24,8 +25,6 @@ func (s *signingMethodGCP) Verify(string, string, interface{}) error {
 }
 
 func (s *signingMethodGCP) Sign(signingString string, ikey interface{}) (string, error) {
-	ctx := context.Background()
-
 	key, ok := ikey.(string)
 	if !ok {
 		return "", fmt.Errorf("invalid key reference type: %T", ikey)
@@ -34,7 +33,7 @@ func (s *signingMethodGCP) Sign(signingString string, ikey interface{}) (string,
 		Name: key,
 		Data: []byte(signingString),
 	}
-	resp, err := s.client.AsymmetricSign(ctx, req)
+	resp, err := s.client.AsymmetricSign(s.ctx, req)
 	if err != nil {
 		return "", err
 	}
@@ -45,22 +44,34 @@ func (s *signingMethodGCP) Alg() string {
 	return "RS256"
 }
 
-type gcpSigner struct {
+type Provider struct {
+	ctx    context.Context
 	client *kms.KeyManagementClient
 	key    string
 }
 
-func New(_ context.Context, client *kms.KeyManagementClient, key string) (ghinstallation.Signer, error) {
-	return &gcpSigner{
+func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
+	client, err := kms.NewKeyManagementClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Provider{
+		ctx:    ctx,
 		client: client,
-		key:    key,
+		key:    kmsKey,
 	}, nil
 }
 
-// Sign signs the JWT claims with the RSA key.
-func (s *gcpSigner) Sign(claims jwt.Claims) (string, error) {
+// NewSigner returns a new signer for the provider.
+func (p *Provider) NewSigner() (ghinstallation.Signer, error) {
+	return p, nil
+}
+
+func (p *Provider) Sign(claims jwt.Claims) (string, error) {
 	method := &signingMethodGCP{
-		client: s.client,
+		ctx:    p.ctx,
+		client: p.client,
 	}
-	return jwt.NewWithClaims(method, claims).SignedString(s.key)
+	return jwt.NewWithClaims(method, claims).SignedString(p.key)
 }
