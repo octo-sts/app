@@ -10,12 +10,11 @@ import (
 	"strconv"
 	"strings"
 
-	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
-	"github.com/octo-sts/app/pkg/gcpkms"
 	"github.com/octo-sts/app/pkg/ghinstall"
+	"github.com/octo-sts/app/pkg/kms"
 )
 
 type ctxKey int
@@ -68,7 +67,7 @@ func (q *quotaTap) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // New creates a GitHub AppsTransport. If quota is non-nil, response headers
 // are also tapped into the QuotaStore for capacity-aware routing decisions.
-func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
+func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient kms.KMS, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
 	// Wrap the base HTTP transport so every GitHub response's X-RateLimit-*
 	// headers populate the github_rate_limit_* metrics with the app_id and
 	// installation_id labels set on the request context by EnrichContext.
@@ -98,7 +97,7 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
 		}
 
-		signer, err := gcpkms.New(ctx, kmsClient, kmsKey)
+		signer, err := kmsClient.NewSigner()
 		if err != nil {
 			return nil, fmt.Errorf("error creating signer: %w", err)
 		}
