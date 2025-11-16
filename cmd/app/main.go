@@ -47,16 +47,16 @@ func main() {
 		defer metrics.SetupTracer(ctx)()
 	}
 
-	var client *kms.KeyManagementClient
+	var kmsClient kms.KMS
 
 	if baseCfg.KMSKey != "" {
-		client, err = kms.NewKeyManagementClient(ctx)
+		kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, baseCfg.KMSKey)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
+	atr, err := ghtransport.New(ctx, baseCfg, kmsClient)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}

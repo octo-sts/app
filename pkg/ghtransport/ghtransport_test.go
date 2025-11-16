@@ -9,19 +9,15 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"log"
-	"net"
 	"os"
 	"testing"
 
-	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/kms"
 	"github.com/stretchr/testify/assert"
-	"google.golang.org/api/option"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestGCPKMS(t *testing.T) {
@@ -34,13 +30,19 @@ func TestGCPKMS(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
 	testConfig := &envconfig.EnvConfig{
-		Port:    8080,
-		AppID:   123456,
-		KMSKey:  "test-kms-key",
-		Metrics: true,
+		Port:        8080,
+		AppID:       123456,
+		KMSKey:      "test-kms-key",
+		KMSProvider: "gcp",
+		Metrics:     true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	kms, err := kms.NewKMS(ctx, testConfig.KMSProvider, testConfig.KMSKey)
+	if err != nil {
+		t.Fatalf("Failed to create KMS: %s", err)
+	}
+
+	transport, err := New(ctx, testConfig, kms)
 
 	assert.NoError(t, err)
 
@@ -57,7 +59,7 @@ func TestCertEnvVar(t *testing.T) {
 		Metrics:                    true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	transport, err := New(ctx, testConfig, nil)
 
 	assert.NoError(t, err)
 
@@ -74,30 +76,11 @@ func TestCertFile(t *testing.T) {
 		Metrics:                  true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
+	transport, err := New(ctx, testConfig, nil)
 
 	assert.NoError(t, err)
 
 	assert.NotNil(t, transport)
-}
-
-func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {
-	l, err := net.Listen("tcp", "localhost:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	fakeServerAddr := l.Addr().String()
-
-	client, err := kms.NewKeyManagementClient(ctx,
-		option.WithEndpoint(fakeServerAddr),
-		option.WithoutAuthentication(),
-		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	return client
 }
 
 func createGCPKMSCredsFile(t *testing.T) string {
@@ -106,12 +89,18 @@ func createGCPKMSCredsFile(t *testing.T) string {
 		t.Fatalf("Failed to create temporary file: %s", err)
 	}
 
-	jsonStr := fmt.Sprintf(`{
-        "type": "service_account",
-        "private_key": "%s"
-    }`, generateTestCertificateString())
+	// Create proper JSON with escaped private key
+	creds := map[string]interface{}{
+		"type":        "service_account",
+		"private_key": generateTestCertificateString(),
+	}
 
-	if _, err := tmpFile.Write([]byte(jsonStr)); err != nil {
+	jsonBytes, err := json.Marshal(creds)
+	if err != nil {
+		t.Fatalf("Failed to marshal JSON: %s", err)
+	}
+
+	if _, err := tmpFile.Write(jsonBytes); err != nil {
 		t.Fatalf("Failed to write to temporary file: %s", err)
 	}
 	if err := tmpFile.Close(); err != nil {
