@@ -12,6 +12,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -337,6 +338,18 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	repo := cs.GetRepo().GetName()
 	sha := cs.GetCheckSuite().GetHeadSHA()
 	installationID := cs.GetInstallation().GetID()
+
+	// Check if the action is one that we care about. Notably we want to filter out completed
+	// actions so we don't trigger a re-check of something we just finished.
+	if !slices.Contains([]string{
+		// Check Suite actions that we care about.
+		"requested", "rerequested",
+		// Additional Check Run actions that we care about (since we also route CheckRun events to this handler).
+		"created", "requested_action",
+	}, cs.GetAction()) {
+		log.Infof("ignoring check suite action %s", cs.GetAction())
+		return nil, nil
+	}
 
 	// Skip if the organization is not in the list of organizations to validate.
 	if e.shouldSkipOrganization(owner) {
