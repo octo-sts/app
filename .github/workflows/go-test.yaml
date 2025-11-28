@@ -22,22 +22,28 @@ jobs:
       contents: read
 
     steps:
-    - name: Check out code onto GOPATH
-      uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
-      with:
-        persist-credentials: false
+      - name: Harden Runner
+        uses: step-security/harden-runner@95d9a5deda9de15063e7595e9719c11c38c90ae2 # v2.13.2
+        with:
+          egress-policy: audit
 
-    - name: Set up Go
-      uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
-      with:
-        go-version-file: './go.mod'
-        check-latest: true
+      - name: Check out code onto GOPATH
+        uses: actions/checkout@1af3b93b6815bc44a9784bd300feb67ff0d1eeb3 # v6.0.0
+        with:
+          persist-credentials: false
 
-    - name: build
-      run: |
-        go build -o octo-sts ./cmd/app
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: '${{ github.workspace }}/.go-version'
+          check-latest: true
+          cache: 'false'
 
-    - name: test
-      run: |
-        # Exclude running unit tests against third_party repos.
-        go test -v -race ./...
+      - name: build
+        run: |
+          go build -o octo-sts ./cmd/app
+
+      - name: test
+        run: |
+          # Exclude running unit tests against third_party repos.
+          go test -v -race ./...
