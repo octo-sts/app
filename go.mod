@@ -20,7 +20,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7
 	github.com/invopop/jsonschema v0.13.0
 	github.com/kelseyhightower/envconfig v1.4.0
-	golang.org/x/oauth2 v0.33.0
+	golang.org/x/oauth2 v0.34.0
 	google.golang.org/api v0.257.0
 	google.golang.org/grpc v1.77.0
 	k8s.io/apimachinery v0.34.2
