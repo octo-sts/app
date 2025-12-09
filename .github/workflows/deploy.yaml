@@ -24,51 +24,58 @@ jobs:
       id-token: write # federates with GCP
 
     steps:
-    - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      with:
-        persist-credentials: false
+      - name: Harden Runner
+        uses: step-security/harden-runner@df199fb7be9f65074067a9eb93f12bb4c5547cf2 # v2.13.3
+        with:
+          egress-policy: audit
 
-    - uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
-      with:
-        go-version-file: './go.mod'
-        check-latest: true
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+        with:
+          persist-credentials: false
 
-    - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-      id: auth
-      with:
-        token_format: 'access_token'
-        project_id: 'octo-sts'
-        workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-        service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+      - name: Set up Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version-file: '${{ github.workspace }}/.go-version'
+          check-latest: true
+          cache: 'false'
 
-    - uses: 'docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef' # v2
-      with:
-        username: 'oauth2accesstoken'
-        password: '${{ steps.auth.outputs.access_token }}'
-        registry: 'gcr.io'
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        id: auth
+        with:
+          token_format: 'access_token'
+          project_id: 'octo-sts'
+          workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
+          service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
 
-    # Attempt to deploy the terraform configuration
-    - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v2.0.0
-      with:
-        terraform_version: 1.9
+      - uses: 'docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef' # v2
+        with:
+          username: 'oauth2accesstoken'
+          password: '${{ steps.auth.outputs.access_token }}'
+          registry: 'gcr.io'
 
-    - working-directory: ./iac
-      run: |
-        terraform init
+      - uses: chainguard-dev/actions/setup-terraform@3e8a2a226fad9e1ecbf2d359b8a7697554a4ac6d # v1.5.10
+        with:
+          terraform-version-file: '${{ github.workspace }}/.terraform-version'
+          terraform-wrapper: false
 
-        terraform plan
+      - working-directory: ./iac
+        run: |
+          terraform init
 
-        terraform apply -auto-approve
+          terraform plan
 
-    - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
-      if: ${{ failure() }}
-      env:
-        SLACK_ICON: http://github.com/chainguard-dev.png?size=48
-        SLACK_USERNAME: guardian
-        SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-        SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
-        SLACK_COLOR: '#8E1600'
-        MSG_MINIMAL: 'true'
-        SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
-        SLACK_MESSAGE: |
-          For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          terraform apply -auto-approve
+
+      - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
+        if: ${{ failure() }}
+        env:
+          SLACK_ICON: http://github.com/chainguard-dev.png?size=48
+          SLACK_USERNAME: guardian
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+          SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
+          SLACK_COLOR: '#8E1600'
+          MSG_MINIMAL: 'true'
+          SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
+          SLACK_MESSAGE: |
+            For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

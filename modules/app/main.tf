@@ -60,7 +60,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "0.9.2"
+  version = "0.9.7"
 
   project_id = var.project_id
   region     = each.key
@@ -71,11 +71,11 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "0.9.2"
+  version = "0.9.7"
 
-  project_id    = var.project_id
-  name          = var.name
-  regions       = var.regions
+  project_id = var.project_id
+  name       = var.name
+  regions    = var.regions
 
   deletion_protection = var.deletion_protection
 

@@ -192,7 +192,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	token, err := atr.Token(ctx)
 	if err != nil {
 		var herr *ghinstallation.HTTPError
-		if errors.As(err, &herr) {
+		if errors.As(err, &herr) && herr.Response != nil {
 			// Github returns a 422 response when something is off, and the
 			// transport surfaces a not useful error message, but Github
 			// actually has a pretty reasonable error message in the response
@@ -202,7 +202,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 					clog.FromContext(ctx).Debugf("token exchange failure (StatusUnprocessableEntity): %s", body)
 					return nil, status.Error(codes.PermissionDenied, "token exchange failure (StatusUnprocessableEntity)")
 				}
-			} else {
+			} else if herr.Response.Body != nil {
 				body, err := httputil.DumpResponse(herr.Response, true)
 				if err == nil {
 					clog.FromContext(ctx).Warn("token exchange failure, redacting body in logs")
