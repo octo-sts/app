@@ -4,7 +4,7 @@ go 1.25
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.15
-	chainguard.dev/sdk v0.1.44
+	chainguard.dev/sdk v0.1.45
 	cloud.google.com/go/kms v1.23.2
 	cloud.google.com/go/secretmanager v1.16.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
