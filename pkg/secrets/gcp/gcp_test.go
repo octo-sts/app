@@ -31,7 +31,7 @@ func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
 	fakeServerAddr := l.Addr().String()
 	go func() {
 		if err := gsrv.Serve(l); err != nil {
-			panic(err)
+			t.Fatal(err)
 		}
 	}()
 	defer gsrv.Stop()
