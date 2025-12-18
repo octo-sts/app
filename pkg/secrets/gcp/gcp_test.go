@@ -81,6 +81,7 @@ func TestFailsToFetchSecretWithInvalidKeyID(t *testing.T) {
 
 // Implement interface methods for the fake server.
 type fakeSecretManager struct {
+  secretmanagerpb.UnimplementedSecretManagerServiceServer
 }
 
 func (f fakeSecretManager) ListSecrets(ctx context.Context, request *secretmanagerpb.ListSecretsRequest) (*secretmanagerpb.ListSecretsResponse, error) {
