@@ -1,6 +1,6 @@
 module github.com/octo-sts/app
 
-go 1.25
+go 1.25.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.15
@@ -23,7 +23,7 @@ require (
 	golang.org/x/oauth2 v0.34.0
 	google.golang.org/api v0.257.0
 	google.golang.org/grpc v1.77.0
-	k8s.io/apimachinery v0.34.3
+	k8s.io/apimachinery v0.35.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -52,7 +52,7 @@ require (
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/detectors/gcp v1.38.0 // indirect
-	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
