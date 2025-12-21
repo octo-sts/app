@@ -61,12 +61,7 @@ func TestGCP(t *testing.T) {
 		key:    "foo",
 	}
 
-	signer, err := provider.NewSigner()
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := signer.Sign(jwt.RegisteredClaims{
+	if _, err := provider.Sign(jwt.RegisteredClaims{
 		Subject: "foo",
 		Issuer:  "bar",
 	}); err != nil {
@@ -81,9 +76,4 @@ func TestNewProviderReturnsProvider(t *testing.T) {
 	}
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
-
-	signer, err := provider.NewSigner()
-	assert.NoError(t, err)
-	assert.NotNil(t, signer)
-	assert.Equal(t, provider, signer)
 }

@@ -17,11 +17,6 @@ func TestNewProviderReturnsProvider(t *testing.T) {
 	}
 	assert.NoError(t, err)
 	assert.NotNil(t, provider)
-
-	signer, err := provider.NewSigner()
-	assert.NoError(t, err)
-	assert.NotNil(t, signer)
-	assert.Equal(t, provider, signer)
 }
 
 func TestSigningMethodAWS_AlgIsRS256(t *testing.T) {

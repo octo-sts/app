@@ -61,10 +61,6 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 				}
 				assert.NoError(t, err)
 				assert.NotNil(t, kms)
-
-				signer, err := kms.NewSigner()
-				assert.NoError(t, err)
-				assert.NotNil(t, signer)
 			}
 		})
 	}
