@@ -17,22 +17,26 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
+func setupFakeSecretManagerClient(t *testing.T) *secretmanager.Client {
+	t.Helper()
 	ctx := context.Background()
 
 	// Set up the fake server.
 	impl := &fakeSecretManager{}
 	l, err := net.Listen("tcp", "localhost:0")
-	assert.NoError(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	gsrv := grpc.NewServer()
 	secretmanagerpb.RegisterSecretManagerServiceServer(gsrv, impl)
 	fakeServerAddr := l.Addr().String()
-	go func() {
-		if err := gsrv.Serve(l); err != nil {
-			t.Fatal(err)
-		}
-	}()
-	defer gsrv.Stop()
+
+	go gsrv.Serve(l) //nolint:errcheck
+
+	t.Cleanup(func() {
+		gsrv.Stop()
+	})
 
 	// Create a client.
 	client, err := secretmanager.NewClient(ctx,
@@ -40,7 +44,16 @@ func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
 		option.WithoutAuthentication(),
 		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
 	)
-	assert.NoError(t, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return client
+}
+
+func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
+	ctx := context.Background()
+	client := setupFakeSecretManagerClient(t)
 
 	data, err := GetSecret(ctx, client, "projects/foo/secrets/bar/versions/latest")
 	assert.NoError(t, err)
@@ -49,31 +62,9 @@ func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
 
 func TestFailsToFetchSecretWithInvalidKeyID(t *testing.T) {
 	ctx := context.Background()
+	client := setupFakeSecretManagerClient(t)
 
-	// Set up the fake server.
-	impl := &fakeSecretManager{}
-	l, err := net.Listen("tcp", "localhost:0")
-	assert.NoError(t, err)
-
-	gsrv := grpc.NewServer()
-	secretmanagerpb.RegisterSecretManagerServiceServer(gsrv, impl)
-	fakeServerAddr := l.Addr().String()
-	go func() {
-		if err := gsrv.Serve(l); err != nil {
-			panic(err)
-		}
-	}()
-	defer gsrv.Stop()
-
-	// Create a client.
-	client, err := secretmanager.NewClient(ctx,
-		option.WithEndpoint(fakeServerAddr),
-		option.WithoutAuthentication(),
-		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
-	)
-	assert.NoError(t, err)
-
-	_, err = GetSecret(ctx, client, "invalid-key-id")
+	_, err := GetSecret(ctx, client, "invalid-key-id")
 	assert.Error(t, err)
 }
 
