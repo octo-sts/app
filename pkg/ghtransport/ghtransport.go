@@ -35,12 +35,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient kms.KMS) (*ghi
 			return nil, fmt.Errorf("failed to process env var: %q", env.KMSKey)
 		}
 
-		signer, err := kmsClient.NewSigner()
-		if err != nil {
-			return nil, fmt.Errorf("error creating signer: %w", err)
-		}
-
-		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
+		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(kmsClient))
 		if err != nil {
 			return nil, err
 		}

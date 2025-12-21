@@ -11,7 +11,6 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -61,11 +60,6 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 		client: client,
 		key:    kmsKey,
 	}, nil
-}
-
-// NewSigner returns a new signer for the provider.
-func (p *Provider) NewSigner() (ghinstallation.Signer, error) {
-	return p, nil
 }
 
 func (p *Provider) Sign(claims jwt.Claims) (string, error) {

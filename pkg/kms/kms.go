@@ -19,7 +19,7 @@ const (
 )
 
 type KMS interface {
-	NewSigner() (ghinstallation.Signer, error)
+	ghinstallation.Signer
 }
 
 func NewKMS(ctx context.Context, provider, kmsKey string) (KMS, error) {
