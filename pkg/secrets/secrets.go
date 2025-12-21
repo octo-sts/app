@@ -15,7 +15,7 @@ import (
 )
 
 type SecretProvider interface {
-	GetSecret(keyID string) ([]byte, error)
+	GetSecret(ctx context.Context, keyID string) ([]byte, error)
 }
 
 const (
@@ -24,18 +24,17 @@ const (
 )
 
 type secretProvider struct {
-	ctx              context.Context
 	provider         string
 	gcpSecretManager *gcpSM.Client
 	awsSecretManager *awsSM.Client
 }
 
-func (s *secretProvider) GetSecret(keyID string) ([]byte, error) {
+func (s *secretProvider) GetSecret(ctx context.Context, keyID string) ([]byte, error) {
 	switch s.provider {
 	case AWS:
-		return aws.GetSecret(s.ctx, s.awsSecretManager, keyID)
+		return aws.GetSecret(ctx, s.awsSecretManager, keyID)
 	case GCP:
-		return gcp.GetSecret(s.ctx, s.gcpSecretManager, keyID)
+		return gcp.GetSecret(ctx, s.gcpSecretManager, keyID)
 	default:
 		return nil, errors.New("unsupported secret provider")
 	}
@@ -43,7 +42,6 @@ func (s *secretProvider) GetSecret(keyID string) ([]byte, error) {
 
 func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, error) {
 	sp := &secretProvider{
-		ctx:      ctx,
 		provider: provider,
 	}
 
