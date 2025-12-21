@@ -9,14 +9,12 @@ import (
 	"net"
 	"testing"
 
-	"cloud.google.com/go/iam/apiv1/iampb"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/types/known/emptypb"
 )
 
 func TestReturnsSecretDataWithValidKeyID(t *testing.T) {
@@ -79,44 +77,14 @@ func TestFailsToFetchSecretWithInvalidKeyID(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// Implement interface methods for the fake server.
+// fakeSecretManager implements the SecretManagerServiceServer interface.
+// By embedding UnimplementedSecretManagerServiceServer, we only need to
+// implement the methods we actually use in tests.
 type fakeSecretManager struct {
-  secretmanagerpb.UnimplementedSecretManagerServiceServer
+	secretmanagerpb.UnimplementedSecretManagerServiceServer
 }
 
-func (f fakeSecretManager) ListSecrets(ctx context.Context, request *secretmanagerpb.ListSecretsRequest) (*secretmanagerpb.ListSecretsResponse, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) CreateSecret(ctx context.Context, request *secretmanagerpb.CreateSecretRequest) (*secretmanagerpb.Secret, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) AddSecretVersion(ctx context.Context, request *secretmanagerpb.AddSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) GetSecret(ctx context.Context, request *secretmanagerpb.GetSecretRequest) (*secretmanagerpb.Secret, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) UpdateSecret(ctx context.Context, request *secretmanagerpb.UpdateSecretRequest) (*secretmanagerpb.Secret, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) DeleteSecret(ctx context.Context, request *secretmanagerpb.DeleteSecretRequest) (*emptypb.Empty, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) ListSecretVersions(ctx context.Context, request *secretmanagerpb.ListSecretVersionsRequest) (*secretmanagerpb.ListSecretVersionsResponse, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) GetSecretVersion(ctx context.Context, request *secretmanagerpb.GetSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) AccessSecretVersion(ctx context.Context, request *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
+func (f fakeSecretManager) AccessSecretVersion(_ context.Context, request *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
 	if request.Name == "projects/foo/secrets/bar/versions/latest" {
 		return &secretmanagerpb.AccessSecretVersionResponse{
 			Payload: &secretmanagerpb.SecretPayload{
@@ -125,28 +93,4 @@ func (f fakeSecretManager) AccessSecretVersion(ctx context.Context, request *sec
 		}, nil
 	}
 	return nil, errors.New("not found")
-}
-
-func (f fakeSecretManager) DisableSecretVersion(ctx context.Context, request *secretmanagerpb.DisableSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) EnableSecretVersion(ctx context.Context, request *secretmanagerpb.EnableSecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) DestroySecretVersion(ctx context.Context, request *secretmanagerpb.DestroySecretVersionRequest) (*secretmanagerpb.SecretVersion, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) SetIamPolicy(ctx context.Context, request *iampb.SetIamPolicyRequest) (*iampb.Policy, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) GetIamPolicy(ctx context.Context, request *iampb.GetIamPolicyRequest) (*iampb.Policy, error) {
-	panic("implement me")
-}
-
-func (f fakeSecretManager) TestIamPermissions(ctx context.Context, request *iampb.TestIamPermissionsRequest) (*iampb.TestIamPermissionsResponse, error) {
-	panic("implement me")
 }
