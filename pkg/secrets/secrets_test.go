@@ -17,11 +17,12 @@ func TestNewSecretProviderReturnsErrOnFakeProvider(t *testing.T) {
 }
 
 func TestSecretProvider_GetSecretReturnsErrOnFakeProvider(t *testing.T) {
+	ctx := context.Background()
 	sp := &secretProvider{
 		provider: "fake",
 	}
 
-	val, err := sp.GetSecret("fake-key-id")
+	val, err := sp.GetSecret(ctx, "fake-key-id")
 	assert.Nil(t, val)
 	assert.Error(t, err)
 }
