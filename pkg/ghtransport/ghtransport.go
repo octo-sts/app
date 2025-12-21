@@ -97,12 +97,7 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
 		}
 
-		signer, err := kmsClient.NewSigner()
-		if err != nil {
-			return nil, fmt.Errorf("error creating signer: %w", err)
-		}
-
-		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(signer))
+		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(kmsClient))
 		if err != nil {
 			return nil, err
 		}
