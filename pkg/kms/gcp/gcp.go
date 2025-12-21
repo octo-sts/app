@@ -11,6 +11,7 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -55,11 +56,23 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 		return nil, err
 	}
 
+	return NewProviderWithClient(ctx, client, kmsKey)
+}
+
+// NewProviderWithClient creates a new Provider with an existing KMS client.
+func NewProviderWithClient(ctx context.Context, client *kms.KeyManagementClient, kmsKey string) (*Provider, error) {
 	return &Provider{
 		ctx:    ctx,
 		client: client,
 		key:    kmsKey,
 	}, nil
+}
+
+// New creates a new GCP KMS signer.
+//
+// Deprecated: Use NewProvider or NewProviderWithClient instead.
+func New(ctx context.Context, client *kms.KeyManagementClient, key string) (ghinstallation.Signer, error) {
+	return NewProviderWithClient(ctx, client, key)
 }
 
 func (p *Provider) Sign(claims jwt.Claims) (string, error) {
