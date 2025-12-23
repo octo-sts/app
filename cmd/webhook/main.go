@@ -94,6 +94,9 @@ func main() {
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 	})
+	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", baseCfg.Port),
 		ReadHeaderTimeout: 10 * time.Second,
