@@ -239,20 +239,17 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		}
 	}
 
-	// Check diff
-	// TODO: Pagination?
-	resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
 	var files []string
-	for _, file := range resp.Files {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			if file.GetStatus() != "removed" {
-				files = append(files, file.GetFilename())
-			}
-		}
+
+	for _, commit := range event.GetCommits() {
+		files = append(files, e.filterFiles(commit.Added)...)
+		files = append(files, e.filterFiles(commit.Modified)...)
+
+		// XXX: Seems like removed files should also be included to at least make sure that adding a
+		// failing policy and then removing the failing policy results in a good check.
+		// Same for handlePullRequest
 	}
+
 	if len(files) == 0 {
 		return nil, nil
 	}
@@ -418,4 +415,16 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 		}
 	}
 	return true
+}
+
+// Takes a list of files and returns a list of files that look like trust policies
+func (e *Validator) filterFiles(files []string) []string {
+	filtered := make([]string, 0, len(files))
+	for _, file := range files {
+		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file); err == nil && ok {
+			filtered = append(filtered, file)
+		}
+	}
+
+	return filtered
 }
