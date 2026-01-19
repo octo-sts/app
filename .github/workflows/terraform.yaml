@@ -36,7 +36,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: chainguard-dev/actions/setup-terraform@7d647f470c4d3692286221bd17ca78206976a61c # v1.5.11
+      - uses: chainguard-dev/actions/setup-terraform@f77a7c3431f961556be5a41e2602c450a590f3e5 # v1.5.12
         with:
           terraform-version-file: '${{ github.workspace }}/.terraform-version'
           terraform-wrapper: false
