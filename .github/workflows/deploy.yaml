@@ -48,7 +48,7 @@ jobs:
           workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
           service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
 
-      - uses: 'docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef' # v2
+      - uses: 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9' # v2
         with:
           username: 'oauth2accesstoken'
           password: '${{ steps.auth.outputs.access_token }}'
