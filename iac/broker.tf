@@ -27,7 +27,7 @@ module "cloudevent-recorder" {
 
   // Clients can specify fields that are not in the schema, and when they do
   // we shouldn't fail to ingest the event, but instead just ignore those fields.
-  allow_unknown_values = true
+  ignore_unknown_values = true
 
   retention-period = 90
 
