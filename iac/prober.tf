@@ -5,7 +5,7 @@ resource "google_service_account" "prober" {
 
 module "prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.10.0"
+  version = "0.10.1"
 
   team = "sre"
 
@@ -34,7 +34,7 @@ resource "google_service_account" "negative_prober" {
 
 module "negative_prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.10.0"
+  version = "0.10.1"
 
   team = "sre"
 
@@ -58,7 +58,7 @@ module "negative_prober" {
 
 module "dashboard" {
   source  = "chainguard-dev/common/infra//modules/dashboard/service"
-  version = "0.10.0"
+  version = "0.10.1"
 
   service_name = var.name
   project_id   = var.project_id
