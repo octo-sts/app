@@ -22,7 +22,7 @@ data "google_monitoring_notification_channel" "octo-sts-slack" {
 }
 
 resource "ko_build" "this" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/app"
 }
 
@@ -32,7 +32,7 @@ resource "cosign_sign" "this" {
 }
 
 resource "ko_build" "webhook" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/webhook"
 }
 
@@ -48,7 +48,7 @@ locals {
 }
 
 module "app" {
-  source = "../modules/app"
+  source = "../../modules/app"
 
   project_id = var.project_id
   name       = var.name

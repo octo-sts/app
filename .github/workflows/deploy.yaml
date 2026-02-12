@@ -4,10 +4,16 @@
 name: Deploy to Cloud Run
 
 on:
-  push:
-    branches:
-      - "main"
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment to deploy to"
+        required: true
+        default: "octo-sts-staging"
+        type: choice
+        options:
+          - octo-sts-staging
+          - octo-sts
 
 concurrency: deploy
 
@@ -20,7 +26,7 @@ jobs:
     if: github.repository == 'octo-sts/app'
 
     permissions:
-      contents: read  # clone the repository contents
+      contents: read # clone the repository contents
       id-token: write # federates with GCP
 
     steps:
@@ -36,30 +42,44 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
         with:
-          go-version-file: '${{ github.workspace }}/.go-version'
+          go-version-file: "${{ github.workspace }}/.go-version"
           check-latest: true
-          cache: 'false'
+          cache: "false"
+
+      - name: Resolve auth config
+        id: auth-config
+        run: |
+          if [[ "${{ inputs.environment }}" == "octo-sts" ]]; then
+            echo "workload_identity_provider=projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider" >> "$GITHUB_OUTPUT"
+            echo "service_account=github-identity@octo-sts.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ inputs.environment }}" == "octo-sts-staging" ]]; then
+            echo "workload_identity_provider=projects/578801560891/locations/global/workloadIdentityPools/octo-sts-staging/providers/github-provider" >> "$GITHUB_OUTPUT"
+            echo "service_account=octo-sts-staging-ci@octo-sts-staging.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown environment: ${{ inputs.environment }}" >&2
+            exit 1
+          fi
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         id: auth
         with:
-          token_format: 'access_token'
-          project_id: 'octo-sts'
-          workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+          token_format: "access_token"
+          project_id: "${{ inputs.environment }}"
+          workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
+          service_account: "${{ steps.auth-config.outputs.service_account }}"
 
-      - uses: 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9' # v2
+      - uses: "docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9" # v2
         with:
-          username: 'oauth2accesstoken'
-          password: '${{ steps.auth.outputs.access_token }}'
-          registry: 'gcr.io'
+          username: "oauth2accesstoken"
+          password: "${{ steps.auth.outputs.access_token }}"
+          registry: "gcr.io"
 
       - uses: chainguard-dev/actions/setup-terraform@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
         with:
-          terraform-version-file: '${{ github.workspace }}/.terraform-version'
+          terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
-      - working-directory: ./iac
+      - working-directory: "./env/${{ inputs.environment }}"
         run: |
           terraform init
 
@@ -73,9 +93,9 @@ jobs:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
           SLACK_USERNAME: guardian
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
-          SLACK_COLOR: '#8E1600'
-          MSG_MINIMAL: 'true'
+          SLACK_CHANNEL: "octo-sts-alerts" # Use a channel
+          SLACK_COLOR: "#8E1600"
+          MSG_MINIMAL: "true"
           SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
           SLACK_MESSAGE: |
             For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

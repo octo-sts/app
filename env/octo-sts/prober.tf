@@ -17,7 +17,7 @@ module "prober" {
   service_account = google_service_account.prober.email
 
   importpath  = "./cmd/prober"
-  working_dir = "${path.module}/../"
+  working_dir = "${path.module}/../../"
 
   env = {
     STS_DOMAIN = "octo-sts.dev"
@@ -46,7 +46,7 @@ module "negative_prober" {
   service_account = google_service_account.negative_prober.email
 
   importpath  = "./cmd/negative-prober"
-  working_dir = "${path.module}/../"
+  working_dir = "${path.module}/../../"
 
   env = {
     STS_DOMAIN = "octo-sts.dev"
