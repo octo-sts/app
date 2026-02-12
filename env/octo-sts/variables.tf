@@ -1,0 +1,16 @@
+variable "project_id" {
+  description = "The project ID where all resources created will reside."
+}
+
+variable "name" {
+  description = "Name indicator, prefixed to resources created."
+}
+
+variable "regions" {
+  description = "Regions where this environment's services should live."
+  type        = list(string)
+}
+
+variable "github_app_id" {
+  description = "The Github App ID for the Octo STS service."
+}
