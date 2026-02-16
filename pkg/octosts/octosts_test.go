@@ -263,6 +263,115 @@ func TestExchangeValidation(t *testing.T) {
 	}
 }
 
+func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID: github.Ptr(int64(1234)),
+			Account: &github.User{
+				Login: github.Ptr("org"),
+			},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(github.ErrorResponse{
+			Response: &http.Response{StatusCode: statusCode},
+			Message:  "API rate limit exceeded",
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+
+	return &fakeGitHub{
+		mux: mux,
+	}
+}
+
+func TestExchangeRateLimit(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statusCode int
+		identity   string
+	}{
+		{
+			name:       "403 Forbidden",
+			statusCode: http.StatusForbidden,
+			identity:   "ratelimited403",
+		},
+		{
+			name:       "429 Too Many Requests",
+			statusCode: http.StatusTooManyRequests,
+			identity:   "ratelimited429",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			atr := newGitHubClient(t, newFakeGitHubRateLimit(tc.statusCode))
+
+			pk, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatalf("cannot generate RSA key %v", err)
+			}
+			signer, err := jose.NewSigner(jose.SigningKey{
+				Algorithm: jose.RS256,
+				Key:       pk,
+			}, nil)
+			if err != nil {
+				t.Fatalf("jose.NewSigner() = %v", err)
+			}
+
+			iss := "https://token.actions.githubusercontent.com"
+			token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+				Subject:  "foo",
+				Issuer:   iss,
+				Audience: josejwt.Audience{"octosts"},
+				Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+			}).Serialize()
+			if err != nil {
+				t.Fatalf("CompactSerialize failed: %v", err)
+			}
+			provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+				PublicKeys: []crypto.PublicKey{pk.Public()},
+			})
+			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+			s := &sts{
+				atr: atr,
+			}
+			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+				Identity: tc.identity,
+				Scope:    "org/repo",
+			})
+			if err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			st, ok := status.FromError(err)
+			if !ok {
+				t.Fatalf("expected gRPC status error, got %T", err)
+			}
+			if st.Code() != codes.ResourceExhausted {
+				t.Errorf("expected code ResourceExhausted, got %v", st.Code())
+			}
+		})
+	}
+}
+
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 

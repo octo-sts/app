@@ -346,6 +346,15 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 		if err != nil {
 			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 			// Don't leak the error to the client.
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil {
+				switch ghErr.Response.StatusCode {
+				case http.StatusForbidden:
+					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity)
+				case http.StatusTooManyRequests:
+					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity)
+				}
+			}
 			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
 		}
 
