@@ -40,7 +40,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/gofmt@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
+      - uses: chainguard-dev/actions/gofmt@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
         with:
           args: -s
 
@@ -69,7 +69,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/goimports@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
+      - uses: chainguard-dev/actions/goimports@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
 
   golangci-lint:
     name: golangci-lint
@@ -125,10 +125,10 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/trailing-space@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
+      - uses: chainguard-dev/actions/trailing-space@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
         if: ${{ always() }}
 
-      - uses: chainguard-dev/actions/eof-newline@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
+      - uses: chainguard-dev/actions/eof-newline@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
         if: ${{ always() }}
 
       - uses: reviewdog/action-tflint@54a5e5aed57dcfbb4662ec548de876df33d6288d # v1.25.0s
