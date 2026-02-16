@@ -17,11 +17,12 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v75/github"
 	"github.com/hashicorp/go-multierror"
-	"github.com/octo-sts/app/pkg/octosts"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
+
+	"github.com/octo-sts/app/pkg/octosts"
 )
 
 const (
@@ -88,7 +89,7 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		log.Errorf("error handling event %T: %v", event, err)
+		log.Errorf("error handling event: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -149,14 +150,14 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	opts := github.CreateCheckRunOptions{
 		Name:        "Trust Policy Validation",
 		HeadSHA:     sha,
-		ExternalID:  github.String(sha),
-		Status:      github.String("completed"),
-		Conclusion:  github.String(conclusion),
+		ExternalID:  github.Ptr(sha),
+		Status:      github.Ptr("completed"),
+		Conclusion:  github.Ptr(conclusion),
 		StartedAt:   &github.Timestamp{Time: time.Now()},
 		CompletedAt: &github.Timestamp{Time: time.Now()},
 		Output: &github.CheckRunOutput{
-			Title:   github.String(title),
-			Summary: github.String(summary),
+			Title:   github.Ptr(title),
+			Summary: github.Ptr(summary),
 		},
 	}
 
@@ -244,11 +245,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	if err != nil {
 		return nil, err
 	}
-	log.Infof("%+v\n%+v", resp, resp.Files)
 	var files []string
 	for _, file := range resp.Files {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			files = append(files, file.GetFilename())
+			if file.GetStatus() != "removed" {
+				files = append(files, file.GetFilename())
+			}
 		}
 	}
 	if len(files) == 0 {
@@ -299,7 +301,9 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	}
 	for _, file := range resp {
 		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			files = append(files, file.GetFilename())
+			if file.GetStatus() != "removed" {
+				files = append(files, file.GetFilename())
+			}
 		}
 	}
 	if len(files) == 0 {
@@ -367,7 +371,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		for _, file := range resp.Files {
 			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-				files = append(files, file.GetFilename())
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}
@@ -379,7 +385,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		for _, file := range resp {
 			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-				files = append(files, file.GetFilename())
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}

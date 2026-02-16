@@ -1,0 +1,5 @@
+{
+    "yaml.schemas": {
+        "./pkg/octosts/octosts.TrustPolicy.json": "/.github/chainguard/*"
+    }
+}

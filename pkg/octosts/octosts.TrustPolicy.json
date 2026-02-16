@@ -1,0 +1,276 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/octo-sts/app/pkg/octosts/trust-policy",
+  "$ref": "#/$defs/TrustPolicy",
+  "$defs": {
+    "InstallationPermissions": {
+      "properties": {
+        "actions": {
+          "type": "string"
+        },
+        "actions_variables": {
+          "type": "string"
+        },
+        "administration": {
+          "type": "string"
+        },
+        "attestations": {
+          "type": "string"
+        },
+        "blocking": {
+          "type": "string"
+        },
+        "checks": {
+          "type": "string"
+        },
+        "codespaces": {
+          "type": "string"
+        },
+        "codespaces_lifecycle_admin": {
+          "type": "string"
+        },
+        "codespaces_metadata": {
+          "type": "string"
+        },
+        "codespaces_secrets": {
+          "type": "string"
+        },
+        "codespaces_user_secrets": {
+          "type": "string"
+        },
+        "contents": {
+          "type": "string"
+        },
+        "content_references": {
+          "type": "string"
+        },
+        "copilot_messages": {
+          "type": "string"
+        },
+        "dependabot_secrets": {
+          "type": "string"
+        },
+        "deployments": {
+          "type": "string"
+        },
+        "discussions": {
+          "type": "string"
+        },
+        "emails": {
+          "type": "string"
+        },
+        "environments": {
+          "type": "string"
+        },
+        "followers": {
+          "type": "string"
+        },
+        "gists": {
+          "type": "string"
+        },
+        "git_signing_ssh_public_keys": {
+          "type": "string"
+        },
+        "gpg_keys": {
+          "type": "string"
+        },
+        "interaction_limits": {
+          "type": "string"
+        },
+        "issues": {
+          "type": "string"
+        },
+        "keys": {
+          "type": "string"
+        },
+        "metadata": {
+          "type": "string"
+        },
+        "members": {
+          "type": "string"
+        },
+        "merge_queues": {
+          "type": "string"
+        },
+        "organization_actions_variables": {
+          "type": "string"
+        },
+        "organization_administration": {
+          "type": "string"
+        },
+        "organization_announcement_banners": {
+          "type": "string"
+        },
+        "organization_api_insights": {
+          "type": "string"
+        },
+        "organization_codespaces": {
+          "type": "string"
+        },
+        "organization_codespaces_secrets": {
+          "type": "string"
+        },
+        "organization_codespaces_settings": {
+          "type": "string"
+        },
+        "organization_copilot_seat_management": {
+          "type": "string"
+        },
+        "organization_custom_properties": {
+          "type": "string"
+        },
+        "organization_custom_roles": {
+          "type": "string"
+        },
+        "organization_custom_org_roles": {
+          "type": "string"
+        },
+        "organization_dependabot_secrets": {
+          "type": "string"
+        },
+        "organization_events": {
+          "type": "string"
+        },
+        "organization_hooks": {
+          "type": "string"
+        },
+        "organization_knowledge_bases": {
+          "type": "string"
+        },
+        "organization_packages": {
+          "type": "string"
+        },
+        "organization_personal_access_tokens": {
+          "type": "string"
+        },
+        "organization_personal_access_token_requests": {
+          "type": "string"
+        },
+        "organization_plan": {
+          "type": "string"
+        },
+        "organization_pre_receive_hooks": {
+          "type": "string"
+        },
+        "organization_projects": {
+          "type": "string"
+        },
+        "organization_secrets": {
+          "type": "string"
+        },
+        "organization_self_hosted_runners": {
+          "type": "string"
+        },
+        "organization_user_blocking": {
+          "type": "string"
+        },
+        "packages": {
+          "type": "string"
+        },
+        "pages": {
+          "type": "string"
+        },
+        "plan": {
+          "type": "string"
+        },
+        "profile": {
+          "type": "string"
+        },
+        "pull_requests": {
+          "type": "string"
+        },
+        "repository_advisories": {
+          "type": "string"
+        },
+        "repository_custom_properties": {
+          "type": "string"
+        },
+        "repository_hooks": {
+          "type": "string"
+        },
+        "repository_projects": {
+          "type": "string"
+        },
+        "repository_pre_receive_hooks": {
+          "type": "string"
+        },
+        "secrets": {
+          "type": "string"
+        },
+        "secret_scanning_alerts": {
+          "type": "string"
+        },
+        "security_events": {
+          "type": "string"
+        },
+        "single_file": {
+          "type": "string"
+        },
+        "starring": {
+          "type": "string"
+        },
+        "statuses": {
+          "type": "string"
+        },
+        "team_discussions": {
+          "type": "string"
+        },
+        "user_events": {
+          "type": "string"
+        },
+        "vulnerability_alerts": {
+          "type": "string"
+        },
+        "watching": {
+          "type": "string"
+        },
+        "workflows": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "TrustPolicy": {
+      "properties": {
+        "issuer": {
+          "type": "string",
+          "description": "Issuer to match against (exact match)."
+        },
+        "issuer_pattern": {
+          "type": "string",
+          "description": "Issuer regex pattern to match against."
+        },
+        "subject": {
+          "type": "string",
+          "description": "Subject to match against (exact match)."
+        },
+        "subject_pattern": {
+          "type": "string",
+          "description": "Subject regex pattern to match against."
+        },
+        "audience": {
+          "type": "string",
+          "description": "Audience to match against (exact match)."
+        },
+        "audience_pattern": {
+          "type": "string",
+          "description": "Audience regex pattern to match against."
+        },
+        "claim_pattern": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object",
+          "description": "ClaimPattern is a map of claim names to regex patterns to match against."
+        },
+        "permissions": {
+          "$ref": "#/$defs/InstallationPermissions",
+          "description": "GitHub App installation permissions to request tokens with.\nSee https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    }
+  }
+}

@@ -74,7 +74,17 @@
           "mode": "NULLABLE",
           "fields": [
             {
+                "name": "event_name",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
                 "name": "job_workflow_ref",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "repository",
                 "type": "STRING",
                 "mode": "NULLABLE"
             },
@@ -102,6 +112,11 @@
                 "name": "base_ref",
                 "type": "STRING",
                 "mode": "NULLABLE"
+            },
+            {
+                "name": "aud",
+                "type": "STRING",
+                "mode": "NULLABLE"
             }
           ]
         },
@@ -122,6 +137,11 @@
             },
             {
                 "name": "administration",
+                "type": "STRING",
+                "mode": "NULLABLE"
+            },
+            {
+                "name": "attestations",
                 "type": "STRING",
                 "mode": "NULLABLE"
             },
@@ -327,6 +347,11 @@
     {
         "name": "error",
         "type": "STRING",
+        "mode": "NULLABLE"
+    },
+    {
+        "name": "time",
+        "type": "TIMESTAMP",
         "mode": "NULLABLE"
     }
 ]

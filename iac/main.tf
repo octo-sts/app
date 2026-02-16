@@ -5,12 +5,15 @@ provider "ko" { repo = "gcr.io/${var.project_id}" }
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "0.6.92"
+  version = "0.10.1"
 
-  name          = var.name
-  project_id    = var.project_id
-  regions       = var.regions
-  netnum_offset = 1
+  team = "sre"
+
+  name                        = var.name
+  project_id                  = var.project_id
+  regions                     = var.regions
+  netnum_offset               = 1
+  hosted_zone_logging_enabled = false
 }
 
 # For slack need to create the notification manually - https://github.com/hashicorp/terraform-provider-google/issues/11346

@@ -19,7 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v75/github"
 	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
@@ -31,6 +31,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
 )
 
@@ -71,16 +72,34 @@ type cacheTrustPolicyKey struct {
 
 // Exchange implements pboidc.SecurityTokenServiceServer
 func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ *pboidc.RawToken, err error) {
-	clog.FromContext(ctx).Infof("exchange request: %#v", request)
-	e := Event{
-		Scope:    request.Scope,
-		Identity: request.Identity,
+	clog.FromContext(ctx).Infof("exchange request: %#v", request.GetIdentity())
+
+	scopes := request.GetScopes()
+	var requestScope string
+	switch len(scopes) {
+	case 0:
+		// TODO: remove this once we upgrade the action and we can make sure we are in sync with the new way
+		clog.FromContext(ctx).Info("scopes not provided, fallback to scope")
+		requestScope = request.GetScope() //nolint: staticcheck
+	case 1:
+		clog.FromContext(ctx).Infof("got scopes: %v", scopes)
+		requestScope = scopes[0]
+	default:
+		clog.FromContext(ctx).Infof("got more than one scope: %v", scopes)
+		return nil, status.Error(codes.InvalidArgument, "multiple scopes not supported")
 	}
+
+	e := Event{
+		Scope:    requestScope,
+		Identity: request.GetIdentity(),
+		Time:     time.Now(),
+	}
+
 	if s.metrics {
 		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
-			event.SetSubject(fmt.Sprintf("%s/%s", request.Scope, request.Identity))
+			event.SetSubject(fmt.Sprintf("%s/%s", requestScope, request.GetIdentity()))
 			event.SetSource(fmt.Sprintf("https://%s", s.domain))
 			if err != nil {
 				e.Error = err.Error()
@@ -110,13 +129,20 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Validate the Bearer token.
 	issuer, err := apiauth.ExtractIssuer(bearer)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "invalid bearer token: %v", err)
+		clog.FromContext(ctx).Debugf("invalid bearer token: %v", err)
+		return nil, status.Error(codes.InvalidArgument, "invalid bearer token")
+	}
+
+	// Validate issuer format
+	if !oidcvalidate.IsValidIssuer(issuer) {
+		return nil, status.Error(codes.InvalidArgument, "invalid issuer format")
 	}
 
 	// Fetch the provider from the cache or create a new one and add to the cache
 	p, err := provider.Get(ctx, issuer)
 	if err != nil {
-		return nil, status.Errorf(codes.InvalidArgument, "unable to fetch or create the provider: %v", err)
+		clog.FromContext(ctx).Debugf("unable to fetch or create the provider: %v", err)
+		return nil, status.Error(codes.InvalidArgument, "unable to fetch or create the provider")
 	}
 
 	verifier := p.Verifier(&oidc.Config{
@@ -125,7 +151,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	})
 	tok, err := verifier.Verify(ctx, bearer)
 	if err != nil {
-		return nil, status.Errorf(codes.Unauthenticated, "unable to validate token: %v", err)
+		clog.FromContext(ctx).Debugf("unable to validate token: %v", err)
+		return nil, status.Error(codes.Unauthenticated, "unable to verify bearer token")
 	}
 	// This is typically overwritten below, but we populate this here to enrich
 	// certain error paths with the issuer and subject.
@@ -134,7 +161,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Subject: tok.Subject,
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, request.Scope, request.Identity)
+	// Request validation.
+	if requestScope == "" {
+		return nil, status.Error(codes.InvalidArgument, "scope must be provided")
+	}
+	if request.GetIdentity() == "" {
+		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
+	}
+
+	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -157,25 +192,30 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	token, err := atr.Token(ctx)
 	if err != nil {
 		var herr *ghinstallation.HTTPError
-		if errors.As(err, &herr) {
+		if errors.As(err, &herr) && herr.Response != nil {
 			// Github returns a 422 response when something is off, and the
 			// transport surfaces a not useful error message, but Github
 			// actually has a pretty reasonable error message in the response
 			// body typically, so extract that.
 			if herr.Response.StatusCode == http.StatusUnprocessableEntity {
 				if body, err := io.ReadAll(herr.Response.Body); err == nil {
-					return nil, status.Errorf(codes.PermissionDenied, "token exchange failure: %s", body)
+					clog.FromContext(ctx).Debugf("token exchange failure (StatusUnprocessableEntity): %s", body)
+					return nil, status.Error(codes.PermissionDenied, "token exchange failure (StatusUnprocessableEntity)")
 				}
-			} else {
+			} else if herr.Response.Body != nil {
 				body, err := httputil.DumpResponse(herr.Response, true)
 				if err == nil {
-					clog.FromContext(ctx).Warnf("token exchange failure: %s", body)
+					clog.FromContext(ctx).Warn("token exchange failure, redacting body in logs")
+					// Log the response body in debug mode only, as it may contain sensitive information.
+					clog.FromContext(ctx).Debugf("token exchange failure: %s", body)
 				}
 			}
 		} else {
-			clog.FromContext(ctx).Warnf("token exchange failure: %v", err)
+			clog.FromContext(ctx).Debugf("token exchange failure: %v", err)
+			clog.FromContext(ctx).Warn("token exchange failure, redacting error in logs")
 		}
-		return nil, status.Errorf(codes.Internal, "failed to get token: %v", err)
+		clog.FromContext(ctx).Debugf("failed to get token: %v", err)
+		return nil, status.Error(codes.Internal, "failed to get token")
 	}
 
 	// Compute the SHA256 hash of the token and store the hex-encoded value into e.TokenSHA256
@@ -194,9 +234,15 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 	owner, repo := path.Dir(scope), path.Base(scope)
 	if owner == "." {
 		owner, repo = repo, ".github"
-		tp = otp
 	} else {
 		otp.Repositories = []string{repo}
+	}
+
+	// If the repo is .github, then parse with an org policy even if the repo
+	// was specified as .github because we will reject the repositories field
+	// in policies otherwise.
+	if repo == ".github" {
+		tp = otp
 	}
 
 	id, err := s.lookupInstall(ctx, owner)
@@ -300,7 +346,16 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 		if err != nil {
 			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 			// Don't leak the error to the client.
-			return status.Errorf(codes.NotFound, "unable to find trust policy found for %q", trustPolicyKey.identity)
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil {
+				switch ghErr.Response.StatusCode {
+				case http.StatusForbidden:
+					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity)
+				case http.StatusTooManyRequests:
+					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity)
+				}
+			}
+			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
 		}
 
 		raw, err = file.GetContent()
