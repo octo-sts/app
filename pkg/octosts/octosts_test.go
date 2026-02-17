@@ -39,8 +39,19 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
 )
+
+type fakeInstallMgr struct {
+	atr *ghinstallation.AppsTransport
+}
+
+func (f *fakeInstallMgr) Get(_ context.Context, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	return f.atr, 1234, nil
+}
+
+var _ ghinstall.Manager = (*fakeInstallMgr)(nil)
 
 type fakeGitHub struct {
 	mux *http.ServeMux
@@ -126,7 +137,7 @@ func TestExchange(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		atr: atr,
+		im: &fakeInstallMgr{atr: atr},
 	}
 	for _, tc := range []struct {
 		name string
@@ -212,7 +223,7 @@ func TestExchangeValidation(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		atr: atr,
+		im: &fakeInstallMgr{atr: atr},
 	}
 
 	tests := []struct {
@@ -352,7 +363,7 @@ func TestExchangeRateLimit(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 			s := &sts{
-				atr: atr,
+				im: &fakeInstallMgr{atr: atr},
 			}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,

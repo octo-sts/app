@@ -20,7 +20,6 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v75/github"
-	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
@@ -31,6 +30,7 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -40,25 +40,21 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(im ghinstall.Manager, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		atr:      atr,
+		im:       im,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
 	}
 }
 
-var (
-	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
-	installationIDs, _ = lru.New2Q[string, int64](200)
-	trustPolicies      = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
-)
+var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
+	im       ghinstall.Manager
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
@@ -169,7 +165,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
+	var base *ghinstallation.AppsTransport
+	base, e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +181,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 
 	// Synthesize a token for the requested scope and permissions based on the
 	// trust policy.
-	atr := ghinstallation.NewFromAppsTransport(s.atr, e.InstallationID)
+	atr := ghinstallation.NewFromAppsTransport(base, e.InstallationID)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: e.TrustPolicy.Repositories,
 		Permissions:  &e.TrustPolicy.Permissions,
@@ -227,7 +224,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}, nil
 }
 
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -245,9 +242,9 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		tp = otp
 	}
 
-	id, err := s.lookupInstall(ctx, owner)
+	atr, id, err := s.im.Get(ctx, owner)
 	if err != nil {
-		return 0, nil, err
+		return nil, 0, nil, err
 	}
 
 	trustPolicyKey := cacheTrustPolicyKey{
@@ -256,53 +253,17 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		identity: identity,
 	}
 
-	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp); err != nil {
-		return id, nil, err
+	if err := s.lookupTrustPolicy(ctx, atr, id, trustPolicyKey, tp); err != nil {
+		return atr, id, nil, err
 	}
-	return id, otp, nil
-}
-
-func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
-	// check the LRU cache for the installation ID
-	if v, ok := installationIDs.Get(owner); ok {
-		clog.InfoContextf(ctx, "found installation in cache for %s", owner)
-		return v, nil
-	}
-
-	client := github.NewClient(&http.Client{
-		Transport: s.atr,
-	})
-	// Walk through the pages of installations looking for an organization
-	// matching owner.
-	page := 1
-	for page != 0 {
-		installs, resp, err := client.Apps.ListInstallations(ctx, &github.ListOptions{
-			Page:    page,
-			PerPage: 100,
-		})
-		if err != nil {
-			return 0, err
-		}
-
-		for _, install := range installs {
-			if install.Account.GetLogin() == owner {
-				installID := install.GetID()
-				// store in the LRU cache
-				installationIDs.Add(owner, installID)
-				return installID, nil
-			}
-		}
-		page = resp.NextPage
-	}
-
-	return 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+	return atr, id, otp, nil
 }
 
 type trustPolicy interface {
 	Compile() error
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
 	raw := ""
 	// check the LRU cache for the TrustPolicy
 	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
@@ -312,7 +273,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 
 	// if is not cached will get the trustpolicy from the api
 	if raw == "" {
-		atr := ghinstallation.NewFromAppsTransport(s.atr, install)
+		atr := ghinstallation.NewFromAppsTransport(base, install)
 		// We only need to read from the repository, so create that token to fetch
 		// the trust policy.
 		atr.InstallationTokenOptions = &github.InstallationTokenOptions{

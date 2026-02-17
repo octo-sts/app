@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
 )
@@ -61,6 +62,11 @@ func main() {
 		log.Panicf("error creating GitHub App transport: %v", err)
 	}
 
+	im, err := ghinstall.New(atr)
+	if err != nil {
+		log.Panicf("error creating install manager: %v", err)
+	}
+
 	d := duplex.New(
 		baseCfg.Port,
 		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
@@ -77,7 +83,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
