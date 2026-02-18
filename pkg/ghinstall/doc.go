@@ -1,4 +1,4 @@
-// Copyright 2024 Chainguard, Inc.
+// Copyright 2026 Chainguard, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
 // Package ghinstall provides a Manager abstraction for looking up GitHub App
