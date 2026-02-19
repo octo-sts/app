@@ -10,25 +10,37 @@ import (
 	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v62/github"
+	"github.com/google/go-github/v75/github"
+	"github.com/octo-sts/app/pkg/oidcvalidate"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type TrustPolicy struct {
-	Issuer        string         `json:"issuer,omitempty"`
+	// Issuer to match against (exact match).
+	Issuer string `json:"issuer,omitempty"`
+	// Issuer regex pattern to match against.
 	IssuerPattern string         `json:"issuer_pattern,omitempty"`
 	issuerPattern *regexp.Regexp `json:"-"`
 
-	Subject        string         `json:"subject,omitempty"`
+	// Subject to match against (exact match).
+	Subject string `json:"subject,omitempty"`
+	// Subject regex pattern to match against.
 	SubjectPattern string         `json:"subject_pattern,omitempty"`
 	subjectPattern *regexp.Regexp `json:"-"`
 
-	Audience        string         `json:"audience,omitempty"`
+	// Audience to match against (exact match).
+	Audience string `json:"audience,omitempty"`
+	// Audience regex pattern to match against.
 	AudiencePattern string         `json:"audience_pattern,omitempty"`
 	audiencePattern *regexp.Regexp `json:"-"`
 
+	// ClaimPattern is a map of claim names to regex patterns to match against.
 	ClaimPattern map[string]string         `json:"claim_pattern,omitempty"`
 	claimPattern map[string]*regexp.Regexp `json:"-"`
 
+	// GitHub App installation permissions to request tokens with.
+	// See https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
 
 	isCompiled bool `json:"-"`
@@ -37,6 +49,9 @@ type TrustPolicy struct {
 type OrgTrustPolicy struct {
 	TrustPolicy `json:",inline"`
 
+	// Repositories is an optional scoping of repositories within the organization.
+	// If not provided, all repositories available to the GitHub App within the organization
+	// are included.
 	Repositories []string `json:"repositories,omitempty"`
 }
 
@@ -110,41 +125,54 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 		Claims:  make([]Claim, 0, len(tp.claimPattern)),
 	}
 	if !tp.isCompiled {
-		return act, errors.New("trust policy: not compiled")
+		return act, status.Errorf(codes.Internal, "trust policy: not compiled")
+	}
+
+	// Validate critical token fields
+	if !oidcvalidate.IsValidIssuer(token.Issuer) {
+		return act, status.Errorf(codes.InvalidArgument, "invalid issuer in token")
+	}
+	if !oidcvalidate.IsValidSubject(token.Subject) {
+		return act, status.Errorf(codes.InvalidArgument, "invalid subject in token")
+	}
+	for _, aud := range token.Audience {
+		if !oidcvalidate.IsValidAudience(aud) {
+			return act, status.Errorf(codes.InvalidArgument, "invalid audience in token")
+		}
 	}
 
 	// Check the issuer.
 	switch {
 	case tp.issuerPattern != nil:
 		if !tp.issuerPattern.MatchString(token.Issuer) {
-			return act, fmt.Errorf("trust policy: issuer_pattern %q did not match %q", token.Issuer, tp.IssuerPattern)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: issuer %q did not match pattern %q", token.Issuer, tp.IssuerPattern)
 		}
 
 	case tp.Issuer != "":
 		if token.Issuer != tp.Issuer {
-			return act, fmt.Errorf("trust policy: issuer %q did not match %q", token.Issuer, tp.Issuer)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: issuer %q did not match %q", token.Issuer, tp.Issuer)
 		}
 
 	default:
 		// Shouldn't be possible for compiled policies (defense in depth).
-		return act, fmt.Errorf("trust policy: no issuer or issuer_pattern set")
+		return act, status.Errorf(codes.Internal, "trust policy: no issuer or issuer_pattern set")
 	}
 
 	// Check the subject.
 	switch {
 	case tp.subjectPattern != nil:
 		if !tp.subjectPattern.MatchString(token.Subject) {
-			return act, fmt.Errorf("trust policy: subject_pattern %q did not match %q", token.Subject, tp.SubjectPattern)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: subject %q did not match pattern %q", token.Subject, tp.SubjectPattern)
 		}
 
 	case tp.Subject != "":
 		if token.Subject != tp.Subject {
-			return act, fmt.Errorf("trust policy: subject %q did not match %q", token.Subject, tp.Subject)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: subject %q did not match %q", token.Subject, tp.Subject)
 		}
 
 	default:
 		// Shouldn't be possible for compiled policies (defense in depth).
-		return act, fmt.Errorf("trust policy: no subject or subject_pattern set")
+		return act, status.Errorf(codes.Internal, "trust policy: no subject or subject_pattern set")
 	}
 
 	// Check the audience.
@@ -159,18 +187,18 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 			}
 		}
 		if !found {
-			return act, fmt.Errorf("trust policy: audience_pattern %q did not match any of %q", tp.AudiencePattern, token.Audience)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: audience_pattern %q did not match any of %q", tp.AudiencePattern, token.Audience)
 		}
 
 	case tp.Audience != "":
 		if !slices.Contains(token.Audience, tp.Audience) {
-			return act, fmt.Errorf("trust policy: audience %q did not match any of %q", tp.Audience, token.Audience)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: audience %q did not match any of %q", tp.Audience, token.Audience)
 		}
 
 	default:
 		// If `audience` or `audience_pattern` is not provided, we fall back to the domain.
 		if !slices.Contains(token.Audience, domain) {
-			return act, fmt.Errorf("trust policy: audience %q did not match any of %q", domain, token.Audience)
+			return act, status.Errorf(codes.PermissionDenied, "trust policy: audience %q did not match any of %q", domain, token.Audience)
 		}
 	}
 
@@ -183,7 +211,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 		for k, v := range tp.claimPattern {
 			raw, ok := customClaims[k]
 			if !ok {
-				return act, fmt.Errorf("trust policy: expected claim %q not found in token", k)
+				return act, status.Errorf(codes.PermissionDenied, "trust policy: expected claim %q not found in token", k)
 			}
 
 			// Convert bool claims into a string
@@ -196,14 +224,14 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 			}
 			val, ok := raw.(string)
 			if !ok {
-				return act, fmt.Errorf("trust policy: expected claim %q not a string", k)
+				return act, status.Errorf(codes.PermissionDenied, "trust policy: expected claim %q not a string", k)
 			}
 			act.Claims = append(act.Claims, Claim{
 				Name:  k,
 				Value: val,
 			})
 			if !v.MatchString(val) {
-				return act, fmt.Errorf("trust policy: claim %q did not match %q", k, v)
+				return act, status.Errorf(codes.PermissionDenied, "trust policy: claim %q did not match %q", k, v)
 			}
 		}
 	}

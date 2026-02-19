@@ -3,6 +3,8 @@
 
 package octosts
 
+import "time"
+
 type Event struct {
 	Actor          Actor           `json:"actor"`
 	TrustPolicy    *OrgTrustPolicy `json:"trust_policy"`
@@ -11,6 +13,7 @@ type Event struct {
 	Identity       string          `json:"identity"`
 	TokenSHA256    string          `json:"token_sha256"`
 	Error          string          `json:"error,omitempty"`
+	Time           time.Time       `json:"time"`
 }
 
 type Actor struct {

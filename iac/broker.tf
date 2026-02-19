@@ -1,7 +1,9 @@
 // Create the Broker abstraction.
 module "cloudevent-broker" {
   source  = "chainguard-dev/common/infra//modules/cloudevent-broker"
-  version = "0.6.92"
+  version = "0.10.1"
+
+  team = "sre"
 
   name       = "octo-sts-broker"
   project_id = var.project_id
@@ -14,12 +16,18 @@ data "google_client_openid_userinfo" "me" {}
 
 module "cloudevent-recorder" {
   source  = "chainguard-dev/common/infra//modules/cloudevent-recorder"
-  version = "0.6.92"
+  version = "0.10.1"
+
+  team = "sre"
 
   name       = "octo-sts-recorder"
   project_id = var.project_id
   regions    = module.networking.regional-networks
   broker     = module.cloudevent-broker.broker
+
+  // Clients can specify fields that are not in the schema, and when they do
+  // we shouldn't fail to ingest the event, but instead just ignore those fields.
+  ignore_unknown_values = true
 
   retention-period = 90
 

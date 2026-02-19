@@ -8,6 +8,8 @@ on:
     branches:
       - 'main'
 
+permissions: {}
+
 jobs:
 
   check:
@@ -34,10 +36,18 @@ jobs:
           language: YAML
 
     steps:
-      - name: Check out code
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Harden Runner
+        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        with:
+          egress-policy: audit
 
-      - uses: chainguard-dev/actions/boilerplate@main
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: chainguard-dev/actions/boilerplate@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
         with:
           extension: ${{ matrix.extension }}
           language: ${{ matrix.language }}
+          exclude: pkg/webhook/testdata
