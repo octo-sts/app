@@ -7,4 +7,6 @@ regions = [
 ]
 
 // https://github.com/settings/apps/octosts
-github_app_id = 801323
+github_apps = [
+  { app_id = 801323, key_version = 1 },
+]

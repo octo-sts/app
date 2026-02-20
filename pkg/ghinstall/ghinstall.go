@@ -6,6 +6,7 @@ package ghinstall
 import (
 	"context"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
@@ -70,4 +71,19 @@ func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTr
 	}
 
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+}
+
+type roundRobin struct {
+	managers []Manager
+	counter  atomic.Uint64
+}
+
+// NewRoundRobin creates a Manager that distributes requests across the given managers.
+func NewRoundRobin(managers []Manager) Manager {
+	return &roundRobin{managers: managers}
+}
+
+func (rr *roundRobin) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
+	idx := rr.counter.Add(1) % uint64(len(rr.managers))
+	return rr.managers[idx].Get(ctx, owner)
 }

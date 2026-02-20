@@ -66,7 +66,6 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_app_id          = var.github_app_id
-  github_app_key_version = 1
-  notification_channels  = local.notification_channels
+  github_apps           = var.github_apps
+  notification_channels = local.notification_channels
 }
