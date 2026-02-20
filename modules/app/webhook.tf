@@ -44,8 +44,8 @@ module "webhook" {
       ports = [{ container_port = 8080 }]
       env = [
         {
-          name  = "GITHUB_APP_ID"
-          value = var.github_app_id
+          name  = "GITHUB_APP_IDS"
+          value = join(",", var.github_app_ids)
         },
         {
           name  = "GITHUB_WEBHOOK_SECRET"

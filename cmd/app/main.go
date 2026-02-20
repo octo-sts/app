@@ -57,15 +57,19 @@ func main() {
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
-	if err != nil {
-		log.Panicf("error creating GitHub App transport: %v", err)
+	var managers []ghinstall.Manager
+	for _, appID := range baseCfg.AppIDs {
+		atr, err := ghtransport.New(ctx, appID, baseCfg, client)
+		if err != nil {
+			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
+		}
+		m, err := ghinstall.New(atr)
+		if err != nil {
+			log.Panicf("error creating install manager for app %d: %v", appID, err)
+		}
+		managers = append(managers, m)
 	}
-
-	im, err := ghinstall.New(atr)
-	if err != nil {
-		log.Panicf("error creating install manager: %v", err)
-	}
+	im := ghinstall.NewRoundRobin(managers)
 
 	d := duplex.New(
 		baseCfg.Port,

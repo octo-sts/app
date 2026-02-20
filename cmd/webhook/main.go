@@ -17,6 +17,7 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
@@ -54,9 +55,13 @@ func main() {
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
-	if err != nil {
-		log.Panicf("error creating GitHub App transport: %v", err)
+	transports := make(map[int64]*ghinstallation.AppsTransport, len(baseCfg.AppIDs))
+	for _, appID := range baseCfg.AppIDs {
+		atr, err := ghtransport.New(ctx, appID, baseCfg, client)
+		if err != nil {
+			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
+		}
+		transports[appID] = atr
 	}
 
 	// Fetch webhook secrets from secret manager
@@ -90,7 +95,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", &webhook.Validator{
-		Transport:     atr,
+		Transports:    transports,
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 	})

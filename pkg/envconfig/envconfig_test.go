@@ -19,7 +19,7 @@ func TestBaseConfig(t *testing.T) {
 			name: "No environment variables set",
 			envVars: map[string]string{
 				"PORT":                          "8080",
-				"GITHUB_APP_ID":                 "1234",
+				"GITHUB_APP_IDS":                "12345678,87654321",
 				"KMS_KEY":                       "",
 				"APP_SECRET_CERTIFICATE_FILE":   "",
 				"APP_SECRET_CERTIFICATE_ENVVAR": "",
@@ -30,7 +30,7 @@ func TestBaseConfig(t *testing.T) {
 			name: "Only KMS_KEY set",
 			envVars: map[string]string{
 				"PORT":                          "8080",
-				"GITHUB_APP_ID":                 "1234",
+				"GITHUB_APP_IDS":                "12345678,87654321",
 				"KMS_KEY":                       "some-kms-key",
 				"APP_SECRET_CERTIFICATE_FILE":   "",
 				"APP_SECRET_CERTIFICATE_ENVVAR": "",
@@ -41,7 +41,7 @@ func TestBaseConfig(t *testing.T) {
 			name: "Only APP_SECRET_CERTIFICATE_FILE set",
 			envVars: map[string]string{
 				"PORT":                          "8080",
-				"GITHUB_APP_ID":                 "1234",
+				"GITHUB_APP_IDS":                "12345678,87654321",
 				"KMS_KEY":                       "",
 				"APP_SECRET_CERTIFICATE_FILE":   "some-file-path",
 				"APP_SECRET_CERTIFICATE_ENVVAR": "",
@@ -52,7 +52,7 @@ func TestBaseConfig(t *testing.T) {
 			name: "Only APP_SECRET_CERTIFICATE_ENVVAR set",
 			envVars: map[string]string{
 				"PORT":                          "8080",
-				"GITHUB_APP_ID":                 "1234",
+				"GITHUB_APP_IDS":                "12345678,87654321",
 				"KMS_KEY":                       "",
 				"APP_SECRET_CERTIFICATE_FILE":   "",
 				"APP_SECRET_CERTIFICATE_ENVVAR": "some-env-var",
@@ -63,7 +63,7 @@ func TestBaseConfig(t *testing.T) {
 			name: "Multiple variables set",
 			envVars: map[string]string{
 				"PORT":                          "8080",
-				"GITHUB_APP_ID":                 "1234",
+				"GITHUB_APP_IDS":                "12345678,87654321",
 				"KMS_KEY":                       "some-kms-key",
 				"APP_SECRET_CERTIFICATE_FILE":   "some-file-path",
 				"APP_SECRET_CERTIFICATE_ENVVAR": "",

@@ -47,9 +47,9 @@ variable "images" {
   }
 }
 
-variable "github_app_id" {
-  description = "The identifier for the GitHub App."
-  type        = number
+variable "github_app_ids" {
+  description = "The identifiers for the GitHub Apps."
+  type        = list(number)
 }
 
 variable "github_app_key_version" {

@@ -64,7 +64,7 @@ func TestOrgFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 12345678, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestOrgFilter(t *testing.T) {
 
 	secret := []byte("hunter2")
 	v := &Validator{
-		Transport:     tr,
+		Transports:    map[int64]*ghinstallation.AppsTransport{12345678: tr},
 		WebhookSecret: [][]byte{secret},
 		Organizations: []string{"foo"},
 	}
@@ -163,7 +163,7 @@ func TestWebhookOK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 12345678, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestWebhookOK(t *testing.T) {
 
 	secret := []byte("hunter2")
 	v := &Validator{
-		Transport:     tr,
+		Transports:    map[int64]*ghinstallation.AppsTransport{12345678: tr},
 		WebhookSecret: [][]byte{secret},
 	}
 	srv := httptest.NewServer(v)
@@ -179,7 +179,8 @@ func TestWebhookOK(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID:    github.Ptr(int64(1111)),
+			AppID: github.Ptr(int64(12345678)),
 		},
 		Organization: &github.Organization{
 			Login: github.Ptr("foo"),
@@ -269,7 +270,7 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 12345678, key)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +278,7 @@ func TestWebhookDeletedSTS(t *testing.T) {
 
 	secret := []byte("hunter2")
 	v := &Validator{
-		Transport:     tr,
+		Transports:    map[int64]*ghinstallation.AppsTransport{12345678: tr},
 		WebhookSecret: [][]byte{secret},
 	}
 	srv := httptest.NewServer(v)
@@ -285,7 +286,8 @@ func TestWebhookDeletedSTS(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID:    github.Ptr(int64(1111)),
+			AppID: github.Ptr(int64(12345678)),
 		},
 		Organization: &github.Organization{
 			Login: github.Ptr("foo"),

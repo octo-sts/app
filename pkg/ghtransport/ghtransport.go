@@ -14,10 +14,10 @@ import (
 	"github.com/octo-sts/app/pkg/gcpkms"
 )
 
-func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
+func New(ctx context.Context, appID int64, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
-		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, env.AppID, []byte(env.AppSecretCertificateEnvVar))
+		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, appID, []byte(env.AppSecretCertificateEnvVar))
 
 		if err != nil {
 			return nil, err
@@ -25,7 +25,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 		return atr, nil
 
 	case env.AppSecretCertificateFile != "":
-		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, env.AppID, env.AppSecretCertificateFile)
+		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, appID, env.AppSecretCertificateFile)
 
 		if err != nil {
 			return nil, err
@@ -41,7 +41,7 @@ func New(ctx context.Context, env *envConfig.EnvConfig, kmsClient *kms.KeyManage
 			return nil, fmt.Errorf("error creating signer: %w", err)
 		}
 
-		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, env.AppID, ghinstallation.WithSigner(signer))
+		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
 		if err != nil {
 			return nil, err
 		}

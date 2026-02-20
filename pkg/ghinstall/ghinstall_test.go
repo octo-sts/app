@@ -146,7 +146,53 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
-func newTestClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
+func TestRoundRobin(t *testing.T) {
+	ctx := context.Background()
+	installID := int64(42)
+	appIDs := []int64{12345678, 87654321}
+
+	// Create two managers backed by different app transports.
+	var managers []Manager
+	for _, appID := range appIDs {
+		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/app/installations":
+				json.NewEncoder(w).Encode([]github.Installation{{
+					ID: github.Ptr(installID),
+					Account: &github.User{
+						Login: github.Ptr("my-org"),
+					},
+				}})
+			default:
+				w.WriteHeader(http.StatusNotImplemented)
+			}
+		}), appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		managers = append(managers, m)
+	}
+
+	rr := NewRoundRobin(managers)
+
+	// Call Get multiple times and verify we round-robin across app IDs.
+	for i := range 4 {
+		atr, gotID, err := rr.Get(ctx, "my-org")
+		if err != nil {
+			t.Fatalf("Get() call %d = %v", i, err)
+		}
+		if gotID != installID {
+			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
+		}
+		wantAppID := appIDs[(i+1)%len(appIDs)]
+		if gotAppID := atr.AppID(); gotAppID != wantAppID {
+			t.Errorf("call %d: app ID: got = %d, wanted = %d", i, gotAppID, wantAppID)
+		}
+	}
+}
+
+func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 
 	tlsConfig, err := generateTLS(&x509.Certificate{
@@ -177,7 +223,12 @@ func newTestClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 		t.Fatalf("GenerateKey failed: %v", err)
 	}
 
-	atr, err := ghinstallation.NewAppsTransportWithOptions(transport, 1234, ghinstallation.WithSigner(ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)))
+	appID := int64(12345678)
+	if len(appIDs) > 0 {
+		appID = appIDs[0]
+	}
+
+	atr, err := ghinstallation.NewAppsTransportWithOptions(transport, appID, ghinstallation.WithSigner(ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)))
 	if err != nil {
 		t.Fatalf("NewAppsTransportWithOptions failed: %v", err)
 	}

@@ -35,16 +35,17 @@ func TestGCPKMS(t *testing.T) {
 
 	testConfig := &envconfig.EnvConfig{
 		Port:    8080,
-		AppID:   123456,
+		AppIDs:  []int64{12345678, 87654321},
 		KMSKey:  "test-kms-key",
 		Metrics: true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
-
-	assert.NoError(t, err)
-
-	assert.NotNil(t, transport)
+	kmsClient := generateKMSClient(ctx, t)
+	for _, appID := range testConfig.AppIDs {
+		transport, err := New(ctx, appID, testConfig, kmsClient)
+		assert.NoError(t, err)
+		assert.NotNil(t, transport)
+	}
 }
 
 func TestCertEnvVar(t *testing.T) {
@@ -52,16 +53,17 @@ func TestCertEnvVar(t *testing.T) {
 
 	testConfig := &envconfig.EnvConfig{
 		Port:                       8080,
-		AppID:                      123456,
+		AppIDs:                     []int64{12345678, 87654321},
 		AppSecretCertificateEnvVar: generateTestCertificateString(),
 		Metrics:                    true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
-
-	assert.NoError(t, err)
-
-	assert.NotNil(t, transport)
+	kmsClient := generateKMSClient(ctx, t)
+	for _, appID := range testConfig.AppIDs {
+		transport, err := New(ctx, appID, testConfig, kmsClient)
+		assert.NoError(t, err)
+		assert.NotNil(t, transport)
+	}
 }
 
 func TestCertFile(t *testing.T) {
@@ -69,16 +71,17 @@ func TestCertFile(t *testing.T) {
 
 	testConfig := &envconfig.EnvConfig{
 		Port:                     8080,
-		AppID:                    123456,
+		AppIDs:                   []int64{12345678, 87654321},
 		AppSecretCertificateFile: generateTestCertificateFile(t),
 		Metrics:                  true,
 	}
 
-	transport, err := New(ctx, testConfig, generateKMSClient(ctx, t))
-
-	assert.NoError(t, err)
-
-	assert.NotNil(t, transport)
+	kmsClient := generateKMSClient(ctx, t)
+	for _, appID := range testConfig.AppIDs {
+		transport, err := New(ctx, appID, testConfig, kmsClient)
+		assert.NoError(t, err)
+		assert.NotNil(t, transport)
+	}
 }
 
 func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {
