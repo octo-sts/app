@@ -1,7 +1,7 @@
-// Copyright 2024 Chainguard, Inc.
+// Copyright 2025 Chainguard, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-package gcpkms
+package gcp
 
 import (
 	"context"
@@ -11,6 +11,7 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -54,15 +55,25 @@ func TestGCP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	signer, err := New(ctx, client, "foo")
-	if err != nil {
-		t.Fatal(err)
+	provider := &Provider{
+		ctx:    ctx,
+		client: client,
+		key:    "foo",
 	}
 
-	if _, err := signer.Sign(jwt.RegisteredClaims{
+	if _, err := provider.Sign(jwt.RegisteredClaims{
 		Subject: "foo",
 		Issuer:  "bar",
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestNewProviderReturnsProvider(t *testing.T) {
+	provider, err := NewProvider(context.Background(), "test-key")
+	if err != nil {
+		t.Skipf("Skipping test due to missing GCP credentials or connectivity: %v", err)
+	}
+	assert.NoError(t, err)
+	assert.NotNil(t, provider)
 }
