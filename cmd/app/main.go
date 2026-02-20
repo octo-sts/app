@@ -20,6 +20,8 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
@@ -98,6 +100,10 @@ func main() {
 	}); err != nil {
 		log.Panicf("failed to register root GET handler: %v", err)
 	}
+
+	// Register health check service
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(d.Server, healthServer)
 
 	if err := d.ListenAndServe(ctx); err != nil {
 		log.Panicf("ListenAndServe() = %v", err)
