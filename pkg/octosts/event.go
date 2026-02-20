@@ -11,6 +11,7 @@ type Event struct {
 	InstallationID int64           `json:"installation_id"`
 	Scope          string          `json:"scope"`
 	Identity       string          `json:"identity"`
+	UserAgent      string          `json:"user_agent,omitempty"`
 	TokenSHA256    string          `json:"token_sha256"`
 	Error          string          `json:"error,omitempty"`
 	Time           time.Time       `json:"time"`
