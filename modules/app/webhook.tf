@@ -45,7 +45,7 @@ module "webhook" {
       env = [
         {
           name  = "GITHUB_APP_IDS"
-          value = join(",", var.github_app_ids)
+          value = join(",", [for app in var.github_apps : app.app_id])
         },
         {
           name  = "GITHUB_WEBHOOK_SECRET"
@@ -56,8 +56,8 @@ module "webhook" {
           value = var.github_webhook_organization_filter
         },
         {
-          name  = "KMS_KEY"
-          value = local.kms_key
+          name  = "KMS_KEYS"
+          value = join(",", local.kms_keys)
         }
       ]
     }

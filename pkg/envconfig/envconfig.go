@@ -5,17 +5,18 @@ package envconfig
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/kelseyhightower/envconfig"
 )
 
 type EnvConfig struct {
-	Port                       int     `envconfig:"PORT" required:"true"`
-	KMSKey                     string  `envconfig:"KMS_KEY" required:"false"`
-	AppIDs                     []int64 `envconfig:"GITHUB_APP_IDS" required:"true"`
-	AppSecretCertificateFile   string  `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
-	AppSecretCertificateEnvVar string  `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
-	Metrics                    bool    `envconfig:"METRICS" required:"false" default:"true"`
+	Port                       int      `envconfig:"PORT" required:"true"`
+	KMSKeys                    []string `envconfig:"KMS_KEYS" required:"false"`
+	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"true"`
+	AppSecretCertificateFile   string   `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
+	AppSecretCertificateEnvVar string   `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
+	Metrics                    bool     `envconfig:"METRICS" required:"false" default:"true"`
 }
 
 type EnvConfigApp struct {
@@ -59,14 +60,22 @@ func BaseConfig() (*EnvConfig, error) {
 		return nil, err
 	}
 
-	kmsSet := false
-	for _, v := range []string{cfg.KMSKey, cfg.AppSecretCertificateFile, cfg.AppSecretCertificateEnvVar} {
-		if v != "" {
-			if kmsSet {
-				return nil, errors.New("only one of KMS_KEY, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
-			}
-			kmsSet = true
-		}
+	sources := 0
+	if len(cfg.KMSKeys) > 0 {
+		sources++
+	}
+	if cfg.AppSecretCertificateFile != "" {
+		sources++
+	}
+	if cfg.AppSecretCertificateEnvVar != "" {
+		sources++
+	}
+	if sources > 1 {
+		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
+	}
+
+	if len(cfg.KMSKeys) > 0 && len(cfg.KMSKeys) != len(cfg.AppIDs) {
+		return nil, fmt.Errorf("KMS_KEYS length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.KMSKeys), len(cfg.AppIDs))
 	}
 
 	return cfg, err

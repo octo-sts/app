@@ -236,6 +236,69 @@ func TestWebhookOK(t *testing.T) {
 	}
 }
 
+func TestWebhookUnknownAppID(t *testing.T) {
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "should not be called", http.StatusUnauthorized)
+	}))
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 12345678, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transports:    map[int64]*ghinstallation.AppsTransport{12345678: tr},
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	// Send a push event with an app ID that is not in the transports map
+	// (simulates an app with key_version=0 that was excluded).
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID:    github.Ptr(int64(1111)),
+			AppID: github.Ptr(int64(87654321)),
+		},
+		Organization: &github.Organization{
+			Login: github.Ptr("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name: github.Ptr("bar"),
+		},
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusInternalServerError {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", http.StatusInternalServerError, string(out))
+	}
+}
+
 func TestWebhookDeletedSTS(t *testing.T) {
 	// CheckRuns will be collected here.
 	got := []*github.CreateCheckRunOptions{}

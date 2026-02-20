@@ -48,7 +48,7 @@ func main() {
 
 	var client *kms.KeyManagementClient
 
-	if baseCfg.KMSKey != "" {
+	if len(baseCfg.KMSKeys) > 0 {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
@@ -56,8 +56,16 @@ func main() {
 	}
 
 	transports := make(map[int64]*ghinstallation.AppsTransport, len(baseCfg.AppIDs))
-	for _, appID := range baseCfg.AppIDs {
-		atr, err := ghtransport.New(ctx, appID, baseCfg, client)
+	for i, appID := range baseCfg.AppIDs {
+		var kmsKey string
+		if len(baseCfg.KMSKeys) > 0 {
+			kmsKey = baseCfg.KMSKeys[i]
+			if kmsKey == "" {
+				log.Printf("skipping app %d: no KMS key configured", appID)
+				continue
+			}
+		}
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}
@@ -68,7 +76,7 @@ func main() {
 	// or allow webhook secret to be defined by env var.
 	// Not everyone is using Google KMS, so we need to support other methods
 	webhookSecrets := [][]byte{}
-	if baseCfg.KMSKey != "" {
+	if len(baseCfg.KMSKeys) > 0 {
 		secretmanager, err := secretmanager.NewClient(ctx)
 		if err != nil {
 			log.Panicf("could not create secret manager client: %v", err)

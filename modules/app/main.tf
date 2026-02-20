@@ -5,9 +5,11 @@ resource "google_kms_key_ring" "app-keyring" {
   location = "global"
 }
 
-// Create an asymmetric signing key to use for signing tokens.
+// Create a separate asymmetric signing key for each GitHub App.
 resource "google_kms_crypto_key" "app-key" {
-  name     = "app-signing-key"
+  for_each = { for app in var.github_apps : tostring(app.app_id) => app if app.key_version > 0 }
+
+  name     = "app-signing-key-${each.key}"
   key_ring = google_kms_key_ring.app-keyring.id
   purpose  = "ASYMMETRIC_SIGN"
 
@@ -43,7 +45,7 @@ locals {
   #     --key app-signing-key \
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
-  kms_key = "${google_kms_crypto_key.app-key.id}/cryptoKeyVersions/${var.github_app_key_version}"
+  kms_keys = [for app in var.github_apps : app.key_version > 0 ? "${google_kms_crypto_key.app-key[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""]
 }
 
 // Create a dedicated GSA for the IAM datastore service.
@@ -94,11 +96,11 @@ module "this" {
       env = [
         {
           name  = "GITHUB_APP_IDS"
-          value = join(",", var.github_app_ids)
+          value = join(",", [for app in var.github_apps : app.app_id])
         },
         {
-          name  = "KMS_KEY"
-          value = local.kms_key
+          name  = "KMS_KEYS"
+          value = join(",", local.kms_keys)
         },
         {
           name  = "STS_DOMAIN",

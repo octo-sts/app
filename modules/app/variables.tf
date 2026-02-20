@@ -47,14 +47,12 @@ variable "images" {
   }
 }
 
-variable "github_app_ids" {
-  description = "The identifiers for the GitHub Apps."
-  type        = list(number)
-}
-
-variable "github_app_key_version" {
-  description = "The version number of the signing key loaded into KMS."
-  type        = number
+variable "github_apps" {
+  description = "The GitHub Apps, each with an app_id and key_version for KMS signing."
+  type = list(object({
+    app_id      = number
+    key_version = number
+  }))
 }
 
 variable "notification_channels" {

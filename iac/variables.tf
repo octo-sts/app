@@ -13,7 +13,10 @@ variable "regions" {
   default     = []
 }
 
-variable "github_app_ids" {
-  description = "The Github App ID for the Octo STS service."
-  type        = list(number)
+variable "github_apps" {
+  description = "The GitHub Apps for the Octo STS service."
+  type = list(object({
+    app_id      = number
+    key_version = number
+  }))
 }
