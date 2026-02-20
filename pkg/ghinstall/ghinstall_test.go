@@ -152,7 +152,7 @@ func TestRoundRobin(t *testing.T) {
 	appIDs := []int64{12345678, 87654321}
 
 	// Create two managers backed by different app transports.
-	var managers []Manager
+	managers := make([]Manager, 0, len(appIDs))
 	for _, appID := range appIDs {
 		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {

@@ -57,7 +57,7 @@ func main() {
 		}
 	}
 
-	var managers []ghinstall.Manager
+	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
 	for _, appID := range baseCfg.AppIDs {
 		atr, err := ghtransport.New(ctx, appID, baseCfg, client)
 		if err != nil {
