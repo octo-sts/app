@@ -5,6 +5,7 @@ package ghinstall
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync/atomic"
 
@@ -40,8 +41,9 @@ func New(atr *ghinstallation.AppsTransport) (Manager, error) {
 
 // Get returns the AppsTransport and installation ID for the given owner.
 func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
-	if v, ok := m.cache.Get(owner); ok {
-		clog.InfoContextf(ctx, "found installation in cache for %s", owner)
+	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
+	if v, ok := m.cache.Get(cacheKey); ok {
+		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
 		return m.atr, v, nil
 	}
 
@@ -63,13 +65,12 @@ func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTr
 		for _, install := range installs {
 			if install.Account.GetLogin() == owner {
 				installID := install.GetID()
-				m.cache.Add(owner, installID)
+				m.cache.Add(cacheKey, installID)
 				return m.atr, installID, nil
 			}
 		}
 		page = resp.NextPage
 	}
-
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
@@ -84,6 +85,21 @@ func NewRoundRobin(managers []Manager) Manager {
 }
 
 func (rr *roundRobin) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
-	idx := rr.counter.Add(1) % uint64(len(rr.managers))
-	return rr.managers[idx].Get(ctx, owner)
+	primary_app_index := int64(0)
+
+	idx := int64(rr.counter.Add(1)) % int64(len(rr.managers))
+	atr, id, err := rr.managers[idx].Get(ctx, owner)
+	if err == nil {
+		return atr, id, nil
+	}
+	// If the selected manager is already the fallback (first), return the error as-is.
+	if idx == primary_app_index {
+		return nil, primary_app_index, err
+	}
+	// If the app is not installed for this owner, fall back to the first app.
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		clog.InfoContextf(ctx, "app not installed for %q, falling back to first app", owner)
+		return rr.managers[primary_app_index].Get(ctx, owner)
+	}
+	return nil, primary_app_index, err
 }
