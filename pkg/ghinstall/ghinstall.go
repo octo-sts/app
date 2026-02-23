@@ -85,21 +85,25 @@ func NewRoundRobin(managers []Manager) Manager {
 }
 
 func (rr *roundRobin) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
-	primary_app_index := int64(0)
+	primary_app_index := uint64(0)
 
-	idx := int64(rr.counter.Add(1)) % int64(len(rr.managers))
-	atr, id, err := rr.managers[idx].Get(ctx, owner)
+	// Select a random application index to use for this request. This ensures
+	// that if one app is not installed for a given owner, we will fall back
+	// to a different app instead of always hitting the same one.
+	random_index := rr.counter.Add(1) % uint64(len(rr.managers))
+
+	atr, id, err := rr.managers[random_index].Get(ctx, owner)
 	if err == nil {
 		return atr, id, nil
 	}
 	// If the selected manager is already the fallback (first), return the error as-is.
-	if idx == primary_app_index {
-		return nil, primary_app_index, err
+	if random_index == primary_app_index {
+		return nil, int64(primary_app_index), err
 	}
 	// If the app is not installed for this owner, fall back to the first app.
 	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 		clog.InfoContextf(ctx, "app not installed for %q, falling back to first app", owner)
 		return rr.managers[primary_app_index].Get(ctx, owner)
 	}
-	return nil, primary_app_index, err
+	return nil, int64(primary_app_index), err
 }
