@@ -5,12 +5,6 @@ resource "google_kms_key_ring" "app-keyring" {
   location = "global"
 }
 
-// Needed for PR 1222.
-import {
-  to = google_kms_crypto_key.app-key["801323"]
-  id = "app-signing-key-801323"
-}
-
 // Create a separate asymmetric signing key for each GitHub App.
 resource "google_kms_crypto_key" "app-key" {
   for_each = { for app in var.github_apps : tostring(app.app_id) => app if app.key_version > 0 }
