@@ -17,7 +17,6 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
@@ -55,21 +54,15 @@ func main() {
 		}
 	}
 
-	transports := make(map[int64]*ghinstallation.AppsTransport, len(baseCfg.AppIDs))
-	for i, appID := range baseCfg.AppIDs {
-		var kmsKey string
-		if len(baseCfg.KMSKeys) > 0 {
-			kmsKey = baseCfg.KMSKeys[i]
-			if kmsKey == "" {
-				log.Printf("skipping app %d: no KMS key configured", appID)
-				continue
-			}
-		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
-		if err != nil {
-			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
-		}
-		transports[appID] = atr
+	// Only use the primary app ID and KMS key for the webhook transport.
+	appID := baseCfg.AppIDs[0]
+	var kmsKey string
+	if len(baseCfg.KMSKeys) > 0 {
+		kmsKey = baseCfg.KMSKeys[0]
+	}
+	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+	if err != nil {
+		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 	}
 
 	// Fetch webhook secrets from secret manager
@@ -103,7 +96,7 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", &webhook.Validator{
-		Transports:    transports,
+		Transport:     atr,
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 	})

@@ -39,20 +39,12 @@ const (
 )
 
 type Validator struct {
-	Transports map[int64]*ghinstallation.AppsTransport
+	Transport *ghinstallation.AppsTransport
 	// Store multiple secrets to allow for rolling updates.
 	// Only one needs to match for the event to be considered valid.
 	WebhookSecret [][]byte
 
 	Organizations []string
-}
-
-func (e *Validator) transport(appID int64) (*ghinstallation.AppsTransport, error) {
-	atr, ok := e.Transports[appID]
-	if !ok {
-		return nil, fmt.Errorf("no transport found for app ID %d", appID)
-	}
-	return atr, nil
 }
 
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -236,16 +228,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		return nil, nil
 	}
 
-	atr, err := e.transport(event.GetInstallation().GetAppID())
-	if err != nil {
-		return nil, err
-	}
 	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(atr, installationID),
+		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
-	if atr.BaseURL != "" {
+	if e.Transport.BaseURL != "" {
 		var err error
-		client, err = client.WithEnterpriseURLs(atr.BaseURL, atr.BaseURL)
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
 		if err != nil {
 			return nil, err
 		}
@@ -294,16 +282,12 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, nil
 	}
 
-	atr, err := e.transport(pr.GetInstallation().GetAppID())
-	if err != nil {
-		return nil, err
-	}
 	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(atr, installationID),
+		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
-	if atr.BaseURL != "" {
+	if e.Transport.BaseURL != "" {
 		var err error
-		client, err = client.WithEnterpriseURLs(atr.BaseURL, atr.BaseURL)
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
 		if err != nil {
 			return nil, err
 		}
@@ -360,16 +344,12 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		return nil, nil
 	}
 
-	atr, err := e.transport(cs.GetInstallation().GetAppID())
-	if err != nil {
-		return nil, err
-	}
 	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(atr, installationID),
+		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
 	})
-	if atr.BaseURL != "" {
+	if e.Transport.BaseURL != "" {
 		var err error
-		client, err = client.WithEnterpriseURLs(atr.BaseURL, atr.BaseURL)
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
 		if err != nil {
 			return nil, err
 		}
