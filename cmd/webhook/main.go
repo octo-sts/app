@@ -55,10 +55,17 @@ func main() {
 	}
 
 	// Only use the primary app ID and KMS key for the webhook transport.
-	appID := baseCfg.AppIDs[0]
+	var appID int64
+	if len(baseCfg.AppIDs) > 0 {
+		appID = baseCfg.AppIDs[0]
+	} else {
+		log.Panic("at least one GitHub App ID must be provided")
+	}
 	var kmsKey string
 	if len(baseCfg.KMSKeys) > 0 {
 		kmsKey = baseCfg.KMSKeys[0]
+	} else {
+		log.Panic("at least one KMS key must be provided")
 	}
 	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
 	if err != nil {
