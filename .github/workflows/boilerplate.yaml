@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
         with:
           egress-policy: audit
 
@@ -46,7 +46,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: chainguard-dev/actions/boilerplate@a601adc7b134a61c9110e17c6ebcdff5e2e53bdc # v1.6.2
+      - uses: chainguard-dev/actions/boilerplate@eab208ef2d05b13404296a5e194a6b237e8bb213 # v1.6.4
         with:
           extension: ${{ matrix.extension }}
           language: ${{ matrix.language }}

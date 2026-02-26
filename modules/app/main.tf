@@ -27,6 +27,20 @@ resource "google_kms_crypto_key" "app-key" {
   skip_initial_version_creation = true
 }
 
+// In preparation for PR 1222.
+resource "google_kms_crypto_key" "app-key-801323" {
+  name     = "app-signing-key-801323"
+  key_ring = google_kms_key_ring.app-keyring.id
+  purpose  = "ASYMMETRIC_SIGN"
+
+  version_template {
+    algorithm = "RSA_SIGN_PKCS1_2048_SHA256"
+  }
+
+  import_only                   = true
+  skip_initial_version_creation = true
+}
+
 locals {
   # To import a key, we need to run the following commands:
   # gcloud kms import-jobs create app-import-job \
@@ -68,7 +82,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "0.10.1"
+  version = "0.10.2"
 
   project_id = var.project_id
   region     = each.key
@@ -79,7 +93,7 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "0.10.1"
+  version = "0.10.2"
 
   team = "sre"
 
