@@ -5,10 +5,10 @@ resource "google_kms_key_ring" "app-keyring" {
   location = "global"
 }
 
-// Needed for multi-app support from PR 1222.
-moved {
-  from = google_kms_crypto_key.app-key
-  to   = google_kms_crypto_key.app-key["801323"]
+// Needed for PR 1222.
+import {
+  to = google_kms_crypto_key.app-key["801323"]
+  id = "app-signing-key-801323"
 }
 
 // Create a separate asymmetric signing key for each GitHub App.
@@ -16,20 +16,6 @@ resource "google_kms_crypto_key" "app-key" {
   for_each = { for app in var.github_apps : tostring(app.app_id) => app if app.key_version > 0 }
 
   name     = "app-signing-key-${each.key}"
-  key_ring = google_kms_key_ring.app-keyring.id
-  purpose  = "ASYMMETRIC_SIGN"
-
-  version_template {
-    algorithm = "RSA_SIGN_PKCS1_2048_SHA256"
-  }
-
-  import_only                   = true
-  skip_initial_version_creation = true
-}
-
-// In preparation for PR 1222.
-resource "google_kms_crypto_key" "app-key-801323" {
-  name     = "app-signing-key-801323"
   key_ring = google_kms_key_ring.app-keyring.id
   purpose  = "ASYMMETRIC_SIGN"
 
