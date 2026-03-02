@@ -23,8 +23,9 @@ jobs:
     strategy:
       matrix:
         terraform-dir:
-          - ./iac/bootstrap
-          - ./iac
+          - ./env/octo-sts/bootstrap
+          - ./env/octo-sts
+          - ./env/octo-sts-staging
 
     steps:
       - name: Harden Runner
@@ -38,7 +39,7 @@ jobs:
 
       - uses: chainguard-dev/actions/setup-terraform@081e79ee578199ef583d4ca74edc376b50b9409c # v1.6.0
         with:
-          terraform-version-file: '${{ github.workspace }}/.terraform-version'
+          terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
       - run: terraform fmt -check -recursive
