@@ -9,7 +9,7 @@ module "webhook-secret" {
   source  = "chainguard-dev/common/infra//modules/configmap"
   version = "0.10.2"
 
-  team = "sre"
+  team = "developer-platform"
 
   project_id = var.project_id
   name       = "${var.name}-webhook-secret"
@@ -24,7 +24,7 @@ module "webhook" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
   version = "0.10.2"
 
-  team = "sre"
+  team = "developer-platform"
 
   project_id = var.project_id
   name       = "${var.name}-webhook"
