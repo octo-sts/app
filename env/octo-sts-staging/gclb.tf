@@ -1,19 +1,9 @@
-moved {
-  from = module.app.google_dns_managed_zone.top-level-zone
-  to   = google_dns_managed_zone.top-level-zone
-}
-
-moved {
-  from = module.app.module.serverless-gclb
-  to   = module.serverless-gclb
-}
-
 // This is imported from Cloud Domains
 resource "google_dns_managed_zone" "top-level-zone" {
   project     = var.project_id
-  name        = "octo-sts-dev"
-  dns_name    = "octo-sts.dev."
-  description = "DNS zone for domain: octo-sts.dev"
+  name        = "octo-staging-dev"
+  dns_name    = "octo-staging.dev."
+  description = "DNS zone for domain: octo-staging.dev"
 
   dnssec_config {
     state = "on"
@@ -23,7 +13,7 @@ resource "google_dns_managed_zone" "top-level-zone" {
 // Put the above domain in front of our regional services.
 module "serverless-gclb" {
   source  = "chainguard-dev/common/infra//modules/serverless-gclb"
-  version = "0.10.2"
+  version = "0.10.1"
 
   team = "developer-platform"
 
@@ -37,10 +27,10 @@ module "serverless-gclb" {
   serving_regions = keys(module.networking.regional-networks)
 
   public-services = {
-    "octo-sts.dev" = {
+    "octo-staging.dev" = {
       name = module.app.app.name
     }
-    "webhook.octo-sts.dev" = {
+    "webhook.octo-staging.dev" = {
       name = module.app.webhook.name
     }
   }

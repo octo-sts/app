@@ -6,5 +6,4 @@ regions = [
   "us-central1",
 ]
 
-// https://github.com/settings/apps/octosts
 github_app_id = 801323

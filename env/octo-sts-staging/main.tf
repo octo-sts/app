@@ -5,7 +5,7 @@ provider "ko" { repo = "gcr.io/${var.project_id}" }
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "0.10.2"
+  version = "0.10.1"
 
   team = "developer-platform"
 
@@ -18,11 +18,11 @@ module "networking" {
 
 # For slack need to create the notification manually - https://github.com/hashicorp/terraform-provider-google/issues/11346
 data "google_monitoring_notification_channel" "octo-sts-slack" {
-  display_name = "Slack Octo STS Notification"
+  display_name = "Slack Octo STS Staging Notification"
 }
 
 resource "ko_build" "this" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/app"
 }
 
@@ -32,7 +32,7 @@ resource "cosign_sign" "this" {
 }
 
 resource "ko_build" "webhook" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/webhook"
 }
 
@@ -48,7 +48,7 @@ locals {
 }
 
 module "app" {
-  source = "../modules/app"
+  source = "../../modules/app"
 
   project_id = var.project_id
   name       = var.name
@@ -60,7 +60,7 @@ module "app" {
     }
   }
 
-  domain = "octo-sts.dev"
+  domain = "octo-staging.dev"
   images = {
     app     = cosign_sign.this.signed_ref
     webhook = cosign_sign.webhook.signed_ref

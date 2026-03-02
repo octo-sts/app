@@ -5,7 +5,7 @@ resource "google_service_account" "prober" {
 
 module "prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.10.2"
+  version = "0.10.1"
 
   team = "developer-platform"
 
@@ -17,10 +17,10 @@ module "prober" {
   service_account = google_service_account.prober.email
 
   importpath  = "./cmd/prober"
-  working_dir = "${path.module}/../"
+  working_dir = "${path.module}/../../"
 
   env = {
-    STS_DOMAIN = "octo-sts.dev"
+    STS_DOMAIN = "octo-staging.dev"
   }
 
   enable_alert          = true
@@ -34,7 +34,7 @@ resource "google_service_account" "negative_prober" {
 
 module "negative_prober" {
   source  = "chainguard-dev/common/infra//modules/prober"
-  version = "0.10.2"
+  version = "0.10.1"
 
   team = "developer-platform"
 
@@ -46,10 +46,10 @@ module "negative_prober" {
   service_account = google_service_account.negative_prober.email
 
   importpath  = "./cmd/negative-prober"
-  working_dir = "${path.module}/../"
+  working_dir = "${path.module}/../../"
 
   env = {
-    STS_DOMAIN = "octo-sts.dev"
+    STS_DOMAIN = "octo-staging.dev"
   }
 
   enable_alert          = true
@@ -58,7 +58,7 @@ module "negative_prober" {
 
 module "dashboard" {
   source  = "chainguard-dev/common/infra//modules/dashboard/service"
-  version = "0.10.2"
+  version = "0.10.1"
 
   service_name = var.name
   project_id   = var.project_id
