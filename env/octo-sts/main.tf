@@ -2,13 +2,6 @@ provider "google" { project = var.project_id }
 provider "google-beta" { project = var.project_id }
 provider "ko" { repo = "gcr.io/${var.project_id}" }
 
-// Needed for PR 1222.
-import {
-  to = module.app.google_kms_crypto_key.app-key["801323"]
-  id = "global/octo-sts/app-signing-key-801323"
-}
-
-
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
