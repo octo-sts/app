@@ -4,6 +4,9 @@
 name: Deploy to Cloud Run
 
 on:
+  push:
+    branches:
+      - "main"
   workflow_dispatch:
     inputs:
       environment:
@@ -14,6 +17,9 @@ on:
         options:
           - octo-sts-staging
           - octo-sts
+
+env:
+  DEFAULT_ENVIRONMENT: "octo-sts-staging"
 
 concurrency: deploy
 
@@ -46,29 +52,31 @@ jobs:
           check-latest: true
           cache: "false"
 
-      - name: Log deployment target
-        run: |
-          echo "Deploying to environment: ${{ inputs.environment }}"
-
       - name: Resolve auth config
         id: auth-config
         run: |
-          if [[ "${{ inputs.environment }}" == "octo-sts" ]]; then
+          ENVIRONMENT="${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}"
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+          if [[ "${ENVIRONMENT}" == "octo-sts" ]]; then
             echo "workload_identity_provider=projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider" >> "$GITHUB_OUTPUT"
             echo "service_account=github-identity@octo-sts.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ inputs.environment }}" == "octo-sts-staging" ]]; then
+          elif [[ "${ENVIRONMENT}" == "octo-sts-staging" ]]; then
             echo "workload_identity_provider=projects/578801560891/locations/global/workloadIdentityPools/octo-sts-staging/providers/github-provider" >> "$GITHUB_OUTPUT"
             echo "service_account=octo-sts-staging-ci@octo-sts-staging.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
           else
-            echo "Unknown environment: ${{ inputs.environment }}" >&2
+            echo "Unknown environment: ${ENVIRONMENT}" >&2
             exit 1
           fi
+
+      - name: Log deployment target
+        run: |
+          echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
 
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
         id: auth
         with:
           token_format: "access_token"
-          project_id: "${{ inputs.environment }}"
+          project_id: "${{ steps.auth-config.outputs.environment }}"
           workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
           service_account: "${{ steps.auth-config.outputs.service_account }}"
 
@@ -84,12 +92,12 @@ jobs:
           terraform-wrapper: false
 
       - id: terraform-init
-        working-directory: "./env/${{ inputs.environment }}"
+        working-directory: "./env/${{ steps.auth-config.outputs.environment }}"
         run: |
           terraform init
 
       - if: steps.terraform-init.outcome == 'success'
-        working-directory: "./env/${{ inputs.environment }}"
+        working-directory: "./env/${{ steps.auth-config.outputs.environment }}"
         run: |
           terraform plan
 
@@ -101,7 +109,7 @@ jobs:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
           SLACK_USERNAME: guardian
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: "${{ inputs.environment}}-alerts" # Use a channel
+          SLACK_CHANNEL: "${{ steps.auth-config.outputs.environment }}-alerts" # Use a channel
           SLACK_COLOR: "#8E1600"
           MSG_MINIMAL: "true"
           SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
