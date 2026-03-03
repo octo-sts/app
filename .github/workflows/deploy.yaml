@@ -83,11 +83,17 @@ jobs:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
-      - working-directory: "./env/${{ inputs.environment }}"
+      - id: terraform-init
+        working-directory: "./env/${{ inputs.environment }}"
         run: |
           terraform init
 
+      - if: steps.terraform-init.outcome == 'success'
+        working-directory: "./env/${{ inputs.environment }}"
+        run: |
           terraform plan
+
+          terraform apply -auto-approve
 
       - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
         if: ${{ failure() }}
