@@ -8,4 +8,5 @@ regions = [
 
 github_apps = [
   { app_id = 2991343, key_version = 1 },
+  { app_id = 3000098, key_version = 1 }
 ]
