@@ -146,7 +146,164 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
-func newTestClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
+func TestRoundRobin(t *testing.T) {
+	ctx := context.Background()
+	installID := int64(42)
+	appIDs := []int64{12345678, 87654321}
+
+	// Create two managers backed by different app transports.
+	managers := make([]Manager, 0, len(appIDs))
+	for _, appID := range appIDs {
+		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/app/installations":
+				json.NewEncoder(w).Encode([]github.Installation{{
+					ID: github.Ptr(installID),
+					Account: &github.User{
+						Login: github.Ptr("my-org"),
+					},
+				}})
+			default:
+				w.WriteHeader(http.StatusNotImplemented)
+			}
+		}), appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		managers = append(managers, m)
+	}
+
+	rr := NewRoundRobin(managers)
+
+	// Call Get multiple times and verify we round-robin across app IDs.
+	for i := range 4 {
+		atr, gotID, err := rr.Get(ctx, "my-org")
+		if err != nil {
+			t.Fatalf("Get() call %d = %v", i, err)
+		}
+		if gotID != installID {
+			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
+		}
+		wantAppID := appIDs[(i+1)%len(appIDs)]
+		if gotAppID := atr.AppID(); gotAppID != wantAppID {
+			t.Errorf("call %d: app ID: got = %d, wanted = %d", i, gotAppID, wantAppID)
+		}
+	}
+}
+
+func TestRoundRobinFallback(t *testing.T) {
+	ctx := context.Background()
+	installID := int64(42)
+	fallbackAppID := int64(12345678)
+	secondaryAppID := int64(87654321)
+
+	// The fallback app (first) is installed in "my-org".
+	fallbackATR := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(installID),
+				Account: &github.User{
+					Login: github.Ptr("my-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}), fallbackAppID)
+	fallbackMgr, err := New(fallbackATR)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	// The secondary app is NOT installed in "my-org".
+	secondaryATR := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(int64(99)),
+				Account: &github.User{
+					Login: github.Ptr("other-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}), secondaryAppID)
+	secondaryMgr, err := New(secondaryATR)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	rr := NewRoundRobin([]Manager{fallbackMgr, secondaryMgr})
+
+	// Call Get twice so both managers are exercised by round-robin.
+	for i := range 2 {
+		atr, gotID, err := rr.Get(ctx, "my-org")
+		if err != nil {
+			t.Fatalf("Get() call %d = %v", i, err)
+		}
+		if gotID != installID {
+			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
+		}
+		// Both calls should resolve via the fallback app since the secondary
+		// app is not installed for "my-org".
+		if gotAppID := atr.AppID(); gotAppID != fallbackAppID {
+			t.Errorf("call %d: app ID: got = %d, wanted fallback = %d", i, gotAppID, fallbackAppID)
+		}
+	}
+}
+
+func TestRoundRobinFallbackNotInstalled(t *testing.T) {
+	ctx := context.Background()
+	fallbackAppID := int64(12345678)
+	secondaryAppID := int64(87654321)
+
+	// Neither app is installed for "missing-org".
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(int64(1)),
+				Account: &github.User{
+					Login: github.Ptr("other-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	})
+
+	managers := make([]Manager, 0, 2)
+	for _, appID := range []int64{fallbackAppID, secondaryAppID} {
+		atr := newTestClient(t, handler, appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		managers = append(managers, m)
+	}
+
+	rr := NewRoundRobin(managers)
+
+	// Both managers should return NotFound since neither is installed for "missing-org".
+	for i := range 2 {
+		_, _, err := rr.Get(ctx, "missing-org")
+		if err == nil {
+			t.Fatalf("Get() call %d: expected error, got nil", i)
+		}
+		st, ok := status.FromError(err)
+		if !ok {
+			t.Fatalf("Get() call %d: expected gRPC status error, got %T", i, err)
+		}
+		if st.Code() != codes.NotFound {
+			t.Errorf("Get() call %d: code: got = %v, wanted = %v", i, st.Code(), codes.NotFound)
+		}
+	}
+}
+
+func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 
 	tlsConfig, err := generateTLS(&x509.Certificate{
@@ -177,7 +334,12 @@ func newTestClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 		t.Fatalf("GenerateKey failed: %v", err)
 	}
 
-	atr, err := ghinstallation.NewAppsTransportWithOptions(transport, 1234, ghinstallation.WithSigner(ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)))
+	appID := int64(12345678)
+	if len(appIDs) > 0 {
+		appID = appIDs[0]
+	}
+
+	atr, err := ghinstallation.NewAppsTransportWithOptions(transport, appID, ghinstallation.WithSigner(ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)))
 	if err != nil {
 		t.Fatalf("NewAppsTransportWithOptions failed: %v", err)
 	}

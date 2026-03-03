@@ -5,7 +5,9 @@ package ghinstall
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
@@ -39,8 +41,9 @@ func New(atr *ghinstallation.AppsTransport) (Manager, error) {
 
 // Get returns the AppsTransport and installation ID for the given owner.
 func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
-	if v, ok := m.cache.Get(owner); ok {
-		clog.InfoContextf(ctx, "found installation in cache for %s", owner)
+	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
+	if v, ok := m.cache.Get(cacheKey); ok {
+		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
 		return m.atr, v, nil
 	}
 
@@ -62,12 +65,45 @@ func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTr
 		for _, install := range installs {
 			if install.Account.GetLogin() == owner {
 				installID := install.GetID()
-				m.cache.Add(owner, installID)
+				m.cache.Add(cacheKey, installID)
 				return m.atr, installID, nil
 			}
 		}
 		page = resp.NextPage
 	}
-
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+}
+
+type roundRobin struct {
+	managers []Manager
+	counter  atomic.Uint64
+}
+
+// NewRoundRobin creates a Manager that distributes requests across the given managers.
+func NewRoundRobin(managers []Manager) Manager {
+	return &roundRobin{managers: managers}
+}
+
+func (rr *roundRobin) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
+	primary_app_index := uint64(0)
+
+	// Select a random application index to use for this request. This ensures
+	// that if one app is not installed for a given owner, we will fall back
+	// to a different app instead of always hitting the same one.
+	random_index := rr.counter.Add(1) % uint64(len(rr.managers))
+
+	atr, id, err := rr.managers[random_index].Get(ctx, owner)
+	if err == nil {
+		return atr, id, nil
+	}
+	// If the selected manager is already the fallback (first), return the error as-is.
+	if random_index == primary_app_index {
+		return nil, int64(primary_app_index), err
+	}
+	// If the app is not installed for this owner, fall back to the first app.
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		clog.InfoContextf(ctx, "app not installed for %q, falling back to first app", owner)
+		return rr.managers[primary_app_index].Get(ctx, owner)
+	}
+	return nil, int64(primary_app_index), err
 }

@@ -6,4 +6,6 @@ regions = [
   "us-central1",
 ]
 
-github_app_id = 2991343
+github_apps = [
+  { app_id = 2991343, key_version = 1 },
+]

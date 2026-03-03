@@ -50,22 +50,37 @@ func main() {
 
 	var client *kms.KeyManagementClient
 
-	if baseCfg.KMSKey != "" {
+	if len(baseCfg.KMSKeys) > 0 {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
-	if err != nil {
-		log.Panicf("error creating GitHub App transport: %v", err)
+	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
+	for i, appID := range baseCfg.AppIDs {
+		var kmsKey string
+		if len(baseCfg.KMSKeys) > 0 {
+			kmsKey = baseCfg.KMSKeys[i]
+			if kmsKey == "" {
+				log.Printf("skipping app %d: no KMS key configured", appID)
+				continue
+			}
+		}
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+		if err != nil {
+			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
+		}
+		m, err := ghinstall.New(atr)
+		if err != nil {
+			log.Panicf("error creating install manager for app %d: %v", appID, err)
+		}
+		managers = append(managers, m)
 	}
-
-	im, err := ghinstall.New(atr)
-	if err != nil {
-		log.Panicf("error creating install manager: %v", err)
+	if len(managers) == 0 {
+		log.Panic("no apps with valid KMS keys configured")
 	}
+	im := ghinstall.NewRoundRobin(managers)
 
 	d := duplex.New(
 		baseCfg.Port,
