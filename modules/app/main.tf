@@ -59,7 +59,7 @@ locals {
   #     --key app-signing-key \
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
-  kms_keys = [for app in var.github_apps : app.key_version > 0 ? "${google_kms_crypto_key.app-key[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""]
+  kms_keys = [for app in var.github_apps : app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""]
 }
 
 // Create a dedicated GSA for the IAM datastore service.
