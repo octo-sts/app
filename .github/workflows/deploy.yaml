@@ -89,8 +89,6 @@ jobs:
 
           terraform plan
 
-          terraform apply -auto-approve
-
       - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
         if: ${{ failure() }}
         env:
