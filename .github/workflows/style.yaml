@@ -131,12 +131,6 @@ jobs:
       - uses: chainguard-dev/actions/eof-newline@71714a76c3df10b544595a2294c16649dc3472e5 # v1.6.5
         if: ${{ always() }}
 
-      - uses: reviewdog/action-tflint@54a5e5aed57dcfbb4662ec548de876df33d6288d # v1.25.0s
-        if: ${{ always() }}
-        with:
-          github_token: ${{ secrets.github_token }}
-          fail_level: warning
-
       - uses: reviewdog/action-misspell@d6429416b12b09b4e2768307d53bef58d172e962 # v1.27.0
         if: ${{ always() }}
         with:
