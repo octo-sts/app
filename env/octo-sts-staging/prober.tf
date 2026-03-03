@@ -20,7 +20,8 @@ module "prober" {
   working_dir = "${path.module}/../../"
 
   env = {
-    STS_DOMAIN = "octo-staging.dev"
+    STS_DOMAIN      = "octo-staging.dev"
+    PROBER_IDENTITY = "prober-staging"
   }
 
   enable_alert          = true
@@ -49,7 +50,8 @@ module "negative_prober" {
   working_dir = "${path.module}/../../"
 
   env = {
-    STS_DOMAIN = "octo-staging.dev"
+    STS_DOMAIN      = "octo-staging.dev"
+    PROBER_IDENTITY = "prober-staging"
   }
 
   enable_alert          = true
