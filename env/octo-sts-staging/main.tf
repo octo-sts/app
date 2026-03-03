@@ -2,6 +2,16 @@ provider "google" { project = var.project_id }
 provider "google-beta" { project = var.project_id }
 provider "ko" { repo = "gcr.io/${var.project_id}" }
 
+import {
+  to = module.app.google_kms_crypto_key.app-key
+  id = "global/octo-sts-staging/app-signing-key"
+}
+
+import {
+  to = module.app.google_kms_crypto_key.app-keys["2991343"]
+  id = "global/octo-sts-staging/app-signing-key-2991343"
+}
+
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
