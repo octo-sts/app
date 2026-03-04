@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-github/v75/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -218,6 +219,15 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Compute the SHA256 hash of the token and store the hex-encoded value into e.TokenSHA256
 	hash := sha256.Sum256([]byte(token))
 	e.TokenSHA256 = hex.EncodeToString(hash[:])
+
+	// Add app ID and installation ID to response metadata (gRPC headers)
+	responseMd := metadata.Pairs(
+		"x-github-app-id", fmt.Sprintf("%d", base.AppID()),
+		"x-github-installation-id", fmt.Sprintf("%d", e.InstallationID),
+	)
+	if mdErr := grpc.SetHeader(ctx, responseMd); mdErr != nil {
+		clog.FromContext(ctx).Warnf("failed to set response headers: %v", mdErr)
+	}
 
 	return &pboidc.RawToken{
 		Token: token,
