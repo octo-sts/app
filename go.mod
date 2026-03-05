@@ -1,6 +1,6 @@
 module github.com/octo-sts/app
 
-go 1.25.0
+go 1.25.6
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.15
@@ -10,7 +10,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.0
-	github.com/chainguard-dev/terraform-infra-common v0.10.2
+	github.com/chainguard-dev/terraform-infra-common v0.10.3
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.17.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
