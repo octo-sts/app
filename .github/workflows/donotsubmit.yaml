@@ -21,7 +21,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@a90bcbc6539c36a85cdfeb73f7e2f433735f215b # v2.15.0
+        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
         with:
           egress-policy: audit
 
@@ -31,4 +31,4 @@ jobs:
           persist-credentials: false
 
       - name: Do Not Submit
-        uses: chainguard-dev/actions/donotsubmit@71714a76c3df10b544595a2294c16649dc3472e5 # v1.6.5
+        uses: chainguard-dev/actions/donotsubmit@e9290faa91aa6b1226df129cb450f2ff49235b92 # v1.6.6
