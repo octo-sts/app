@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -40,7 +40,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/gofmt@e9290faa91aa6b1226df129cb450f2ff49235b92 # v1.6.6
+      - uses: chainguard-dev/actions/gofmt@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
         with:
           args: -s
 
@@ -53,7 +53,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -69,7 +69,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/goimports@e9290faa91aa6b1226df129cb450f2ff49235b92 # v1.6.6
+      - uses: chainguard-dev/actions/goimports@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
 
   golangci-lint:
     name: golangci-lint
@@ -80,7 +80,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -109,7 +109,7 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@58077d3c7e43986b6b15fba718e8ea69e387dfcc # v2.15.1
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
           egress-policy: audit
 
@@ -125,10 +125,10 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/trailing-space@e9290faa91aa6b1226df129cb450f2ff49235b92 # v1.6.6
+      - uses: chainguard-dev/actions/trailing-space@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
         if: ${{ always() }}
 
-      - uses: chainguard-dev/actions/eof-newline@e9290faa91aa6b1226df129cb450f2ff49235b92 # v1.6.6
+      - uses: chainguard-dev/actions/eof-newline@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
         if: ${{ always() }}
 
       - uses: reviewdog/action-misspell@d6429416b12b09b4e2768307d53bef58d172e962 # v1.27.0
