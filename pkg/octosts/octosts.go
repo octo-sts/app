@@ -47,14 +47,15 @@ const (
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
 // GitHub installation tokens. rrm handles installation selection; sticky (may
 // be nil) persists checks:write routing for check-run ownership.
-func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		rrm:      rrm,
-		sticky:   sticky,
-		appCount: appCount,
-		ceclient: ceclient,
-		domain:   domain,
-		metrics:  metrics,
+		rrm:           rrm,
+		sticky:        sticky,
+		appCount:      appCount,
+		ceclient:      ceclient,
+		domain:        domain,
+		metrics:       metrics,
+		orgPolicyRepo: orgPolicyRepo,
 	}
 }
 
@@ -63,12 +64,13 @@ var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, t
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	rrm      ghinstall.Manager
-	sticky   stickystore.Store
-	appCount int
-	ceclient cloudevents.Client
-	domain   string
-	metrics  bool
+	rrm           ghinstall.Manager
+	sticky        stickystore.Store
+	appCount      int
+	ceclient      cloudevents.Client
+	domain        string
+	metrics       bool
+	orgPolicyRepo string
 }
 
 type cacheTrustPolicyKey struct {
@@ -278,12 +280,15 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	owner, repo := path.Dir(scope), path.Base(scope)
 	if owner == "." {
-		owner, repo = repo, ".github"
+		owner, repo = repo, s.orgPolicyRepo
 	} else {
 		otp.Repositories = []string{repo}
 	}
 
-	if repo == ".github" {
+	// If the repo is the org policy repo, then parse with an org policy even
+	// if the repo was specified explicitly because we will reject the
+	// repositories field in policies otherwise.
+	if repo == s.orgPolicyRepo {
 		tp = otp
 	}
 

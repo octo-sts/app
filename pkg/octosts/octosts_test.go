@@ -145,8 +145,9 @@ func TestExchange(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		rrm:      &fakeInstallMgr{atr: atr},
-		appCount: 1,
+		rrm:           &fakeInstallMgr{atr: atr},
+		appCount:      1,
+		orgPolicyRepo: ".github",
 	}
 	for _, tc := range []struct {
 		name string
@@ -232,8 +233,9 @@ func TestExchangeValidation(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		rrm:      &fakeInstallMgr{atr: atr},
-		appCount: 1,
+		rrm:           &fakeInstallMgr{atr: atr},
+		appCount:      1,
+		orgPolicyRepo: ".github",
 	}
 
 	tests := []struct {
@@ -373,8 +375,9 @@ func TestExchangeRateLimit(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 			s := &sts{
-				rrm:      &fakeInstallMgr{atr: atr},
-				appCount: 1,
+				rrm:           &fakeInstallMgr{atr: atr},
+				appCount:      1,
+				orgPolicyRepo: ".github",
 			}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
