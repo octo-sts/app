@@ -37,6 +37,6 @@ jobs:
           echo "files=${yamls}" >> "$GITHUB_OUTPUT"
 
       - name: Action lint
-        uses: reviewdog/action-actionlint@0d952c597ef8459f634d7145b0b044a9699e5e43 # v1.71.0
+        uses: step-security/action-actionlint@d364e70a116a460ed220d67b1ca2f2579c48a40a # v1.69.1
         with:
           actionlint_flags: ${{ steps.get_yamls.outputs.files }}

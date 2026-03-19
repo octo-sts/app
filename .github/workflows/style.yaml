@@ -131,7 +131,7 @@ jobs:
       - uses: chainguard-dev/actions/eof-newline@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
         if: ${{ always() }}
 
-      - uses: reviewdog/action-misspell@d6429416b12b09b4e2768307d53bef58d172e962 # v1.27.0
+      - uses: step-security/action-misspell@185febccfc9a0598c17a34b579cc7e64a54afc6d # v1.27.1
         if: ${{ always() }}
         with:
           github_token: ${{ secrets.github_token }}
@@ -142,7 +142,7 @@ jobs:
             **/third_party/**
             ./*.yml
 
-      - uses: get-woke/woke-action-reviewdog@d71fd0115146a01c3181439ce714e21a69d75e31 # v0
+      - uses: step-security/woke-action-reviewdog@950b04a91ab83c38de67275fe6190a4eb977f261 # v0.1.1
         if: ${{ always() }}
         with:
           github-token: ${{ secrets.github_token }}

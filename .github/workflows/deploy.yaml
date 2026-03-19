@@ -72,7 +72,7 @@ jobs:
         run: |
           echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
 
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+      - uses: step-security/google-github-auth@57c51210cb4d85d8a5d39dc4c576c79bd693f914 # v3.0.1
         id: auth
         with:
           token_format: "access_token"
@@ -103,7 +103,7 @@ jobs:
 
           terraform apply -auto-approve
 
-      - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
+      - uses: step-security/action-slack-notify@e04c77a65bae8b6c0373478a1cb8fd7e012637e6 # v2.3.5
         if: ${{ failure() }}
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
