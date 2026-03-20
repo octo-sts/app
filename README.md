@@ -70,6 +70,11 @@ Chainguard email address to federate and read the repo contents.
 - [TrustPolicy](./pkg/octosts/octosts.TrustPolicy.json)
 - [OrgTrustPolicy](pkg/octosts/octosts.OrgTrustPolicy.json)
 
+##### VSCode
+
+We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml?tab=readme-ov-file).
+This will read the `# yaml-language-server: $schema=...` header and provide code completion.
+
 ### Federating a token
 
 The GitHub App implements the Chainguard `SecurityTokenService` GRPC service
