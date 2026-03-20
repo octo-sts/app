@@ -86,9 +86,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	e := Event{
-		Scope:    requestScope,
-		Identity: request.GetIdentity(),
-		Time:     time.Now(),
+		Scope:     requestScope,
+		Identity:  request.GetIdentity(),
+		Time:      time.Now(),
+		UserAgent: extractUserAgent(ctx),
 	}
 
 	if s.metrics {
@@ -353,4 +354,13 @@ func (s *sts) ExchangeRefreshToken(ctx context.Context, request *pboidc.Exchange
 
 func ptr[T any](in T) *T {
 	return &in
+}
+
+func extractUserAgent(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	ua := md.Get("user-agent")
+	return strings.Join(ua, " ")
 }
