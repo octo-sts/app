@@ -8,7 +8,7 @@ STS API in order to produce short-lived tokens for interacting with GitHub.
 **_The ultimate goal of this App is to wholly eliminate the need for GitHub
 Personal Access Tokens (aka PATs)._**
 
-The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have).
+The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have) and the page on [Chainguard Academy](https://edu.chainguard.dev/open-source/octo-sts/overview/).
 
 ## Setting up workload trust
 
