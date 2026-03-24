@@ -40,7 +40,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/gofmt@d67380d0b02c09412f8e17f660ec48870bd89e6e # v1.6.9
+      - uses: chainguard-dev/actions/gofmt@c29bd2a0f4e71ad61a209c255c0164987df76aaa # v1.6.10
         with:
           args: -s
 
@@ -69,7 +69,7 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/goimports@d67380d0b02c09412f8e17f660ec48870bd89e6e # v1.6.9
+      - uses: chainguard-dev/actions/goimports@c29bd2a0f4e71ad61a209c255c0164987df76aaa # v1.6.10
 
   golangci-lint:
     name: golangci-lint
@@ -125,10 +125,10 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - uses: chainguard-dev/actions/trailing-space@d67380d0b02c09412f8e17f660ec48870bd89e6e # v1.6.9
+      - uses: chainguard-dev/actions/trailing-space@c29bd2a0f4e71ad61a209c255c0164987df76aaa # v1.6.10
         if: ${{ always() }}
 
-      - uses: chainguard-dev/actions/eof-newline@d67380d0b02c09412f8e17f660ec48870bd89e6e # v1.6.9
+      - uses: chainguard-dev/actions/eof-newline@c29bd2a0f4e71ad61a209c255c0164987df76aaa # v1.6.10
         if: ${{ always() }}
 
       - uses: step-security/action-misspell@185febccfc9a0598c17a34b579cc7e64a54afc6d # v1.27.1
