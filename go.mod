@@ -7,7 +7,7 @@ require (
 	chainguard.dev/sdk v0.1.51
 	cloud.google.com/go/kms v1.26.0
 	cloud.google.com/go/secretmanager v1.16.0
-	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
+	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.0
 	github.com/chainguard-dev/terraform-infra-common v1.0.1
@@ -39,6 +39,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/ebitengine/purego v0.9.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/google/go-github/v84 v84.0.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.3 // indirect
 	github.com/mailru/easyjson v0.7.7 // indirect
@@ -70,7 +71,7 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
-	github.com/google/go-querystring v1.1.0 // indirect
+	github.com/google/go-querystring v1.2.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
