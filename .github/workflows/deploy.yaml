@@ -53,6 +53,7 @@ jobs:
             cloudkms.googleapis.com:443
             cloudresourcemanager.googleapis.com:443
             compute.googleapis.com:443
+            dl.google.com:443
             dns.googleapis.com:443
             fulcio.sigstore.dev:443
             gcr.io:443
@@ -61,6 +62,7 @@ jobs:
             iam.googleapis.com:443
             iamcredentials.googleapis.com:443
             monitoring.googleapis.com:443
+            objects.githubusercontent.com:443
             openidconnect.googleapis.com:443
             proxy.golang.org:443
             pubsub.googleapis.com:443
