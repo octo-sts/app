@@ -39,7 +39,41 @@ jobs:
       - name: Harden Runner
         uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.blob.core.windows.net:443
+            *.githubapp.com:443
+            9236a389bd48b984df91adc1bc924620.r2.cloudflarestorage.com:443
+            api.github.com:443
+            bigquery.googleapis.com:443
+            bigquerydatatransfer.googleapis.com:443
+            cgr.dev:443
+            checkpoint-api.hashicorp.com:443
+            cloudbilling.googleapis.com:443
+            cloudkms.googleapis.com:443
+            cloudresourcemanager.googleapis.com:443
+            compute.googleapis.com:443
+            dns.googleapis.com:443
+            fulcio.sigstore.dev:443
+            gcr.io:443
+            github.com:443
+            go.dev:443
+            iam.googleapis.com:443
+            iamcredentials.googleapis.com:443
+            monitoring.googleapis.com:443
+            openidconnect.googleapis.com:443
+            proxy.golang.org:443
+            pubsub.googleapis.com:443
+            registry.terraform.io:443
+            rekor.sigstore.dev:443
+            release-assets.githubusercontent.com:443
+            releases.hashicorp.com:443
+            run.googleapis.com:443
+            secretmanager.googleapis.com:443
+            storage.googleapis.com:443
+            sts.googleapis.com:443
+            sum.golang.org:443
+            tuf-repo-cdn.sigstore.dev:443
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
