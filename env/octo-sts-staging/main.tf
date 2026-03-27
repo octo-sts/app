@@ -15,7 +15,7 @@ import {
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "1.0.1"
+  version = "1.0.2"
 
   team = "developer-platform"
 

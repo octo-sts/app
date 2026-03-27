@@ -24,7 +24,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	jwt "github.com/golang-jwt/jwt/v4"
-	"github.com/google/go-github/v75/github"
+	"github.com/google/go-github/v84/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
