@@ -88,7 +88,7 @@ func NewRoundRobin(managers []Manager) Manager {
 }
 
 // NewMultiManager creates a Manager that distributes requests across the given
-// managers using consistent hashing on the owner name.
+// managers using consistent hashing on the (scope, identity) tuple.
 //
 // Consistent hashing ensures that the same owner always maps to the same
 // GitHub App. This is required because GitHub check runs can only be updated

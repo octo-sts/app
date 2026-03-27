@@ -323,20 +323,29 @@ func TestMultiManagerFallback(t *testing.T) {
 
 	mm := NewMultiManager([]Manager{primaryMgr, secondaryMgr})
 
-	// Regardless of which app the hash selects, both calls must resolve since
-	// only the primary app is installed for "my-org" — the other falls back.
-	for i := range 2 {
-		atr, gotID, err := mm.Get(ctx, "my-org", "my-org/repo", "my-identity")
-		if err != nil {
-			t.Fatalf("Get() call %d = %v", i, err)
+	// Find a (scope, identity) pair that is confirmed to hash to index 1
+	// (secondaryMgr), so the fallback path is reliably exercised.
+	var scope, identity string
+	for i := 0; ; i++ {
+		s, id := fmt.Sprintf("my-org/repo-%d", i), "my-identity"
+		h := fnv.New32a()
+		h.Write([]byte(s + ":" + id))
+		if int(h.Sum32())%2 == 1 {
+			scope, identity = s, id
+			break
 		}
-		if gotID != installID {
-			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
-		}
-		// Must resolve via the primary app since the secondary is not installed.
-		if gotAppID := atr.AppID(); gotAppID != primaryAppID {
-			t.Errorf("call %d: app ID: got = %d, wanted primary = %d", i, gotAppID, primaryAppID)
-		}
+	}
+
+	atr, gotID, err := mm.Get(ctx, "my-org", scope, identity)
+	if err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if gotID != installID {
+		t.Errorf("install ID: got = %d, wanted = %d", gotID, installID)
+	}
+	// Must resolve via the primary app since the secondary is not installed.
+	if gotAppID := atr.AppID(); gotAppID != primaryAppID {
+		t.Errorf("app ID: got = %d, wanted primary = %d", gotAppID, primaryAppID)
 	}
 }
 
