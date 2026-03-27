@@ -82,6 +82,11 @@ type multiManager struct {
 	managers []Manager
 }
 
+// Deprecated: use NewMultiManager.
+func NewRoundRobin(managers []Manager) Manager {
+	return NewMultiManager(managers)
+}
+
 // NewMultiManager creates a Manager that distributes requests across the given
 // managers using consistent hashing on the owner name.
 //
@@ -93,11 +98,6 @@ type multiManager struct {
 // Load is distributed across apps by owner: different owners hash to different
 // apps. If the selected app is not installed for an owner, the remaining apps
 // are tried in order.
-// NewRoundRobin is deprecated: use NewMultiManager.
-func NewRoundRobin(managers []Manager) Manager {
-	return NewMultiManager(managers)
-}
-
 func NewMultiManager(managers []Manager) Manager {
 	return &multiManager{managers: managers}
 }
