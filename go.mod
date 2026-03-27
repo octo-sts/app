@@ -3,8 +3,8 @@ module github.com/octo-sts/app
 go 1.25.8
 
 require (
-	chainguard.dev/go-grpc-kit v0.17.16
-	chainguard.dev/sdk v0.1.51
+	chainguard.dev/go-grpc-kit v0.17.17
+	chainguard.dev/sdk v0.1.52
 	cloud.google.com/go/kms v1.26.0
 	cloud.google.com/go/secretmanager v1.16.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
