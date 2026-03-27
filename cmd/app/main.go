@@ -80,7 +80,7 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	im := ghinstall.NewRoundRobin(managers)
+	im := ghinstall.NewMultiManager(managers)
 
 	d := duplex.New(
 		baseCfg.Port,

@@ -6,8 +6,8 @@ package ghinstall
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"net/http"
-	"sync/atomic"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
@@ -18,8 +18,10 @@ import (
 )
 
 // Manager looks up GitHub App installations by owner.
+// scope and identity are used by multi-app implementations for routing;
+// single-app implementations may ignore them.
 type Manager interface {
-	Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error)
+	Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error)
 }
 
 type manager struct {
@@ -40,7 +42,9 @@ func New(atr *ghinstallation.AppsTransport) (Manager, error) {
 }
 
 // Get returns the AppsTransport and installation ID for the given owner.
-func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
+// scope and identity are unused by the single-app manager; routing is handled
+// by multiManager.
+func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
 	if v, ok := m.cache.Get(cacheKey); ok {
 		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
@@ -74,36 +78,62 @@ func (m *manager) Get(ctx context.Context, owner string) (*ghinstallation.AppsTr
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
-type roundRobin struct {
+type multiManager struct {
 	managers []Manager
-	counter  atomic.Uint64
 }
 
-// NewRoundRobin creates a Manager that distributes requests across the given managers.
+// NewMultiManager creates a Manager that distributes requests across the given
+// managers using consistent hashing on the owner name.
+//
+// Consistent hashing ensures that the same owner always maps to the same
+// GitHub App. This is required because GitHub check runs can only be updated
+// by the app that created them — non-deterministic app selection causes 403
+// errors when a token refresh or process restart lands on a different app.
+//
+// Load is distributed across apps by owner: different owners hash to different
+// apps. If the selected app is not installed for an owner, the remaining apps
+// are tried in order.
+// NewRoundRobin is deprecated: use NewMultiManager.
 func NewRoundRobin(managers []Manager) Manager {
-	return &roundRobin{managers: managers}
+	return NewMultiManager(managers)
 }
 
-func (rr *roundRobin) Get(ctx context.Context, owner string) (*ghinstallation.AppsTransport, int64, error) {
-	primary_app_index := uint64(0)
+func NewMultiManager(managers []Manager) Manager {
+	return &multiManager{managers: managers}
+}
 
-	// Select a random application index to use for this request. This ensures
-	// that if one app is not installed for a given owner, we will fall back
-	// to a different app instead of always hitting the same one.
-	random_index := rr.counter.Add(1) % uint64(len(rr.managers))
+func (rr *multiManager) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
+	// Consistent hashing on (scope, identity): the same requester acting on
+	// the same repo always maps to the same GitHub App. This is required
+	// because GitHub check runs can only be updated by the app that created
+	// them — non-deterministic app selection causes 403 errors.
+	//
+	// Hashing on both scope and identity (rather than owner alone) distributes
+	// load across apps: different identities acting on the same repo, or the
+	// same identity acting on different repos, can land on different apps.
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(scope + ":" + identity))
+	primary := int(h.Sum32()) % len(rr.managers)
 
-	atr, id, err := rr.managers[random_index].Get(ctx, owner)
+	atr, id, err := rr.managers[primary].Get(ctx, owner, scope, identity)
 	if err == nil {
 		return atr, id, nil
 	}
-	// If the selected manager is already the fallback (first), return the error as-is.
-	if random_index == primary_app_index {
-		return nil, int64(primary_app_index), err
-	}
-	// If the app is not installed for this owner, fall back to the first app.
+
+	// If the selected app is not installed for this owner, try the remaining
+	// apps in order so that installation gaps are handled gracefully.
 	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		clog.InfoContextf(ctx, "app not installed for %q, falling back to first app", owner)
-		return rr.managers[primary_app_index].Get(ctx, owner)
+		clog.InfoContextf(ctx, "app not installed for %q, trying other apps", owner)
+		for i, m := range rr.managers {
+			if i == primary {
+				continue
+			}
+			atr, id, err = m.Get(ctx, owner, scope, identity)
+			if err == nil {
+				return atr, id, nil
+			}
+		}
 	}
-	return nil, int64(primary_app_index), err
+
+	return nil, 0, err
 }

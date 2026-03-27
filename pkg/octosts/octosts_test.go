@@ -47,7 +47,7 @@ type fakeInstallMgr struct {
 	atr *ghinstallation.AppsTransport
 }
 
-func (f *fakeInstallMgr) Get(_ context.Context, _ string) (*ghinstallation.AppsTransport, int64, error) {
+func (f *fakeInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	return f.atr, 1234, nil
 }
 

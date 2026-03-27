@@ -242,7 +242,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		tp = otp
 	}
 
-	atr, id, err := s.im.Get(ctx, owner)
+	atr, id, err := s.im.Get(ctx, owner, scope, identity)
 	if err != nil {
 		return nil, 0, nil, err
 	}

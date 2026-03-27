@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"hash/fnv"
 	"math/big"
 	"net"
 	"net/http"
@@ -53,7 +54,7 @@ func TestGet(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	gotATR, gotID, err := mgr.Get(ctx, "my-org")
+	gotATR, gotID, err := mgr.Get(ctx, "my-org", "my-org/repo", "my-identity")
 	if err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
@@ -91,7 +92,7 @@ func TestGetCached(t *testing.T) {
 	}
 
 	// First call populates the cache.
-	if _, _, err := mgr.Get(ctx, "cached-org"); err != nil {
+	if _, _, err := mgr.Get(ctx, "cached-org", "cached-org/repo", "my-identity"); err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
 	if calls != 1 {
@@ -99,7 +100,7 @@ func TestGetCached(t *testing.T) {
 	}
 
 	// Second call should come from cache.
-	_, gotID, err := mgr.Get(ctx, "cached-org")
+	_, gotID, err := mgr.Get(ctx, "cached-org", "cached-org/repo", "my-identity")
 	if err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
@@ -133,7 +134,7 @@ func TestGetNotFound(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	_, _, err = mgr.Get(ctx, "missing-org")
+	_, _, err = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -146,12 +147,13 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
-func TestRoundRobin(t *testing.T) {
+func TestConsistentHashing(t *testing.T) {
 	ctx := context.Background()
 	installID := int64(42)
 	appIDs := []int64{12345678, 87654321}
 
-	// Create two managers backed by different app transports.
+	// Create two managers backed by different app transports, both installed
+	// for "my-org".
 	managers := make([]Manager, 0, len(appIDs))
 	for _, appID := range appIDs {
 		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,32 +176,115 @@ func TestRoundRobin(t *testing.T) {
 		managers = append(managers, m)
 	}
 
-	rr := NewRoundRobin(managers)
+	mm := NewMultiManager(managers)
 
-	// Call Get multiple times and verify we round-robin across app IDs.
+	const scope, identity = "my-org/repo", "my-identity"
+
+	// Derive the expected app index using the same hashing logic.
+	h := fnv.New32a()
+	h.Write([]byte(scope + ":" + identity))
+	wantAppID := appIDs[int(h.Sum32())%len(appIDs)]
+
+	// Multiple calls for the same (scope, identity) must always return the same app.
 	for i := range 4 {
-		atr, gotID, err := rr.Get(ctx, "my-org")
+		atr, gotID, err := mm.Get(ctx, "my-org", scope, identity)
 		if err != nil {
 			t.Fatalf("Get() call %d = %v", i, err)
 		}
 		if gotID != installID {
 			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
 		}
-		wantAppID := appIDs[(i+1)%len(appIDs)]
 		if gotAppID := atr.AppID(); gotAppID != wantAppID {
-			t.Errorf("call %d: app ID: got = %d, wanted = %d", i, gotAppID, wantAppID)
+			t.Errorf("call %d: app ID: got = %d, wanted = %d (consistent hash)", i, gotAppID, wantAppID)
 		}
 	}
 }
 
-func TestRoundRobinFallback(t *testing.T) {
+func TestConsistentHashingDistribution(t *testing.T) {
 	ctx := context.Background()
 	installID := int64(42)
-	fallbackAppID := int64(12345678)
+	appIDs := []int64{12345678, 87654321}
+
+	// Both apps are installed for "my-org".
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			json.NewEncoder(w).Encode([]github.Installation{
+				{ID: github.Ptr(installID), Account: &github.User{Login: github.Ptr("my-org")}},
+			})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}
+
+	managers := make([]Manager, 0, len(appIDs))
+	for _, appID := range appIDs {
+		atr := newTestClient(t, http.HandlerFunc(handler), appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		managers = append(managers, m)
+	}
+
+	mm := NewMultiManager(managers)
+
+	// Compute expected app index for a given (scope, identity) pair.
+	expectedIndex := func(scope, identity string) int {
+		h := fnv.New32a()
+		h.Write([]byte(scope + ":" + identity))
+		return int(h.Sum32()) % len(appIDs)
+	}
+
+	// Find two (scope, identity) pairs within the same org that hash to
+	// different indices, confirming load is distributed across apps.
+	type pair struct{ scope, identity string }
+	candidates := []pair{
+		{"my-org/repo-a", "identity-a"},
+		{"my-org/repo-b", "identity-b"},
+		{"my-org/repo-a", "identity-b"},
+		{"my-org/repo-b", "identity-a"},
+		{"my-org/repo-c", "identity-c"},
+	}
+	seen := map[int]pair{}
+	for _, c := range candidates {
+		idx := expectedIndex(c.scope, c.identity)
+		if _, ok := seen[idx]; !ok {
+			seen[idx] = c
+		}
+		if len(seen) == 2 {
+			break
+		}
+	}
+	if len(seen) < 2 {
+		t.Skip("could not find two (scope, identity) pairs that hash to different app indices")
+	}
+
+	p0, p1 := seen[0], seen[1]
+
+	atr0, _, err := mm.Get(ctx, "my-org", p0.scope, p0.identity)
+	if err != nil {
+		t.Fatalf("Get(%q, %q) = %v", p0.scope, p0.identity, err)
+	}
+	atr1, _, err := mm.Get(ctx, "my-org", p1.scope, p1.identity)
+	if err != nil {
+		t.Fatalf("Get(%q, %q) = %v", p1.scope, p1.identity, err)
+	}
+
+	if atr0.AppID() == atr1.AppID() {
+		t.Errorf("expected different app IDs for (%q,%q) and (%q,%q), both got %d",
+			p0.scope, p0.identity, p1.scope, p1.identity, atr0.AppID())
+	}
+}
+
+func TestMultiManagerFallback(t *testing.T) {
+	ctx := context.Background()
+	installID := int64(42)
+	primaryAppID := int64(12345678)
 	secondaryAppID := int64(87654321)
 
-	// The fallback app (first) is installed in "my-org".
-	fallbackATR := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// The primary app is installed in "my-org".
+	primaryATR := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
@@ -211,8 +296,8 @@ func TestRoundRobinFallback(t *testing.T) {
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
 		}
-	}), fallbackAppID)
-	fallbackMgr, err := New(fallbackATR)
+	}), primaryAppID)
+	primaryMgr, err := New(primaryATR)
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
@@ -236,26 +321,26 @@ func TestRoundRobinFallback(t *testing.T) {
 		t.Fatalf("New() = %v", err)
 	}
 
-	rr := NewRoundRobin([]Manager{fallbackMgr, secondaryMgr})
+	mm := NewMultiManager([]Manager{primaryMgr, secondaryMgr})
 
-	// Call Get twice so both managers are exercised by round-robin.
+	// Regardless of which app the hash selects, both calls must resolve since
+	// only the primary app is installed for "my-org" — the other falls back.
 	for i := range 2 {
-		atr, gotID, err := rr.Get(ctx, "my-org")
+		atr, gotID, err := mm.Get(ctx, "my-org", "my-org/repo", "my-identity")
 		if err != nil {
 			t.Fatalf("Get() call %d = %v", i, err)
 		}
 		if gotID != installID {
 			t.Errorf("call %d: install ID: got = %d, wanted = %d", i, gotID, installID)
 		}
-		// Both calls should resolve via the fallback app since the secondary
-		// app is not installed for "my-org".
-		if gotAppID := atr.AppID(); gotAppID != fallbackAppID {
-			t.Errorf("call %d: app ID: got = %d, wanted fallback = %d", i, gotAppID, fallbackAppID)
+		// Must resolve via the primary app since the secondary is not installed.
+		if gotAppID := atr.AppID(); gotAppID != primaryAppID {
+			t.Errorf("call %d: app ID: got = %d, wanted primary = %d", i, gotAppID, primaryAppID)
 		}
 	}
 }
 
-func TestRoundRobinFallbackNotInstalled(t *testing.T) {
+func TestMultiManagerFallbackNotInstalled(t *testing.T) {
 	ctx := context.Background()
 	fallbackAppID := int64(12345678)
 	secondaryAppID := int64(87654321)
@@ -285,11 +370,11 @@ func TestRoundRobinFallbackNotInstalled(t *testing.T) {
 		managers = append(managers, m)
 	}
 
-	rr := NewRoundRobin(managers)
+	mm := NewMultiManager(managers)
 
-	// Both managers should return NotFound since neither is installed for "missing-org".
+	// All managers should return NotFound since neither is installed for "missing-org".
 	for i := range 2 {
-		_, _, err := rr.Get(ctx, "missing-org")
+		_, _, err := mm.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
 		if err == nil {
 			t.Fatalf("Get() call %d: expected error, got nil", i)
 		}
