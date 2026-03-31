@@ -1,7 +1,7 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: terraform-lint-validate
+name: terraform-validate
 
 on:
   push:
@@ -49,8 +49,6 @@ jobs:
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
-
-      - run: terraform fmt -check -recursive
 
       - run: cp "$GITHUB_WORKSPACE/.github/testdata/backend_override.tf" "$GITHUB_WORKSPACE/${{ matrix.terraform-dir }}"
       - working-directory: ${{ matrix.terraform-dir }}
