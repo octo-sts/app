@@ -64,6 +64,18 @@ repos:
 
   - repo: local
     hooks:
+      - id: boilerplate-check
+        name: Boilerplate Check
+        entry: hack/boilerplate-check.sh
+        language: script
+        files: \.(go|sh|yaml)$
+        exclude: |
+          (?x)(
+            \.golangci\.yml$|
+            (vendor|third_party|\.terraform|testdata)/
+          )
+        pass_filenames: true
+
       - id: woke
         name: woke
         entry: 'bash -c ''if ! command -v woke &>/dev/null; then echo "woke not installed, skipping (install: go install github.com/get-woke/woke@latest)"; exit 0; fi; woke --exit-1-on-failure "$@"'' --'
