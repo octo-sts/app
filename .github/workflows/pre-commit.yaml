@@ -61,7 +61,10 @@ jobs:
         with:
           python-version: '3.x'
 
+      - name: Install pre-commit # Manually install as the precommit action doesn't pin deps.
+        run: pip install pre-commit
+
       - name: Run pre-commit
-        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+        run: pre-commit run --all-files
         env:
           SKIP: no-commit-to-branch
