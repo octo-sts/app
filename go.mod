@@ -21,7 +21,7 @@ require (
 	github.com/invopop/jsonschema v0.13.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.36.0
-	google.golang.org/api v0.273.0
+	google.golang.org/api v0.273.1
 	google.golang.org/grpc v1.79.3
 	k8s.io/apimachinery v0.35.3
 	sigs.k8s.io/yaml v1.6.0
@@ -67,7 +67,7 @@ require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/go-querystring v1.2.0 // indirect
