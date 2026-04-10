@@ -18,7 +18,7 @@
 # vendor/
 
 # ai
-**/.clause/*.local.*
+**/.claude/*.local.*
 
 # Go workspace file
 go.work

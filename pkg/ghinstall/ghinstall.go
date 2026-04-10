@@ -104,7 +104,7 @@ func NewRoundRobin(managers []Manager) Manager {
 }
 
 func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
-	idx := int(rr.counter.Add(1) % uint64(len(rr.managers)))
+	idx := rr.counter.Add(1) % uint64(len(rr.managers))
 
 	atr, id, err := rr.managers[idx].Get(ctx, owner, scope, identity)
 	if err == nil {
@@ -116,7 +116,7 @@ func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*
 	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 		clog.InfoContextf(ctx, "app not installed for %q, trying other apps", owner)
 		for i, m := range rr.managers {
-			if i == idx {
+			if uint64(i) == idx {
 				continue
 			}
 			atr, id, err = m.Get(ctx, owner, scope, identity)
