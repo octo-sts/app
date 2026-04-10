@@ -383,6 +383,77 @@ func TestExchangeRateLimit(t *testing.T) {
 	}
 }
 
+func TestManagerFor(t *testing.T) {
+	im := &fakeInstallMgr{}
+	rrm := &fakeInstallMgr{}
+	s := &sts{im: im, rrm: rrm}
+
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "ci"}
+
+	t.Run("cache miss uses consistent hashing", func(t *testing.T) {
+		trustPolicies.Remove(key)
+		if got := s.managerFor(key); got != im {
+			t.Error("expected consistent-hash manager on cache miss, got round-robin")
+		}
+	})
+
+	t.Run("cached policy with checks write uses consistent hashing", func(t *testing.T) {
+		trustPolicies.Add(key, `
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:org/repo:.*"
+permissions:
+  checks: write
+`)
+		if got := s.managerFor(key); got != im {
+			t.Error("expected consistent-hash manager for checks:write policy, got round-robin")
+		}
+	})
+
+	t.Run("cached policy without checks write uses round-robin", func(t *testing.T) {
+		trustPolicies.Add(key, `
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:org/repo:.*"
+permissions:
+  contents: read
+`)
+		if got := s.managerFor(key); got != rrm {
+			t.Error("expected round-robin manager for non-checks:write policy, got consistent-hash")
+		}
+	})
+
+	t.Run("cached policy with checks read uses round-robin", func(t *testing.T) {
+		trustPolicies.Add(key, `
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:org/repo:.*"
+permissions:
+  checks: read
+`)
+		if got := s.managerFor(key); got != rrm {
+			t.Error("expected round-robin manager for checks:read policy, got consistent-hash")
+		}
+	})
+
+	t.Run("malformed cached policy uses consistent hashing", func(t *testing.T) {
+		trustPolicies.Add(key, `{not valid yaml: [`)
+		if got := s.managerFor(key); got != im {
+			t.Error("expected consistent-hash manager on parse error, got round-robin")
+		}
+	})
+
+	t.Run("nil rrm always uses consistent hashing", func(t *testing.T) {
+		sNoRRM := &sts{im: im}
+		trustPolicies.Add(key, `
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:org/repo:.*"
+permissions:
+  contents: read
+`)
+		if got := sNoRRM.managerFor(key); got != im {
+			t.Error("expected consistent-hash manager when rrm is nil, got something else")
+		}
+	})
+}
+
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 

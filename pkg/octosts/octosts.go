@@ -40,9 +40,10 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(im ghinstall.Manager, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		im:       im,
+		rrm:      rrm,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
@@ -54,7 +55,14 @@ var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, t
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	im       ghinstall.Manager
+	// im is the consistent-hash manager used when the trust policy requires
+	// checks:write. Consistent hashing ensures the same GitHub App always
+	// handles a given (scope, identity), which is required because GitHub
+	// check runs can only be updated by the app that created them.
+	im ghinstall.Manager
+	// rrm is the round-robin manager used when the trust policy does NOT
+	// require checks:write. If nil, im is used for all requests.
+	rrm      ghinstall.Manager
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
@@ -224,6 +232,39 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}, nil
 }
 
+// managerFor returns the appropriate Manager for the given trust policy key.
+//
+// If the trust policy is already cached and does NOT require checks:write,
+// round-robin is used to distribute load across apps. Otherwise consistent
+// hashing is used, which guarantees that the same (scope, identity) always
+// routes to the same GitHub App — a requirement for updating check runs.
+//
+// On a cache miss we cannot know the required permissions yet, so we default
+// to consistent hashing (the safe choice: it is always correct for
+// checks:write policies and merely suboptimal for others on the first call).
+func (s *sts) managerFor(key cacheTrustPolicyKey) ghinstall.Manager {
+	if s.rrm == nil {
+		return s.im
+	}
+	raw, ok := trustPolicies.Get(key)
+	if !ok {
+		return s.im
+	}
+	var tp OrgTrustPolicy
+	if err := yaml.UnmarshalStrict([]byte(raw), &tp); err != nil {
+		return s.im
+	}
+	if hasChecksWrite(tp.Permissions) {
+		return s.im
+	}
+	return s.rrm
+}
+
+// hasChecksWrite reports whether the given permissions include checks:write.
+func hasChecksWrite(perms github.InstallationPermissions) bool {
+	return perms.Checks != nil && *perms.Checks == "write"
+}
+
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
@@ -242,15 +283,19 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		tp = otp
 	}
 
-	atr, id, err := s.im.Get(ctx, owner, scope, identity)
-	if err != nil {
-		return nil, 0, nil, err
-	}
-
 	trustPolicyKey := cacheTrustPolicyKey{
 		owner:    owner,
 		repo:     repo,
 		identity: identity,
+	}
+
+	// Choose routing strategy before fetching the installation. managerFor
+	// peeks the trust policy cache so that, after the first call, policies
+	// without checks:write use round-robin instead of consistent hashing.
+	im := s.managerFor(trustPolicyKey)
+	atr, id, err := im.Get(ctx, owner, scope, identity)
+	if err != nil {
+		return nil, 0, nil, err
 	}
 
 	if err := s.lookupTrustPolicy(ctx, atr, id, trustPolicyKey, tp); err != nil {

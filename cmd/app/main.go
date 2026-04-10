@@ -81,6 +81,7 @@ func main() {
 		log.Panic("no apps with valid KMS keys configured")
 	}
 	im := ghinstall.NewMultiManager(managers)
+	rrm := ghinstall.NewRoundRobin(managers)
 
 	d := duplex.New(
 		baseCfg.Port,
@@ -98,7 +99,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, rrm, ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

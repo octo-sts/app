@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
@@ -78,13 +79,58 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
-type multiManager struct {
+// roundRobin distributes requests across managers using an atomic counter.
+// It does not use scope or identity for routing, so different callers with
+// the same (scope, identity) may land on different apps. Use this only when
+// the caller's trust policy does not require checks:write — i.e., when there
+// is no GitHub check-run ownership constraint.
+type roundRobin struct {
 	managers []Manager
+	counter  atomic.Uint64
 }
 
-// Deprecated: use NewMultiManager.
+// NewRoundRobin creates a Manager that distributes requests across the given
+// managers using an atomic round-robin counter.
+//
+// Use this when the trust policy does NOT require checks:write. For policies
+// that do require checks:write, use NewMultiManager (consistent hashing) so
+// that the same GitHub App always handles a given (scope, identity) and can
+// therefore update check runs it previously created.
 func NewRoundRobin(managers []Manager) Manager {
-	return NewMultiManager(managers)
+	if len(managers) == 0 {
+		panic("ghinstall: NewRoundRobin requires at least one manager")
+	}
+	return &roundRobin{managers: managers}
+}
+
+func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
+	idx := int(rr.counter.Add(1) % uint64(len(rr.managers)))
+
+	atr, id, err := rr.managers[idx].Get(ctx, owner, scope, identity)
+	if err == nil {
+		return atr, id, nil
+	}
+
+	// If the selected app is not installed for this owner, try the remaining
+	// apps in order so that installation gaps are handled gracefully.
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		clog.InfoContextf(ctx, "app not installed for %q, trying other apps", owner)
+		for i, m := range rr.managers {
+			if i == idx {
+				continue
+			}
+			atr, id, err = m.Get(ctx, owner, scope, identity)
+			if err == nil {
+				return atr, id, nil
+			}
+		}
+	}
+
+	return nil, 0, err
+}
+
+type multiManager struct {
+	managers []Manager
 }
 
 // NewMultiManager creates a Manager that distributes requests across the given
@@ -99,6 +145,9 @@ func NewRoundRobin(managers []Manager) Manager {
 // apps. If the selected app is not installed for an owner, the remaining apps
 // are tried in order.
 func NewMultiManager(managers []Manager) Manager {
+	if len(managers) == 0 {
+		panic("ghinstall: NewMultiManager requires at least one manager")
+	}
 	return &multiManager{managers: managers}
 }
 
