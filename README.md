@@ -180,9 +180,9 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 - **API Insights**: `Read-only`
 - **Administration**: `Read/Write`
 - **Blocking users**: `No Access`
-- **Custom organizations roles**: `No Access`
+- **Custom organizations roles**: `Read and write`
 - **Custom properties**: `No Access`
-- **Custom repository roles**: `No Access`
+- **Custom repository roles**: `Read and write`
 - **Events**: `Read-only`
 - **GitHub Copilot Business**: `No Access`
 - **Knowledge bases**: `No Access`
