@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -137,7 +138,9 @@ func TestExchange(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im: &fakeInstallMgr{atr: atr},
+		im:       &fakeInstallMgr{atr: atr},
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
 	}
 	for _, tc := range []struct {
 		name string
@@ -223,7 +226,9 @@ func TestExchangeValidation(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im: &fakeInstallMgr{atr: atr},
+		im:       &fakeInstallMgr{atr: atr},
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
 	}
 
 	tests := []struct {
@@ -363,7 +368,9 @@ func TestExchangeRateLimit(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 			s := &sts{
-				im: &fakeInstallMgr{atr: atr},
+				im:       &fakeInstallMgr{atr: atr},
+				rrm:      &fakeInstallMgr{atr: atr},
+				appCount: 1,
 			}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
@@ -439,19 +446,271 @@ permissions:
 			t.Error("expected consistent-hash manager on parse error, got round-robin")
 		}
 	})
+}
 
-	t.Run("nil rrm always uses consistent hashing", func(t *testing.T) {
-		sNoRRM := &sts{im: im}
-		trustPolicies.Add(key, `
-issuer: https://token.actions.githubusercontent.com
-subject_pattern: "repo:org/repo:.*"
-permissions:
-  contents: read
-`)
-		if got := sNoRRM.managerFor(key); got != im {
-			t.Error("expected consistent-hash manager when rrm is nil, got something else")
-		}
+// failInstallMgr is a Manager whose Get always returns an error.
+type failInstallMgr struct{}
+
+func (f *failInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	return nil, 0, fmt.Errorf("not installed")
+}
+
+var _ ghinstall.Manager = (*failInstallMgr)(nil)
+
+// sequentialInstallMgr returns transports in order on successive Get calls.
+// Used to test retry behaviour where the first app is rate-limited and the
+// second succeeds.
+type sequentialInstallMgr struct {
+	transports []*ghinstallation.AppsTransport
+	idx        atomic.Int32
+}
+
+func (s *sequentialInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	i := int(s.idx.Add(1) - 1)
+	if i >= len(s.transports) {
+		return nil, 0, fmt.Errorf("no more transports")
+	}
+	return s.transports[i], 1234, nil
+}
+
+var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
+
+// newFakeGitHubNoContents returns a fake GitHub server that handles
+// installations and access_tokens but returns 404 for all content requests.
+// Used to prove that a given transport was NOT used for the policy read.
+func newFakeGitHubNoContents() *fakeGitHub {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      github.Ptr(int64(1234)),
+			Account: &github.User{Login: github.Ptr("org")},
+		}})
 	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}
+}
+
+// TestPolicyReadUsesRoundRobin verifies that trust policy reads use the rrm
+// transport, not the im transport. im points to a server with no contents
+// handler; rrm points to a server with the policy file. Exchange succeeds
+// only if rrm was used for the read.
+func TestPolicyReadUsesRoundRobin(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	ctx := context.Background()
+	imAtr := newGitHubClient(t, newFakeGitHubNoContents())
+	rrmAtr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		im:       &fakeInstallMgr{atr: imAtr},
+		rrm:      &fakeInstallMgr{atr: rrmAtr},
+		appCount: 2,
+	}
+	// Trust policy lives on the rrm server. If im were used for the read it
+	// would 404 and the exchange would fail.
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v — policy read did not use rrm transport", err)
+	}
+}
+
+// TestPolicyReadFallsBackToIM verifies that when rrm.Get fails the policy
+// read falls back to the im transport so that single-app deployments and
+// transient installation-lookup failures are handled gracefully.
+func TestPolicyReadFallsBackToIM(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	ctx := context.Background()
+	imAtr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		im:       &fakeInstallMgr{atr: imAtr},
+		rrm:      &failInstallMgr{},
+		appCount: 1,
+	}
+	// rrm.Get() always errors; exchange must still succeed via im fallback.
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v — fallback to im transport did not work", err)
+	}
+}
+
+// TestPolicyReadRetriesOnRateLimit verifies that when the first rrm app is
+// rate-limited, the retry loop picks the next app and the exchange succeeds.
+func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	ctx := context.Background()
+	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	workingAtr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		im: &fakeInstallMgr{atr: workingAtr},
+		rrm: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{rateLimitedAtr, workingAtr},
+		},
+		appCount: 2,
+	}
+	// First rrm.Get returns the rate-limited transport; retry picks the
+	// working transport. Exchange should succeed.
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v — rate-limit retry did not recover", err)
+	}
+}
+
+// TestPolicyReadAllRateLimitedReturnsError verifies that when every app is
+// rate-limited the error is surfaced to the caller (not retried indefinitely).
+func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	ctx := context.Background()
+	rl1 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	rl2 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusTooManyRequests))
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		im: &fakeInstallMgr{atr: rl1},
+		rrm: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{rl1, rl2},
+		},
+		appCount: 2,
+	}
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil — all apps are rate-limited")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %T", err)
+	}
+	if st.Code() != codes.ResourceExhausted {
+		t.Errorf("expected code ResourceExhausted, got %v", st.Code())
+	}
 }
 
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {

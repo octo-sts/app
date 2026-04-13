@@ -40,10 +40,11 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		im:       im,
 		rrm:      rrm,
+		appCount: appCount,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
@@ -60,9 +61,12 @@ type sts struct {
 	// handles a given (scope, identity), which is required because GitHub
 	// check runs can only be updated by the app that created them.
 	im ghinstall.Manager
-	// rrm is the round-robin manager used when the trust policy does NOT
-	// require checks:write. If nil, im is used for all requests.
-	rrm      ghinstall.Manager
+	// rrm is the round-robin manager used for all trust policy reads and for
+	// token exchanges when the trust policy does NOT require checks:write.
+	rrm ghinstall.Manager
+	// appCount is the number of underlying GitHub App managers. Used to cap
+	// rate-limit retries so that each app is tried at most once.
+	appCount int
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
@@ -243,9 +247,6 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 // to consistent hashing (the safe choice: it is always correct for
 // checks:write policies and merely suboptimal for others on the first call).
 func (s *sts) managerFor(key cacheTrustPolicyKey) ghinstall.Manager {
-	if s.rrm == nil {
-		return s.im
-	}
 	raw, ok := trustPolicies.Get(key)
 	if !ok {
 		return s.im
@@ -289,19 +290,59 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		identity: identity,
 	}
 
-	// Choose routing strategy before fetching the installation. managerFor
-	// peeks the trust policy cache so that, after the first call, policies
-	// without checks:write use round-robin instead of consistent hashing.
+	// Choose exchange routing strategy. managerFor peeks the trust policy
+	// cache so that, after the first call, policies without checks:write use
+	// round-robin instead of consistent hashing for the exchange.
 	im := s.managerFor(trustPolicyKey)
 	atr, id, err := im.Get(ctx, owner, scope, identity)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
-	if err := s.lookupTrustPolicy(ctx, atr, id, trustPolicyKey, tp); err != nil {
+	// Policy reads always use round-robin to spread GitHub API calls across
+	// apps. Any installed app can read the policy file — there is no
+	// state dependency between which app reads the policy and which app
+	// performs the exchange. The exchange transport (atr, id) is returned
+	// to the caller unchanged.
+	readAtr, readId := atr, id
+	if rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity); rErr == nil {
+		readAtr, readId = rAtr, rId
+	}
+
+	err = s.lookupTrustPolicy(ctx, readAtr, readId, trustPolicyKey, tp)
+
+	// If the policy read was rate-limited and there are multiple apps,
+	// retry with the remaining apps in the round-robin rotation.
+	// Cap retries at maxRetry to avoid hammering all apps on a broad outage.
+	if isRateLimit(err) && s.appCount > 1 {
+		retries := min(maxRetry, s.appCount-1)
+		for i := 0; i < retries; i++ {
+			clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
+			rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity)
+			if rErr != nil {
+				continue
+			}
+			err = s.lookupTrustPolicy(ctx, rAtr, rId, trustPolicyKey, tp)
+			if !isRateLimit(err) {
+				break
+			}
+		}
+	}
+
+	if err != nil {
 		return atr, id, nil, err
 	}
 	return atr, id, otp, nil
+}
+
+// isRateLimit reports whether err is a gRPC ResourceExhausted error,
+// indicating a GitHub API rate limit (403 secondary or 429 primary).
+func isRateLimit(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.ResourceExhausted
 }
 
 type trustPolicy interface {
