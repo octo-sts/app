@@ -31,6 +31,7 @@ import (
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
 	"github.com/octo-sts/app/pkg/ghinstall"
+	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -198,6 +199,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		Repositories: e.TrustPolicy.Repositories,
 		Permissions:  &e.TrustPolicy.Permissions,
 	}
+	// Enrich context so the httpmetrics transport labels the token exchange
+	// rate limit metrics with the specific installation consuming quota.
+	ctx = ghtransport.EnrichContext(ctx, base.AppID(), e.InstallationID)
 	token, err := atr.Token(ctx)
 	if err != nil {
 		var herr *ghinstallation.HTTPError
@@ -350,6 +354,10 @@ type trustPolicy interface {
 }
 
 func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+	// Enrich context with app/installation IDs so the httpmetrics transport
+	// can label rate limit metrics with the specific installation consuming quota.
+	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
+
 	raw := ""
 	// check the LRU cache for the TrustPolicy
 	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
