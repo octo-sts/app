@@ -311,6 +311,65 @@ Only mappings unused for the TTL duration are automatically cleaned up.
 Single-app deployments (`GITHUB_APP_IDS` has one entry) do not need sticky
 routing and can ignore these settings.
 
+#### Multi-Org Routing (`APP_CONFIG_FILE`)
+
+By default the Apps in `GITHUB_APP_IDS` / `KMS_KEYS` form a single flat pool
+that serves every org. To assign dedicated Apps to specific GitHub
+organizations — e.g. to use different credential types per org — point
+`APP_CONFIG_FILE` at a YAML file that maps orgs to their App pools:
+
+```yaml
+orgs:
+  # A dedicated pool for org-a (two Apps, KMS credentials).
+  - name: org-a
+    apps:
+      - app_id: 111
+        kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
+      - app_id: 112
+        kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/2
+
+  # A dedicated pool for org-b using an injected PEM instead of KMS.
+  - name: org-b
+    apps:
+      - app_id: 222
+        private_key: ${ORG_B_APP_PEM}
+
+  # Optional catch-all: "*" serves any org not listed above.
+  - name: "*"
+    apps:
+      - app_id: 999
+        private_key_file: /etc/octo-sts/keys/fallback.pem
+```
+
+Each app sets **exactly one** credential source:
+
+| Field | Description |
+|-------|-------------|
+| `kms_key` | KMS key identifier, interpreted per `KMS_PROVIDER` (default `gcp`; also `aws`, `akv`) |
+| `private_key` | An inline PEM |
+| `private_key_file` | Path to a PEM file |
+
+String values support `${VAR}` expansion from the process environment. Only
+the braced form expands — bare `$VAR` references and literal `$` characters
+pass through unchanged (so PEMs and values containing `$` are safe).
+
+Notes:
+
+- When `APP_CONFIG_FILE` is set, the legacy `GITHUB_APP_IDS` / `KMS_KEYS` env
+  vars are ignored.
+- A request for an org with no matching pool and no `"*"` fallback is rejected
+  (fail closed), not served by an arbitrary App.
+- With `APP_CONFIG_FILE` unset, behavior is unchanged (a single flat pool
+  serving every org).
+- Each org's pool does its own capacity-aware routing, and the sticky store
+  settings above apply across all pools — configure the sticky store if any
+  org has more than one App and uses `checks: write` policies.
+- If you deploy with the bundled terraform module, set `org_name` on each
+  entry in `github_apps` and the module generates this config for you. Setting
+  `org_name` on any app requires it on all of them (use `"*"` for a fallback
+  pool), and every app needs a KMS key (`key_version > 0`); both are enforced
+  at `terraform plan` time.
+
 ### GitHub Enterprise Server (GHES)
 
 OctoSTS can be deployed against a GitHub Enterprise Server instance by setting

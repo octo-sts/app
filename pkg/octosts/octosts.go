@@ -46,13 +46,13 @@ const (
 )
 
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
-// GitHub installation tokens. rrm handles installation selection; sticky (may
-// be nil) persists checks:write routing for check-run ownership.
-func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
+// GitHub installation tokens. router selects the per-org app pool; sticky (may
+// be nil) persists checks:write routing for check-run ownership across all
+// pools (installation IDs are globally unique within GitHub).
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		rrm:           rrm,
+		router:        router,
 		sticky:        sticky,
-		appCount:      appCount,
 		ceclient:      ceclient,
 		domain:        domain,
 		metrics:       metrics,
@@ -67,9 +67,8 @@ var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, n
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	rrm           ghinstall.Manager
+	router        *ghinstall.OrgRouter
 	sticky        stickystore.Store
-	appCount      int
 	ceclient      cloudevents.Client
 	domain        string
 	metrics       bool
@@ -86,6 +85,17 @@ func (s *sts) policyRepo() string {
 		return s.orgPolicyRepo
 	}
 	return ".github"
+}
+
+// managerFor returns the installation manager for owner's app pool. The
+// error, when non-nil, is a terminal gRPC status (NotFound for an org with
+// no configured apps).
+func (s *sts) managerFor(owner string) (ghinstall.Manager, error) {
+	pool, err := s.router.GetPool(owner)
+	if err != nil {
+		return nil, err
+	}
+	return pool.M, nil
 }
 
 type cacheTrustPolicyKey struct {
@@ -265,21 +275,21 @@ func hasChecksWrite(perms github.InstallationPermissions) bool {
 // For checks:write policies it returns the persisted sticky installation,
 // or assigns a new one via capacity-aware round-robin and persists it.
 // For all other policies it returns the installation that read the policy.
-func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity, subject string, perms github.InstallationPermissions, readAtr *ghinstallation.AppsTransport, readID int64) (*ghinstallation.AppsTransport, int64, error) {
+func (s *sts) getExchangeInstall(ctx context.Context, pool *ghinstall.OrgPool, owner, scope, identity, subject string, perms github.InstallationPermissions, readAtr *ghinstallation.AppsTransport, readID int64) (*ghinstallation.AppsTransport, int64, error) {
 	if s.sticky == nil || !hasChecksWrite(perms) {
 		return readAtr, readID, nil
 	}
 
 	key := routekey.Key(scope, identity, subject)
 	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
-		atr, id, err := s.rrm.GetByInstallation(ctx, owner, cachedID)
+		atr, id, err := pool.M.GetByInstallation(ctx, owner, cachedID)
 		if err == nil {
 			return atr, id, nil
 		}
 		clog.FromContext(ctx).Infof("sticky install %d no longer valid for %s, reassigning", cachedID, owner)
 	}
 
-	atr, id, err := s.rrm.Get(ctx, owner, scope, identity)
+	atr, id, err := pool.M.Get(ctx, owner, scope, identity)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -319,6 +329,12 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		tp = otp
 	}
 
+	// Look up the org's app pool.
+	pool, err := s.router.GetPool(owner)
+	if err != nil {
+		return nil, 0, nil, nil, err
+	}
+
 	tpKey := cacheTrustPolicyKey{owner: owner, repo: repo, identity: identity}
 
 	if cached, ok := trustPolicies.Get(tpKey); ok && cached == negativeCacheConst {
@@ -326,8 +342,8 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 
-	// Read the trust policy using any available installation.
-	readAtr, readID, err := s.rrm.Get(ctx, owner, scope, identity)
+	// Read the trust policy using any available installation in this org's pool.
+	readAtr, readID, err := pool.M.Get(ctx, owner, scope, identity)
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}
@@ -335,7 +351,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	// Enforce the organization trusted-issuer allowlist before spending a policy
 	// read or a second token mint on an issuer we may reject.
 	//
-	// This runs AFTER s.rrm.Get even though it ignores its return values: Get's
+	// This runs AFTER pool.M.Get even though it ignores its return values: Get's
 	// negative install cache rejects an owner the App is not installed on before
 	// we do any allowlist work, which bounds the API amplification an arbitrary
 	// caller-supplied scope can drive.
@@ -344,13 +360,13 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, decision, err
 	}
 
-	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, readAtr, readID, owner, scope, identity, tpKey, tp)
+	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, pool, readAtr, readID, owner, scope, identity, tpKey, tp)
 	if err != nil {
 		return nil, 0, nil, decision, err
 	}
 
 	// Now that we know the permissions, pick the exchange installation.
-	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, subject, otp.Permissions, readAtr, readID)
+	atr, id, err := s.getExchangeInstall(ctx, pool, owner, scope, identity, subject, otp.Permissions, readAtr, readID)
 	if err != nil {
 		return nil, 0, nil, decision, err
 	}
@@ -359,17 +375,17 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 }
 
 // lookupTrustPolicyWithRetry fetches the trust policy, retrying with
-// different installations if the first attempt is rate-limited.
-func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
+// different installations from the pool if the first attempt is rate-limited.
+func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.OrgPool, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
 	err := s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
-	if !isRateLimit(err) || s.appCount <= 1 {
+	if !isRateLimit(err) || pool.AppCount <= 1 {
 		return atr, id, err
 	}
 
-	retries := min(maxRetry, s.appCount-1)
+	retries := min(maxRetry, pool.AppCount-1)
 	for i := range retries {
 		clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
-		rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity)
+		rAtr, rId, rErr := pool.M.Get(ctx, owner, scope, identity)
 		if rErr != nil {
 			continue
 		}

@@ -170,6 +170,38 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mux.ServeHTTP(w, r)
 }
 
+// newFakeGitHubNoContents returns a fake GitHub server that handles
+// installations and access_tokens but returns 404 for all content requests.
+// Used to isolate orgs in the multi-org routing tests.
+func newFakeGitHubNoContents() *fakeGitHub {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      github.Ptr(int64(1234)),
+			Account: &github.User{Login: github.Ptr("other-org")},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}
+}
+
 func TestExchange(t *testing.T) {
 	ctx := context.Background()
 	atr := newAppsTransport(t, newFakeGitHub())
@@ -201,11 +233,12 @@ func TestExchange(t *testing.T) {
 	})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	sts := &sts{
-		rrm:           &fakeInstallMgr{atr: atr},
-		appCount:      1,
-		orgPolicyRepo: ".github",
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: atr},
+		AppCount: 1,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	sts := &sts{router: router}
 	for _, tc := range []struct {
 		name string
 		req  *v1.ExchangeRequest
@@ -296,11 +329,12 @@ func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
 	})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	sts := &sts{
-		rrm:           &fakeInstallMgr{atr: atr},
-		appCount:      1,
-		orgPolicyRepo: "my-policies",
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: atr},
+		AppCount: 1,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	sts := &sts{router: router, orgPolicyRepo: "my-policies"}
 
 	tok, err := sts.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
@@ -361,11 +395,12 @@ func TestExchangeValidation(t *testing.T) {
 	})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	sts := &sts{
-		rrm:           &fakeInstallMgr{atr: atr},
-		appCount:      1,
-		orgPolicyRepo: ".github",
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: atr},
+		AppCount: 1,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	sts := &sts{router: router}
 
 	tests := []struct {
 		name string
@@ -527,11 +562,12 @@ func TestExchangeRateLimit(t *testing.T) {
 			})
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-			s := &sts{
-				rrm:           &fakeInstallMgr{atr: atr},
-				appCount:      1,
-				orgPolicyRepo: ".github",
+			pool := &ghinstall.OrgPool{
+				M:        &fakeInstallMgr{atr: atr},
+				AppCount: 1,
 			}
+			router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+			s := &sts{router: router}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
 				Scope:    "org/repo",
@@ -647,10 +683,12 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	s := &sts{
-		rrm:      &fakeInstallMgr{atr: rrmAtr},
-		appCount: 2,
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: rrmAtr},
+		AppCount: 2,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
 	// Trust policy lives on the rrm server.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
@@ -704,12 +742,14 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	s := &sts{
-		rrm: &sequentialInstallMgr{
+	pool := &ghinstall.OrgPool{
+		M: &sequentialInstallMgr{
 			transports: []*ghinstallation.AppsTransport{rateLimitedAtr, workingAtr},
 		},
-		appCount: 2,
+		AppCount: 2,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
 	// First rrm.Get returns the rate-limited transport; retry picks the
 	// working transport. Exchange should succeed.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
@@ -764,12 +804,14 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
-	s := &sts{
-		rrm: &sequentialInstallMgr{
+	pool := &ghinstall.OrgPool{
+		M: &sequentialInstallMgr{
 			transports: []*ghinstallation.AppsTransport{rl1, rl2},
 		},
-		appCount: 2,
+		AppCount: 2,
 	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
 		Scope:    "org/repo",
@@ -835,10 +877,9 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	gh, counter := newFakeGitHubNotFoundCounter()
 	atr := newAppsTransport(t, gh)
 
-	s := &sts{
-		rrm:      &fakeInstallMgr{atr: atr},
-		appCount: 1,
-	}
+	// lookupTrustPolicy doesn't consult the router, but populate it for safety.
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
+	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
 	otp := &OrgTrustPolicy{}
 	otp.Repositories = []string{"repo"}
@@ -875,10 +916,8 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	trustPolicies.Add(key, negativeCacheConst)
 	t.Cleanup(func() { trustPolicies.Remove(key) })
 
-	s := &sts{
-		rrm:      &failInstallMgr{},
-		appCount: 1,
-	}
+	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
+	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
 	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer)
 	if err == nil {
@@ -903,10 +942,11 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	workingGH := newFakeGitHub()
 	workingAtr := newAppsTransport(t, workingGH)
 
-	s := &sts{
-		rrm:      &fakeInstallMgr{atr: workingAtr},
-		appCount: 1,
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: workingAtr},
+		AppCount: 1,
 	}
+	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
 	// First call: populates both caches.
 	otp := &OrgTrustPolicy{}
@@ -926,7 +966,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 
 	// Switch to a rate-limited GitHub backend.
 	rateLimitedAtr := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusForbidden))
-	s.rrm = &fakeInstallMgr{atr: rateLimitedAtr}
+	pool.M = &fakeInstallMgr{atr: rateLimitedAtr}
 
 	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
 	otp2 := &OrgTrustPolicy{}
@@ -940,6 +980,130 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	// exchanges during the rate-limit window skip the GitHub round-trip.
 	if _, ok := trustPolicies.Get(key); !ok {
 		t.Error("primary cache should be seeded after serving stale on rate limit")
+	}
+}
+
+// TestExchangeOrgNotConfigured verifies that a request for an org with no
+// configured apps returns NotFound.
+func TestExchangeOrgNotConfigured(t *testing.T) {
+	ctx := context.Background()
+	atr := newAppsTransport(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	// Only "org" is configured — "other-org" is not.
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: atr},
+		AppCount: 1,
+	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
+
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "other-org/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error for unconfigured org")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %T", err)
+	}
+	if st.Code() != codes.NotFound {
+		t.Errorf("expected code NotFound, got %v", st.Code())
+	}
+}
+
+// TestExchangeOrgIsolation verifies that requests for different orgs route
+// to their respective app pools.
+func TestExchangeOrgIsolation(t *testing.T) {
+	ctx := context.Background()
+
+	// org1 points to a working server, org2 points to one with no contents.
+	org1Atr := newAppsTransport(t, newFakeGitHub())
+	org2Atr := newAppsTransport(t, newFakeGitHubNoContents())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool1 := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: org1Atr},
+		AppCount: 1,
+	}
+	pool2 := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: org2Atr},
+		AppCount: 1,
+	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
+		"org":       pool1,
+		"other-org": pool2,
+	})
+	s := &sts{router: router}
+
+	// org1 should succeed (has trust policy files).
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange for org failed: %v", err)
+	}
+
+	// org2 should fail because its server has no contents.
+	key2 := cacheTrustPolicyKey{owner: "other-org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key2)
+	t.Cleanup(func() { trustPolicies.Remove(key2) })
+
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "other-org/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error for other-org (no contents), got nil")
 	}
 }
 

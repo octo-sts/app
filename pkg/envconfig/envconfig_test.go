@@ -245,6 +245,37 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			// BaseConfig only records the path; the file is read later by
+			// pkg/appconfig, so it doesn't need to exist here.
+			name: "APP_CONFIG_FILE set bypasses GITHUB_APP_IDS requirement",
+			envVars: map[string]string{
+				"PORT":            "8080",
+				"APP_CONFIG_FILE": "/etc/octo-sts/config.yaml",
+			},
+			wantErr: false,
+		},
+		{
+			name: "GITHUB_APP_IDS required when APP_CONFIG_FILE unset",
+			envVars: map[string]string{
+				"PORT": "8080",
+			},
+			wantErr: true,
+		},
+		{
+			// Legacy credential validation is skipped by design when the
+			// YAML config is in use: credentials come from the config file,
+			// so conflicting legacy env vars are ignored rather than fatal.
+			name: "APP_CONFIG_FILE skips legacy credential validation",
+			envVars: map[string]string{
+				"PORT":                        "8080",
+				"APP_CONFIG_FILE":             "/etc/octo-sts/config.yaml",
+				"GITHUB_APP_IDS":              "12345678,87654321",
+				"KMS_KEYS":                    "only-one-key",
+				"APP_SECRET_CERTIFICATE_FILE": "some-file-path",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

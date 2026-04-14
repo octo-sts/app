@@ -20,6 +20,7 @@ import (
 	"time"
 
 	gkms "cloud.google.com/go/kms/apiv1"
+	"github.com/octo-sts/app/pkg/appconfig"
 	"github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/kms"
@@ -205,6 +206,49 @@ func TestGitHubBaseURLEmptyKeepsDefault(t *testing.T) {
 	assert.NotNil(t, transport)
 	// Default ghinstallation base URL when not overridden.
 	assert.Equal(t, "https://api.github.com", transport.BaseURL)
+}
+
+func TestNewFromAppConfigKMS(t *testing.T) {
+	ctx := context.Background()
+	credsFile := createGCPKMSCredsFile(t)
+	defer os.Remove(credsFile)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:  12345678,
+		KMSKey: "test-kms-key",
+	}, &envconfig.EnvConfig{}, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigPrivateKey(t *testing.T) {
+	ctx := context.Background()
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:      12345678,
+		PrivateKey: generateTestCertificateString(),
+	}, &envconfig.EnvConfig{}, nil, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigPrivateKeyFile(t *testing.T) {
+	ctx := context.Background()
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:          12345678,
+		PrivateKeyFile: generateTestCertificateFile(t),
+	}, &envconfig.EnvConfig{}, nil, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigNoCredential(t *testing.T) {
+	ctx := context.Background()
+	_, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID: 12345678,
+	}, &envconfig.EnvConfig{}, nil, nil)
+	assert.Error(t, err)
 }
 
 func generateKMSClient(ctx context.Context, t *testing.T) kms.KMS {

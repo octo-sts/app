@@ -404,7 +404,12 @@ func installsNotIn(installs, alreadyScanned []ghinstall.Installation) []ghinstal
 func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghinstall.Installation, t *orgIssuerTally) (orgIssuerEntry, bool) {
 	// A confirm that earns nothing is deliberately not cached and repeats, which is
 	// how an org recovers once the API is healthy.
-	fresh, err := s.rrm.GetAllFresh(ctx, owner)
+	m, err := s.managerFor(owner)
+	if err != nil {
+		clog.WarnContextf(ctx, "confirming the installation set for %s failed: %v", owner, err)
+		return orgIssuerEntry{}, false
+	}
+	fresh, err := m.GetAllFresh(ctx, owner)
 	if err != nil {
 		clog.WarnContextf(ctx, "confirming the installation set for %s failed: %v", owner, err)
 		return orgIssuerEntry{}, false
@@ -478,7 +483,11 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 // orgIssuerLookupUncached performs the enumeration behind orgIssuerLookup's cache
 // and single-flight; it is the walk whose amplification the flight exists to prevent.
 func (s *sts) orgIssuerLookupUncached(ctx context.Context, owner string) (orgIssuerEntry, error) {
-	installs, enumErr := s.rrm.GetAll(ctx, owner)
+	m, err := s.managerFor(owner)
+	if err != nil {
+		return orgIssuerEntry{}, err
+	}
+	installs, enumErr := m.GetAll(ctx, owner)
 
 	var t orgIssuerTally
 	if entry, ok := s.scanInstalls(ctx, owner, installs, &t); ok {
