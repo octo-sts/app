@@ -20,6 +20,7 @@ import (
 	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
+	"github.com/octo-sts/app/pkg/appconfig"
 	"github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/stretchr/testify/assert"
@@ -164,6 +165,49 @@ func TestCertFile(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
+}
+
+func TestNewFromAppConfigKMS(t *testing.T) {
+	ctx := context.Background()
+	credsFile := createGCPKMSCredsFile(t)
+	defer os.Remove(credsFile)
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:  12345678,
+		KMSKey: "test-kms-key",
+	}, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigPrivateKey(t *testing.T) {
+	ctx := context.Background()
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:      12345678,
+		PrivateKey: generateTestCertificateString(),
+	}, nil, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigPrivateKeyFile(t *testing.T) {
+	ctx := context.Background()
+	transport, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:          12345678,
+		PrivateKeyFile: generateTestCertificateFile(t),
+	}, nil, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+}
+
+func TestNewFromAppConfigNoCredential(t *testing.T) {
+	ctx := context.Background()
+	_, err := NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID: 12345678,
+	}, nil, nil)
+	assert.Error(t, err)
 }
 
 func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {

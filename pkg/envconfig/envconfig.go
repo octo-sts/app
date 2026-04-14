@@ -14,10 +14,16 @@ import (
 type EnvConfig struct {
 	Port                       int      `envconfig:"PORT" required:"true"`
 	KMSKeys                    []string `envconfig:"KMS_KEYS" required:"false"`
-	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"true"`
+	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"false"`
 	AppSecretCertificateFile   string   `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string   `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
 	Metrics                    bool     `envconfig:"METRICS" required:"false" default:"true"`
+
+	// AppConfigFile, when set, points to a YAML file describing per-org GitHub
+	// App pools. When set, the legacy GITHUB_APP_IDS / KMS_KEYS env vars are
+	// not required.
+	AppConfigFile string `envconfig:"APP_CONFIG_FILE" required:"false"`
+
 	// QuotaFloorHard / QuotaFloorSoft tune the three-tier capacity-aware
 	// picker in pkg/ghinstall. Defaults target GitHub's default 15,000/hr
 	// installation rate-limit cap: drop out of the preferred pool below
@@ -76,22 +82,29 @@ func BaseConfig() (*EnvConfig, error) {
 		return nil, err
 	}
 
-	sources := 0
-	if len(cfg.KMSKeys) > 0 {
-		sources++
-	}
-	if cfg.AppSecretCertificateFile != "" {
-		sources++
-	}
-	if cfg.AppSecretCertificateEnvVar != "" {
-		sources++
-	}
-	if sources > 1 {
-		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
-	}
+	// Legacy env-var validation only applies when APP_CONFIG_FILE is not set.
+	if cfg.AppConfigFile == "" {
+		if len(cfg.AppIDs) == 0 {
+			return nil, errors.New("GITHUB_APP_IDS is required when APP_CONFIG_FILE is not set")
+		}
 
-	if len(cfg.KMSKeys) > 0 && len(cfg.KMSKeys) != len(cfg.AppIDs) {
-		return nil, fmt.Errorf("KMS_KEYS length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.KMSKeys), len(cfg.AppIDs))
+		sources := 0
+		if len(cfg.KMSKeys) > 0 {
+			sources++
+		}
+		if cfg.AppSecretCertificateFile != "" {
+			sources++
+		}
+		if cfg.AppSecretCertificateEnvVar != "" {
+			sources++
+		}
+		if sources > 1 {
+			return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
+		}
+
+		if len(cfg.KMSKeys) > 0 && len(cfg.KMSKeys) != len(cfg.AppIDs) {
+			return nil, fmt.Errorf("KMS_KEYS length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.KMSKeys), len(cfg.AppIDs))
+		}
 	}
 
 	if cfg.QuotaFloorHard < 0 || cfg.QuotaFloorSoft < 0 {
