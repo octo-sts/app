@@ -108,7 +108,7 @@ jobs:
         run: |
           echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
 
-      - uses: step-security/google-github-auth@57c51210cb4d85d8a5d39dc4c576c79bd693f914 # v3.0.1
+      - uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
         id: auth
         with:
           token_format: "access_token"
