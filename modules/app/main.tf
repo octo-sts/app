@@ -142,10 +142,39 @@ resource "google_kms_key_ring_iam_binding" "signer-members" {
 
 data "google_client_openid_userinfo" "me" {}
 
-resource "google_monitoring_alert_policy" "anomalous-kms-access" {
-  # In the absence of data, incident will auto-close after an hour
+resource "google_monitoring_alert_policy" "github-rate-limit" {
   alert_strategy {
-    auto_close = "3600s"
+    auto_close = "3600s" // auto close after an hour.
+
+    notification_rate_limit {
+      period = "3600s" // re-alert hourly if condition still valid.
+    }
+  }
+
+  display_name = "GitHub API Rate Limit"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "GitHub API rate limit exceeded"
+
+    condition_matched_log {
+      filter = <<EOT
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="${var.name}"
+      textPayload=~"API rate limit exceeded"
+      EOT
+    }
+  }
+
+  notification_channels = var.notification_channels
+
+  enabled = "true"
+  project = var.project_id
+}
+
+resource "google_monitoring_alert_policy" "anomalous-kms-access" {
+  alert_strategy {
+    auto_close = "3600s" // auto close after an hour.
 
     notification_rate_limit {
       period = "3600s" // re-alert hourly if condition still valid.
