@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/cenkalti/backoff/v5"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v84/github"
@@ -393,29 +394,40 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 			Transport: atr,
 		})
 
-		file, _, _, err := client.Repositories.GetContents(ctx,
-			trustPolicyKey.owner, trustPolicyKey.repo,
-			fmt.Sprintf(".github/chainguard/%s.sts.yaml", trustPolicyKey.identity),
-			&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
-		)
-		if err != nil {
-			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
-			// Don't leak the error to the client.
-			var ghErr *github.ErrorResponse
-			if errors.As(err, &ghErr) && ghErr.Response != nil {
-				switch ghErr.Response.StatusCode {
-				case http.StatusForbidden:
-					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity)
-				case http.StatusTooManyRequests:
-					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity)
+		file, fetchErr := backoff.Retry(ctx, func() (*github.RepositoryContent, error) {
+			f, _, _, err := client.Repositories.GetContents(ctx,
+				trustPolicyKey.owner, trustPolicyKey.repo,
+				fmt.Sprintf(".github/chainguard/%s.sts.yaml", trustPolicyKey.identity),
+				&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
+			)
+			if err != nil {
+				clog.InfoContextf(ctx, "failed to find trust policy (will retry if transient): %v", err)
+				// Permanent errors: don't retry.
+				var ghErr *github.ErrorResponse
+				if errors.As(err, &ghErr) && ghErr.Response != nil {
+					switch ghErr.Response.StatusCode {
+					case http.StatusNotFound:
+						return nil, backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity))
+					case http.StatusForbidden:
+						return nil, backoff.Permanent(status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity))
+					case http.StatusTooManyRequests:
+						return nil, backoff.Permanent(status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity))
+					}
 				}
+				// Transient error (network blip, 5xx, token creation failure, etc.) — return
+				// a retriable sentinel. The original error is logged above; don't leak details.
+				return nil, status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q", trustPolicyKey.identity)
 			}
-			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
+			return f, nil
+		}, backoff.WithBackOff(backoff.NewExponentialBackOff()))
+		if fetchErr != nil {
+			return fetchErr
 		}
 
-		raw, err = file.GetContent()
-		if err != nil {
-			clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
+		var getContentErr error
+		raw, getContentErr = file.GetContent()
+		if getContentErr != nil {
+			clog.ErrorContextf(ctx, "failed to read trust policy: %v", getContentErr)
 			// Don't leak the error to the client.
 			return status.Errorf(codes.NotFound, "unable to read trust policy found for %q", trustPolicyKey.identity)
 		}
