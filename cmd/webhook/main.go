@@ -64,9 +64,9 @@ func main() {
 	var kmsKey string
 	if len(baseCfg.KMSKeys) > 0 {
 		kmsKey = baseCfg.KMSKeys[0]
-	} else {
-		log.Panic("at least one KMS key must be provided")
 	}
+	// kmsKey may be empty; ghtransport.New falls back to
+	// APP_SECRET_CERTIFICATE_FILE / APP_SECRET_CERTIFICATE_ENV_VAR.
 	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
