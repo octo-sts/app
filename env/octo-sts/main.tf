@@ -2,12 +2,18 @@ provider "google" { project = var.project_id }
 provider "google-beta" { project = var.project_id }
 provider "ko" { repo = "gcr.io/${var.project_id}" }
 
+// Needed for PR 1222.
+import {
+  to = module.app.google_kms_crypto_key.app-keys["801323"]
+  id = "global/octo-sts/app-signing-key-801323"
+}
+
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "0.10.1"
+  version = "1.0.2"
 
-  team = "sre"
+  team = "developer-platform"
 
   name                        = var.name
   project_id                  = var.project_id
@@ -22,7 +28,7 @@ data "google_monitoring_notification_channel" "octo-sts-slack" {
 }
 
 resource "ko_build" "this" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/app"
 }
 
@@ -32,7 +38,7 @@ resource "cosign_sign" "this" {
 }
 
 resource "ko_build" "webhook" {
-  working_dir = "${path.module}/.."
+  working_dir = "${path.module}/../.."
   importpath  = "./cmd/webhook"
 }
 
@@ -48,7 +54,7 @@ locals {
 }
 
 module "app" {
-  source = "../modules/app"
+  source = "../../modules/app"
 
   project_id = var.project_id
   name       = var.name
@@ -66,7 +72,6 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_app_id          = var.github_app_id
-  github_app_key_version = 1
-  notification_channels  = local.notification_channels
+  github_apps           = var.github_apps
+  notification_channels = local.notification_channels
 }

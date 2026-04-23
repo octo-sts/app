@@ -8,6 +8,18 @@ on:
     branches:
       - "main"
   workflow_dispatch:
+    inputs:
+      environment:
+        description: "The environment to deploy to"
+        required: true
+        default: "octo-sts-staging"
+        type: choice
+        options:
+          - octo-sts-staging
+          - octo-sts
+
+env:
+  DEFAULT_ENVIRONMENT: "octo-sts-staging"
 
 concurrency: deploy
 
@@ -20,62 +32,122 @@ jobs:
     if: github.repository == 'octo-sts/app'
 
     permissions:
-      contents: read  # clone the repository contents
+      contents: read # clone the repository contents
       id-token: write # federates with GCP
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@5ef0c079ce82195b2a36a210272d6b661572d83e # v2.14.2
+        uses: step-security/harden-runner@8d3c67de8e2fe68ef647c8db1e6a09f647780f40 # v2.19.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.blob.core.windows.net:443
+            *.githubapp.com:443
+            9236a389bd48b984df91adc1bc924620.r2.cloudflarestorage.com:443
+            api.github.com:443
+            bigquery.googleapis.com:443
+            bigquerydatatransfer.googleapis.com:443
+            cgr.dev:443
+            checkpoint-api.hashicorp.com:443
+            cloudbilling.googleapis.com:443
+            cloudkms.googleapis.com:443
+            cloudresourcemanager.googleapis.com:443
+            compute.googleapis.com:443
+            dl.google.com:443
+            dns.googleapis.com:443
+            fulcio.sigstore.dev:443
+            gcr.io:443
+            github.com:443
+            go.dev:443
+            iam.googleapis.com:443
+            iamcredentials.googleapis.com:443
+            monitoring.googleapis.com:443
+            objects.githubusercontent.com:443
+            openidconnect.googleapis.com:443
+            proxy.golang.org:443
+            pubsub.googleapis.com:443
+            registry.terraform.io:443
+            rekor.sigstore.dev:443
+            release-assets.githubusercontent.com:443
+            releases.hashicorp.com:443
+            run.googleapis.com:443
+            secretmanager.googleapis.com:443
+            storage.googleapis.com:443
+            sts.googleapis.com:443
+            sum.golang.org:443
+            tuf-repo-cdn.sigstore.dev:443
 
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6.2.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
         with:
-          go-version-file: '${{ github.workspace }}/.go-version'
+          go-version-file: "${{ github.workspace }}/.go-version"
           check-latest: true
-          cache: 'false'
+          cache: "false"
 
-      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+      - name: Resolve auth config
+        id: auth-config
+        run: |
+          ENVIRONMENT="${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}"
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+          if [[ "${ENVIRONMENT}" == "octo-sts" ]]; then
+            echo "workload_identity_provider=projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider" >> "$GITHUB_OUTPUT"
+            echo "service_account=github-identity@octo-sts.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
+          elif [[ "${ENVIRONMENT}" == "octo-sts-staging" ]]; then
+            echo "workload_identity_provider=projects/578801560891/locations/global/workloadIdentityPools/octo-sts-staging/providers/github-provider" >> "$GITHUB_OUTPUT"
+            echo "service_account=octo-sts-staging-ci@octo-sts-staging.iam.gserviceaccount.com" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unknown environment: ${ENVIRONMENT}" >&2
+            exit 1
+          fi
+
+      - name: Log deployment target
+        run: |
+          echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
+
+      - uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
         id: auth
         with:
-          token_format: 'access_token'
-          project_id: 'octo-sts'
-          workload_identity_provider: 'projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider'
-          service_account: 'github-identity@octo-sts.iam.gserviceaccount.com'
+          token_format: "access_token"
+          project_id: "${{ steps.auth-config.outputs.environment }}"
+          workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
+          service_account: "${{ steps.auth-config.outputs.service_account }}"
 
-      - uses: 'docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9' # v2
+      - uses: "docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121" # v2
         with:
-          username: 'oauth2accesstoken'
-          password: '${{ steps.auth.outputs.access_token }}'
-          registry: 'gcr.io'
+          username: "oauth2accesstoken"
+          password: "${{ steps.auth.outputs.access_token }}"
+          registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@0cf1221da92242205c2d9f8a63add344ebd6b304 # v1.6.1
+      - uses: chainguard-dev/actions/setup-terraform@061bc0e921116bde1470f51fb5c86d5318f16558 # v1.6.15
         with:
-          terraform-version-file: '${{ github.workspace }}/.terraform-version'
+          terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
-      - working-directory: ./iac
+      - id: terraform-init
+        working-directory: "./env/${{ steps.auth-config.outputs.environment }}"
         run: |
           terraform init
 
+      - if: steps.terraform-init.outcome == 'success'
+        working-directory: "./env/${{ steps.auth-config.outputs.environment }}"
+        run: |
           terraform plan
 
           terraform apply -auto-approve
 
-      - uses: rtCamp/action-slack-notify@e31e87e03dd19038e411e38ae27cbad084a90661 # v2.3.3
+      - uses: step-security/action-slack-notify@e04c77a65bae8b6c0373478a1cb8fd7e012637e6 # v2.3.5
         if: ${{ failure() }}
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
           SLACK_USERNAME: guardian
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          SLACK_CHANNEL: 'octo-sts-alerts' # Use a channel
-          SLACK_COLOR: '#8E1600'
-          MSG_MINIMAL: 'true'
+          SLACK_CHANNEL: "${{ steps.auth-config.outputs.environment }}-alerts" # Use a channel
+          SLACK_COLOR: "#8E1600"
+          MSG_MINIMAL: "true"
           SLACK_TITLE: Deploying OctoSTS to Cloud Run failed
           SLACK_MESSAGE: |
             For detailed logs: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}

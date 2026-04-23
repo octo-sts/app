@@ -1,9 +1,9 @@
 // Create the Broker abstraction.
 module "cloudevent-broker" {
   source  = "chainguard-dev/common/infra//modules/cloudevent-broker"
-  version = "0.10.1"
+  version = "1.0.2"
 
-  team = "sre"
+  team = "developer-platform"
 
   name       = "octo-sts-broker"
   project_id = var.project_id
@@ -16,9 +16,9 @@ data "google_client_openid_userinfo" "me" {}
 
 module "cloudevent-recorder" {
   source  = "chainguard-dev/common/infra//modules/cloudevent-recorder"
-  version = "0.10.1"
+  version = "1.0.2"
 
-  team = "sre"
+  team = "developer-platform"
 
   name       = "octo-sts-recorder"
   project_id = var.project_id

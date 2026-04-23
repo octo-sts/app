@@ -1,7 +1,5 @@
-/*
-Copyright 2024 Chainguard, Inc.
-SPDX-License-Identifier: Apache-2.0
-*/
+// Copyright 2024 Chainguard, Inc.
+// SPDX-License-Identifier: Apache-2.0
 
 package prober
 
@@ -11,7 +9,7 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v75/github"
+	"github.com/google/go-github/v84/github"
 	"github.com/kelseyhightower/envconfig"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
@@ -20,7 +18,8 @@ import (
 )
 
 type envConfig struct {
-	Domain string `envconfig:"STS_DOMAIN" required:"true"`
+	Domain         string `envconfig:"STS_DOMAIN" required:"true"`
+	ProberIdentity string `envconfig:"PROBER_IDENTITY" required:"true"`
 }
 
 func Func(ctx context.Context) error {
@@ -33,7 +32,7 @@ func Func(ctx context.Context) error {
 		fmt.Sprintf("https://%s", env.Domain),
 		"does-not-matter",
 		sts.WithScope("octo-sts/prober"),
-		sts.WithIdentity("prober"),
+		sts.WithIdentity(env.ProberIdentity),
 	)
 
 	ts, err := idtoken.NewTokenSource(ctx, env.Domain /* aud */)
@@ -68,7 +67,7 @@ func Func(ctx context.Context) error {
 	// used to federate.
 	file, _, _, err := ghc.Repositories.GetContents(ctx,
 		"octo-sts", "prober",
-		".github/chainguard/prober.sts.yaml",
+		fmt.Sprintf(".github/chainguard/%s.sts.yaml", env.ProberIdentity),
 		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
 	)
 	if err != nil {
@@ -119,7 +118,7 @@ func Negative(ctx context.Context) error {
 		fmt.Sprintf("https://%s", env.Domain),
 		"does-not-matter",
 		sts.WithScope("octo-sts/prober"),
-		sts.WithIdentity("prober"),
+		sts.WithIdentity(env.ProberIdentity),
 	)
 
 	ts, err := idtoken.NewTokenSource(ctx, env.Domain /* aud */)

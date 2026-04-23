@@ -7,9 +7,9 @@ resource "random_password" "webhook-secret" {
 
 module "webhook-secret" {
   source  = "chainguard-dev/common/infra//modules/configmap"
-  version = "0.10.1"
+  version = "1.0.4"
 
-  team = "sre"
+  team = "developer-platform"
 
   project_id = var.project_id
   name       = "${var.name}-webhook-secret"
@@ -22,9 +22,9 @@ module "webhook-secret" {
 
 module "webhook" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "0.10.1"
+  version = "1.0.4"
 
-  team = "sre"
+  team = "developer-platform"
 
   project_id = var.project_id
   name       = "${var.name}-webhook"
@@ -44,8 +44,8 @@ module "webhook" {
       ports = [{ container_port = 8080 }]
       env = [
         {
-          name  = "GITHUB_APP_ID"
-          value = var.github_app_id
+          name  = "GITHUB_APP_IDS"
+          value = join(",", [for app in var.github_apps : app.app_id])
         },
         {
           name  = "GITHUB_WEBHOOK_SECRET"
@@ -56,8 +56,8 @@ module "webhook" {
           value = var.github_webhook_organization_filter
         },
         {
-          name  = "KMS_KEY"
-          value = local.kms_key
+          name  = "KMS_KEYS"
+          value = join(",", local.kms_keys)
         }
       ]
     }

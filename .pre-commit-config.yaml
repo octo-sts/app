@@ -1,0 +1,83 @@
+# Copyright 2024 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# See https://pre-commit.com for more information
+# See https://pre-commit.com/hooks.html for more hooks
+
+exclude: |
+  (?x)^(
+    .*testdata/.*|
+    .*\.terraform/.*|
+  )$
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: ['--allow-multiple-documents']
+      - id: check-added-large-files
+      - id: check-merge-conflict
+
+  - repo: https://github.com/dnephin/pre-commit-golang
+    rev: v0.5.1
+    hooks:
+      - id: go-fmt
+      - id: go-imports
+      - id: go-mod-tidy
+
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.11.4
+    hooks:
+      - id: golangci-lint-full
+
+  - repo: https://github.com/antonbabenko/pre-commit-terraform
+    rev: v1.99.5
+    hooks:
+      - id: terraform_fmt
+        name: terraform-fmt
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: no-commit-to-branch
+        name: no-commit-to-main
+        args: ['--branch', 'main']
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        name: lint-github-actions
+
+  - repo: https://github.com/golangci/misspell
+    rev: v0.6.0
+    hooks:
+      - id: misspell
+        exclude: |
+          (?x)^(
+            .*go\.sum|
+            .*third_party/.*|
+            \.golangci\.yml|
+          )$
+
+  - repo: local
+    hooks:
+      - id: boilerplate-check
+        name: Boilerplate Check
+        entry: hack/boilerplate-check.sh
+        language: script
+        files: \.(go|sh|yaml)$
+        exclude: |
+          (?x)(
+            \.golangci\.yml$|
+            (vendor|third_party|\.terraform|testdata)/
+          )
+        pass_filenames: true
+
+      - id: woke
+        name: woke
+        entry: 'bash -c ''if ! command -v woke &>/dev/null; then echo "woke not installed, skipping (install: go install github.com/get-woke/woke@latest)"; exit 0; fi; woke --exit-1-on-failure "$@"'' --'
+        language: system
+        types_or: [go, terraform, yaml, markdown]

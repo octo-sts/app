@@ -8,7 +8,7 @@ STS API in order to produce short-lived tokens for interacting with GitHub.
 **_The ultimate goal of this App is to wholly eliminate the need for GitHub
 Personal Access Tokens (aka PATs)._**
 
-The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have).
+The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have) and the page on [Chainguard Academy](https://edu.chainguard.dev/open-source/octo-sts/overview/).
 
 ## Setting up workload trust
 
@@ -177,12 +177,12 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 
 #### Organization Permissions
 
-- **API Insights**: `No Access`
+- **API Insights**: `Read-only`
 - **Administration**: `Read/Write`
 - **Blocking users**: `No Access`
-- **Custom organizations roles**: `No Access`
+- **Custom organizations roles**: `Read and write`
 - **Custom properties**: `No Access`
-- **Custom repository roles**: `No Access`
+- **Custom repository roles**: `Read and write`
 - **Events**: `Read-only`
 - **GitHub Copilot Business**: `No Access`
 - **Knowledge bases**: `No Access`

@@ -5,9 +5,25 @@ resource "google_kms_key_ring" "app-keyring" {
   location = "global"
 }
 
-// Create an asymmetric signing key to use for signing tokens.
+// Existing prod key, which will be deleted after migration to multi app.
 resource "google_kms_crypto_key" "app-key" {
   name     = "app-signing-key"
+  key_ring = google_kms_key_ring.app-keyring.id
+  purpose  = "ASYMMETRIC_SIGN"
+
+  version_template {
+    algorithm = "RSA_SIGN_PKCS1_2048_SHA256"
+  }
+
+  import_only                   = true
+  skip_initial_version_creation = true
+}
+
+// Create a separate asymmetric signing key for each GitHub App.
+resource "google_kms_crypto_key" "app-keys" {
+  for_each = { for app in var.github_apps : tostring(app.app_id) => app if app.key_version > 0 }
+
+  name     = "app-signing-key-${each.key}"
   key_ring = google_kms_key_ring.app-keyring.id
   purpose  = "ASYMMETRIC_SIGN"
 
@@ -43,7 +59,7 @@ locals {
   #     --key app-signing-key \
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
-  kms_key = "${google_kms_crypto_key.app-key.id}/cryptoKeyVersions/${var.github_app_key_version}"
+  kms_keys = [for app in var.github_apps : app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""]
 }
 
 // Create a dedicated GSA for the IAM datastore service.
@@ -60,7 +76,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "0.10.1"
+  version = "1.0.4"
 
   project_id = var.project_id
   region     = each.key
@@ -71,9 +87,9 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "0.10.1"
+  version = "1.0.4"
 
-  team = "sre"
+  team = "developer-platform"
 
   project_id = var.project_id
   name       = var.name
@@ -93,12 +109,12 @@ module "this" {
       ports = [{ container_port = 8080 }]
       env = [
         {
-          name  = "GITHUB_APP_ID"
-          value = "${var.github_app_id}"
+          name  = "GITHUB_APP_IDS"
+          value = join(",", [for app in var.github_apps : app.app_id])
         },
         {
-          name  = "KMS_KEY"
-          value = local.kms_key
+          name  = "KMS_KEYS"
+          value = join(",", local.kms_keys)
         },
         {
           name  = "STS_DOMAIN",
@@ -126,10 +142,39 @@ resource "google_kms_key_ring_iam_binding" "signer-members" {
 
 data "google_client_openid_userinfo" "me" {}
 
-resource "google_monitoring_alert_policy" "anomalous-kms-access" {
-  # In the absence of data, incident will auto-close after an hour
+resource "google_monitoring_alert_policy" "github-rate-limit" {
   alert_strategy {
-    auto_close = "3600s"
+    auto_close = "3600s" // auto close after an hour.
+
+    notification_rate_limit {
+      period = "3600s" // re-alert hourly if condition still valid.
+    }
+  }
+
+  display_name = "GitHub API Rate Limit"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "GitHub API rate limit exceeded"
+
+    condition_matched_log {
+      filter = <<EOT
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="${var.name}"
+      textPayload=~"API rate limit exceeded"
+      EOT
+    }
+  }
+
+  notification_channels = var.notification_channels
+
+  enabled = "true"
+  project = var.project_id
+}
+
+resource "google_monitoring_alert_policy" "anomalous-kms-access" {
+  alert_strategy {
+    auto_close = "3600s" // auto close after an hour.
 
     notification_rate_limit {
       period = "3600s" // re-alert hourly if condition still valid.

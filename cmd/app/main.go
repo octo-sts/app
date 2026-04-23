@@ -22,6 +22,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
 )
@@ -49,17 +50,38 @@ func main() {
 
 	var client *kms.KeyManagementClient
 
-	if baseCfg.KMSKey != "" {
+	if len(baseCfg.KMSKeys) > 0 {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
 			log.Panicf("could not create kms client: %v", err)
 		}
 	}
 
-	atr, err := ghtransport.New(ctx, baseCfg, client)
-	if err != nil {
-		log.Panicf("error creating GitHub App transport: %v", err)
+	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
+	for i, appID := range baseCfg.AppIDs {
+		var kmsKey string
+		if len(baseCfg.KMSKeys) > 0 {
+			kmsKey = baseCfg.KMSKeys[i]
+			if kmsKey == "" {
+				log.Printf("skipping app %d: no KMS key configured", appID)
+				continue
+			}
+		}
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+		if err != nil {
+			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
+		}
+		m, err := ghinstall.New(atr)
+		if err != nil {
+			log.Panicf("error creating install manager for app %d: %v", appID, err)
+		}
+		managers = append(managers, m)
 	}
+	if len(managers) == 0 {
+		log.Panic("no apps with valid KMS keys configured")
+	}
+	im := ghinstall.NewMultiManager(managers)
+	rrm := ghinstall.NewRoundRobin(managers)
 
 	d := duplex.New(
 		baseCfg.Port,
@@ -77,7 +99,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(atr, ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, rrm, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

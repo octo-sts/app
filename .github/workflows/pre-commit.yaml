@@ -1,7 +1,7 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: go-build-test
+name: Pre-commit
 
 on:
   pull_request:
@@ -15,7 +15,8 @@ permissions: {}
 
 jobs:
 
-  go-build-test:
+  pre-commit:
+    name: Pre-commit checks
     runs-on: ubuntu-latest
 
     permissions:
@@ -29,19 +30,23 @@ jobs:
           allowed-endpoints: >
             *.blob.core.windows.net:443
             *.githubapp.com:443
-            accounts.google.com:443
             api.github.com:443
             dl.google.com:443
             github.com:443
             go.dev:443
-            issuer.enforce.dev:443
+            golangci-lint.run:443
             objects.githubusercontent.com:443
             proxy.golang.org:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            raw.githubusercontent.com:443
             release-assets.githubusercontent.com:443
+            checkpoint-api.hashicorp.com:443
+            releases.hashicorp.com:443
             storage.googleapis.com:443
             sum.golang.org:443
 
-      - name: Check out code onto GOPATH
+      - name: Check out code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -53,11 +58,24 @@ jobs:
           check-latest: true
           cache: 'false'
 
-      - name: build
-        run: |
-          go build -o octo-sts ./cmd/app
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.x'
 
-      - name: test
-        run: |
-          # Exclude running unit tests against third_party repos.
-          go test -v -race ./...
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Set up Terraform
+        uses: chainguard-dev/actions/setup-terraform@061bc0e921116bde1470f51fb5c86d5318f16558 # v1.6.15
+        with:
+          terraform-version-file: "${{ github.workspace }}/.terraform-version"
+          terraform-wrapper: false
+
+      - name: Install pre-commit # Manually install as the precommit action doesn't pin deps.
+        run: pip install pre-commit
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+        env:
+          SKIP: no-commit-to-branch

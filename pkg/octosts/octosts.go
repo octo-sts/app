@@ -19,8 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v75/github"
-	lru "github.com/hashicorp/golang-lru/v2"
+	"github.com/google/go-github/v84/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
@@ -31,6 +30,8 @@ import (
 	apiauth "chainguard.dev/sdk/auth"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/chainguard-dev/clog"
+	"github.com/octo-sts/app/pkg/ghinstall"
+	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -40,25 +41,33 @@ const (
 	maxRetry   = 3
 )
 
-func NewSecurityTokenServiceServer(atr *ghinstallation.AppsTransport, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		atr:      atr,
+		im:       im,
+		rrm:      rrm,
+		appCount: appCount,
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
 	}
 }
 
-var (
-	// installationIDs is an LRU cache of recently used GitHub App installlations IDs.
-	installationIDs, _ = lru.New2Q[string, int64](200)
-	trustPolicies      = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
-)
+var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	atr      *ghinstallation.AppsTransport
+	// im is the consistent-hash manager used when the trust policy requires
+	// checks:write. Consistent hashing ensures the same GitHub App always
+	// handles a given (scope, identity), which is required because GitHub
+	// check runs can only be updated by the app that created them.
+	im ghinstall.Manager
+	// rrm is the round-robin manager used for all trust policy reads and for
+	// token exchanges when the trust policy does NOT require checks:write.
+	rrm ghinstall.Manager
+	// appCount is the number of underlying GitHub App managers. Used to cap
+	// rate-limit retries so that each app is tried at most once.
+	appCount int
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
@@ -169,7 +178,8 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
 
-	e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
+	var base *ghinstallation.AppsTransport
+	base, e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
 	if err != nil {
 		return nil, err
 	}
@@ -184,11 +194,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 
 	// Synthesize a token for the requested scope and permissions based on the
 	// trust policy.
-	atr := ghinstallation.NewFromAppsTransport(s.atr, e.InstallationID)
+	atr := ghinstallation.NewFromAppsTransport(base, e.InstallationID)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: e.TrustPolicy.Repositories,
 		Permissions:  &e.TrustPolicy.Permissions,
 	}
+	// Enrich context so the httpmetrics transport labels the token exchange
+	// rate limit metrics with the specific installation consuming quota.
+	ctx = ghtransport.EnrichContext(ctx, base.AppID(), e.InstallationID)
 	token, err := atr.Token(ctx)
 	if err != nil {
 		var herr *ghinstallation.HTTPError
@@ -227,7 +240,37 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}, nil
 }
 
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (int64, *OrgTrustPolicy, error) {
+// managerFor returns the appropriate Manager for the given trust policy key.
+//
+// If the trust policy is already cached and does NOT require checks:write,
+// round-robin is used to distribute load across apps. Otherwise consistent
+// hashing is used, which guarantees that the same (scope, identity) always
+// routes to the same GitHub App — a requirement for updating check runs.
+//
+// On a cache miss we cannot know the required permissions yet, so we default
+// to consistent hashing (the safe choice: it is always correct for
+// checks:write policies and merely suboptimal for others on the first call).
+func (s *sts) managerFor(key cacheTrustPolicyKey) ghinstall.Manager {
+	raw, ok := trustPolicies.Get(key)
+	if !ok {
+		return s.im
+	}
+	var tp OrgTrustPolicy
+	if err := yaml.UnmarshalStrict([]byte(raw), &tp); err != nil {
+		return s.im
+	}
+	if hasChecksWrite(tp.Permissions) {
+		return s.im
+	}
+	return s.rrm
+}
+
+// hasChecksWrite reports whether the given permissions include checks:write.
+func hasChecksWrite(perms github.InstallationPermissions) bool {
+	return perms.Checks != nil && *perms.Checks == "write"
+}
+
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -245,64 +288,76 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		tp = otp
 	}
 
-	id, err := s.lookupInstall(ctx, owner)
-	if err != nil {
-		return 0, nil, err
-	}
-
 	trustPolicyKey := cacheTrustPolicyKey{
 		owner:    owner,
 		repo:     repo,
 		identity: identity,
 	}
 
-	if err := s.lookupTrustPolicy(ctx, id, trustPolicyKey, tp); err != nil {
-		return id, nil, err
-	}
-	return id, otp, nil
-}
-
-func (s *sts) lookupInstall(ctx context.Context, owner string) (int64, error) {
-	// check the LRU cache for the installation ID
-	if v, ok := installationIDs.Get(owner); ok {
-		clog.InfoContextf(ctx, "found installation in cache for %s", owner)
-		return v, nil
+	// Choose exchange routing strategy. managerFor peeks the trust policy
+	// cache so that, after the first call, policies without checks:write use
+	// round-robin instead of consistent hashing for the exchange.
+	im := s.managerFor(trustPolicyKey)
+	atr, id, err := im.Get(ctx, owner, scope, identity)
+	if err != nil {
+		return nil, 0, nil, err
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: s.atr,
-	})
-	// Walk through the pages of installations looking for an organization
-	// matching owner.
-	page := 1
-	for page != 0 {
-		installs, resp, err := client.Apps.ListInstallations(ctx, &github.ListOptions{
-			Page:    page,
-			PerPage: 100,
-		})
-		if err != nil {
-			return 0, err
-		}
+	// Policy reads always use round-robin to spread GitHub API calls across
+	// apps. Any installed app can read the policy file — there is no
+	// state dependency between which app reads the policy and which app
+	// performs the exchange. The exchange transport (atr, id) is returned
+	// to the caller unchanged.
+	readAtr, readId := atr, id
+	if rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity); rErr == nil {
+		readAtr, readId = rAtr, rId
+	}
 
-		for _, install := range installs {
-			if install.Account.GetLogin() == owner {
-				installID := install.GetID()
-				// store in the LRU cache
-				installationIDs.Add(owner, installID)
-				return installID, nil
+	err = s.lookupTrustPolicy(ctx, readAtr, readId, trustPolicyKey, tp)
+
+	// If the policy read was rate-limited and there are multiple apps,
+	// retry with the remaining apps in the round-robin rotation.
+	// Cap retries at maxRetry to avoid hammering all apps on a broad outage.
+	if isRateLimit(err) && s.appCount > 1 {
+		retries := min(maxRetry, s.appCount-1)
+		for i := 0; i < retries; i++ {
+			clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
+			rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity)
+			if rErr != nil {
+				continue
+			}
+			err = s.lookupTrustPolicy(ctx, rAtr, rId, trustPolicyKey, tp)
+			if !isRateLimit(err) {
+				break
 			}
 		}
-		page = resp.NextPage
 	}
 
-	return 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+	if err != nil {
+		return atr, id, nil, err
+	}
+	return atr, id, otp, nil
+}
+
+// isRateLimit reports whether err is a gRPC ResourceExhausted error,
+// indicating a GitHub API rate limit (403 secondary or 429 primary).
+func isRateLimit(err error) bool {
+	if err == nil {
+		return false
+	}
+	st, ok := status.FromError(err)
+	return ok && st.Code() == codes.ResourceExhausted
 }
 
 type trustPolicy interface {
 	Compile() error
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
+	// Enrich context with app/installation IDs so the httpmetrics transport
+	// can label rate limit metrics with the specific installation consuming quota.
+	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
+
 	raw := ""
 	// check the LRU cache for the TrustPolicy
 	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
@@ -312,7 +367,7 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, install int64, trustPolicyK
 
 	// if is not cached will get the trustpolicy from the api
 	if raw == "" {
-		atr := ghinstallation.NewFromAppsTransport(s.atr, install)
+		atr := ghinstallation.NewFromAppsTransport(base, install)
 		// We only need to read from the repository, so create that token to fetch
 		// the trust policy.
 		atr.InstallationTokenOptions = &github.InstallationTokenOptions{
