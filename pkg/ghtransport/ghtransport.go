@@ -6,7 +6,6 @@ package ghtransport
 import (
 	"context"
 	"fmt"
-	"strings"
 	"net/http"
 
 	kms "cloud.google.com/go/kms/apiv1"
@@ -28,10 +27,7 @@ func EnrichContext(ctx context.Context, appID, installationID int64) context.Con
 func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
-		// Handle literal \\n from Vault/Rancher secret injection
-		keyData := strings.ReplaceAll(env.AppSecretCertificateEnvVar, `\n`, "\n")
-		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, appID, []byte(keyData))
-
+		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, appID, []byte(env.AppSecretCertificateEnvVar))
 		if err != nil {
 			return nil, err
 		}
