@@ -61,11 +61,14 @@ func main() {
 	} else {
 		log.Panic("at least one GitHub App ID must be provided")
 	}
+	// kmsKey is only required when neither APP_SECRET_CERTIFICATE_ENV_VAR
+	// nor APP_SECRET_CERTIFICATE_FILE is set; ghtransport.New picks the
+	// right source and returns an error when none is configured. Do not
+	// panic here — self-hosted deployments using cert-file/env-var paths
+	// must not be forced to configure a KMS key.
 	var kmsKey string
 	if len(baseCfg.KMSKeys) > 0 {
 		kmsKey = baseCfg.KMSKeys[0]
-	} else {
-		log.Panic("at least one KMS key must be provided")
 	}
 	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
 	if err != nil {
