@@ -28,7 +28,7 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
 		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, appID, []byte(env.AppSecretCertificateEnvVar))
-		
+
 		if err != nil {
 			return nil, err
 		}
