@@ -29,7 +29,7 @@ go build -o smoketest ./hack/smoketest/
 ### 2. Create a config file
 
 Create a YAML file describing your test cases (see [Configuration Reference](#configuration-reference)
-below or the example at `hack/smoketest/testdata/example.yaml`):
+below or the per-environment configs in `hack/smoketest/testdata/`):
 
 ```yaml
 domain: octo-sts.dev
@@ -43,7 +43,7 @@ tests:
     scope: octo-sts/prober
     identity: does-not-exist
     expect_failure: true
-    expected_error: "exchange failed"
+    expected_error: "unable to find trust policy"
 ```
 
 ### 3. Run from a GitHub Actions workflow
@@ -221,7 +221,7 @@ Tests that a non-existent identity is correctly rejected:
   scope: octo-sts/prober
   identity: does-not-exist
   expect_failure: true
-  expected_error: "exchange failed"
+  expected_error: "unable to find trust policy"
 ```
 
 ### App Not Installed
@@ -233,7 +233,7 @@ Tests that a scope where the app is not installed is rejected:
   scope: some-org/no-app-here
   identity: anything
   expect_failure: true
-  expected_error: "exchange failed"
+  expected_error: "no installation found"
 ```
 
 ### Bad OIDC Match
@@ -247,7 +247,7 @@ the Actions token:
   scope: octo-sts/prober
   identity: wrong-subject-policy
   expect_failure: true
-  expected_error: "exchange failed"
+  expected_error: "token does not match trust policy"
 ```
 
 Where `wrong-subject-policy.sts.yaml` contains a subject that doesn't match the
