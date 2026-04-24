@@ -46,7 +46,6 @@ func main() {
 	}
 
 	var client *kms.KeyManagementClient
-
 	if len(baseCfg.KMSKeys) > 0 {
 		client, err = kms.NewKeyManagementClient(ctx)
 		if err != nil {
@@ -61,12 +60,14 @@ func main() {
 	} else {
 		log.Panic("at least one GitHub App ID must be provided")
 	}
+
+	// If kmsKey remains empty, ghtransport.New() will fall back on
+	// APP_SECRET_CERTIFICATE_FILE or APP_SECRET_CERTIFICATE_ENV_VAR.
 	var kmsKey string
 	if len(baseCfg.KMSKeys) > 0 {
 		kmsKey = baseCfg.KMSKeys[0]
-	} else {
-		log.Panic("at least one KMS key must be provided")
 	}
+
 	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
