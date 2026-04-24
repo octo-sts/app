@@ -25,9 +25,14 @@ func EnrichContext(ctx context.Context, appID, installationID int64) context.Con
 }
 
 func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
+	// Wrap the base HTTP transport so every GitHub response's X-RateLimit-*
+	// headers populate the github_rate_limit_* metrics with the app_id and
+	// installation_id labels set on the request context by EnrichContext.
+	base := metrics.WrapTransport(http.DefaultTransport)
+
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
-		atr, err := ghinstallation.NewAppsTransport(http.DefaultTransport, appID, []byte(env.AppSecretCertificateEnvVar))
+		atr, err := ghinstallation.NewAppsTransport(base, appID, []byte(env.AppSecretCertificateEnvVar))
 
 		if err != nil {
 			return nil, err
@@ -35,7 +40,7 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 		return atr, nil
 
 	case env.AppSecretCertificateFile != "":
-		atr, err := ghinstallation.NewAppsTransportKeyFromFile(http.DefaultTransport, appID, env.AppSecretCertificateFile)
+		atr, err := ghinstallation.NewAppsTransportKeyFromFile(base, appID, env.AppSecretCertificateFile)
 
 		if err != nil {
 			return nil, err
@@ -51,7 +56,7 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 			return nil, fmt.Errorf("error creating signer: %w", err)
 		}
 
-		atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, appID, ghinstallation.WithSigner(signer))
+		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(signer))
 		if err != nil {
 			return nil, err
 		}
