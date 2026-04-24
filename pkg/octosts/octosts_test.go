@@ -713,6 +713,112 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	}
 }
 
+// newFakeGitHubNotFoundCounter returns a fake GitHub server that returns 404
+// for content requests and counts how many times the endpoint was hit.
+func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
+	var counter atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      github.Ptr(int64(1234)),
+			Account: &github.User{Login: github.Ptr("org")},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		counter.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(github.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusNotFound},
+			Message:  "Not Found",
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}, &counter
+}
+
+func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "does-not-exist"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	gh, counter := newFakeGitHubNotFoundCounter()
+	atr := newGitHubClient(t, gh)
+
+	s := &sts{
+		im:       &fakeInstallMgr{atr: atr},
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
+	}
+
+	otp := &OrgTrustPolicy{}
+	otp.Repositories = []string{"repo"}
+
+	// First call: should hit GitHub and get a 404.
+	err := s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	if err == nil {
+		t.Fatal("expected NotFound error on first call, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Fatalf("expected 1 GitHub API call, got %d", got)
+	}
+
+	// Second call: should be served from negative cache, no GitHub API call.
+	err = s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	if err == nil {
+		t.Fatal("expected NotFound error on second call, got nil")
+	}
+	st, ok = status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Fatalf("expected still 1 GitHub API call after negative cache hit, got %d", got)
+	}
+}
+
+func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "cached-missing"}
+	trustPolicies.Add(key, negativeCacheConst)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	s := &sts{
+		im:       &failInstallMgr{},
+		rrm:      &failInstallMgr{},
+		appCount: 1,
+	}
+
+	_, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound from negative cache, got %v (managers should not have been called)", err)
+	}
+}
+
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 

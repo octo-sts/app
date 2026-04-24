@@ -37,8 +37,9 @@ import (
 )
 
 const (
-	retryDelay = 10 * time.Millisecond
-	maxRetry   = 3
+	retryDelay         = 10 * time.Millisecond
+	maxRetry           = 3
+	negativeCacheConst = ""
 )
 
 func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
@@ -294,6 +295,11 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		identity: identity,
 	}
 
+	if cached, ok := trustPolicies.Get(trustPolicyKey); ok && cached == negativeCacheConst {
+		clog.InfoContextf(ctx, "negative cache hit for %s", trustPolicyKey)
+		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
+	}
+
 	// Choose exchange routing strategy. managerFor peeks the trust policy
 	// cache so that, after the first call, policies without checks:write use
 	// round-robin instead of consistent hashing for the exchange.
@@ -361,6 +367,10 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 	raw := ""
 	// check the LRU cache for the TrustPolicy
 	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
+		if cachedRawPolicy == negativeCacheConst {
+			clog.InfoContextf(ctx, "negative cache hit for %s", trustPolicyKey)
+			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
+		}
 		clog.InfoContextf(ctx, "found trust policy in cache for %s", trustPolicyKey)
 		raw = cachedRawPolicy
 	}
@@ -408,6 +418,8 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity)
 				case http.StatusTooManyRequests:
 					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity)
+				case http.StatusNotFound:
+					trustPolicies.Add(trustPolicyKey, negativeCacheConst)
 				}
 			}
 			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
