@@ -1,0 +1,39 @@
+# Smoke tests for the Octo STS production deployment.
+#
+# Prerequisites:
+#   - The octo-sts GitHub App must be installed on the target org/repos.
+#   - Trust policies referenced by identity must exist in the target repos
+#     and match the GitHub Actions OIDC token from the octo-sts/app deploy workflow.
+
+domain: octo-sts.dev
+
+tests:
+  - name: "valid token exchange with verification"
+    scope: octo-sts/prober
+    identity: smoke-test
+    expect_failure: false
+    verify:
+      contents_read:
+        org: octo-sts
+        repo: prober
+        path: .github/chainguard/smoke-test.sts.yaml
+      issues_read:
+        org: octo-sts
+        repo: prober
+
+  - name: "valid token exchange without verification"
+    scope: octo-sts/prober
+    identity: smoke-test
+    expect_failure: false
+
+  - name: "missing STS policy"
+    scope: octo-sts/prober
+    identity: does-not-exist
+    expect_failure: true
+    expected_error: "exchange failed"
+
+  - name: "app not installed on target"
+    scope: some-org/no-app-here
+    identity: anything
+    expect_failure: true
+    expected_error: "exchange failed"
