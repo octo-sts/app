@@ -30,10 +30,10 @@ tests:
     scope: octo-sts/prober
     identity: does-not-exist
     expect_failure: true
-    expected_error: "exchange failed"
+    expected_error: "unable to find trust policy"
 
   - name: "app not installed on target"
     scope: some-org/no-app-here
     identity: anything
     expect_failure: true
-    expected_error: "exchange failed"
+    expected_error: "no installation found"
