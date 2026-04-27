@@ -63,6 +63,7 @@ jobs:
             go.dev:443
             iam.googleapis.com:443
             iamcredentials.googleapis.com:443
+            logging.googleapis.com:443
             monitoring.googleapis.com:443
             objects.githubusercontent.com:443
             openidconnect.googleapis.com:443
