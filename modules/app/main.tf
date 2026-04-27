@@ -236,3 +236,65 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
   enabled = "true"
   project = var.project_id
 }
+
+resource "google_logging_metric" "trust-policy-not-found" {
+  project = var.project_id
+  name    = "${var.name}-trust-policy-not-found"
+
+  filter = <<EOT
+  resource.type="cloud_run_revision"
+  resource.labels.service_name="${var.name}"
+  textPayload=~"negative cache hit"
+  -textPayload=~"negative cache hit for {octo-sts prober does-not-exist}"
+  EOT
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+  }
+
+  label_extractors = {
+    "identity" = "REGEXP_EXTRACT(textPayload, \"negative cache hit for \\\\{\\\\S+ \\\\S+ (\\\\S+)\\\\}\")"
+  }
+}
+
+resource "google_monitoring_alert_policy" "trust-policy-not-found" {
+  project      = var.project_id
+  display_name = "Trust Policy Not Found (>200/hr)"
+  combiner     = "OR"
+
+  alert_strategy {
+    auto_close = "3600s"
+
+    notification_rate_limit {
+      period = "3600s"
+    }
+  }
+
+  conditions {
+    display_name = "Trust policy negative cache hits exceed 200/hr"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.trust-policy-not-found.name}\" AND resource.type=\"cloud_run_revision\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 200
+      duration        = "0s"
+
+      aggregations {
+        alignment_period   = "3600s"
+        per_series_aligner = "ALIGN_SUM"
+      }
+
+      group_by_fields = ["metric.labels.identity"]
+    }
+  }
+
+  documentation {
+    content   = "Trust policy identity `$${metric.labels.identity}` has exceeded 200 negative cache hits in the last hour."
+    mime_type = "text/markdown"
+  }
+
+  notification_channels = var.notification_channels
+  enabled               = true
+}
