@@ -252,6 +252,12 @@ resource "google_logging_metric" "trust-policy-not-found" {
     metric_kind = "DELTA"
     value_type  = "INT64"
     unit        = "1"
+
+    labels {
+      key         = "identity"
+      value_type  = "STRING"
+      description = "The trust policy identity that was not found"
+    }
   }
 
   label_extractors = {
