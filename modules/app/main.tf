@@ -282,11 +282,11 @@ resource "google_monitoring_alert_policy" "trust-policy-not-found" {
       duration        = "0s"
 
       aggregations {
-        alignment_period   = "3600s"
-        per_series_aligner = "ALIGN_SUM"
+        alignment_period     = "3600s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["metric.labels.identity"]
       }
-
-      group_by_fields = ["metric.labels.identity"]
     }
   }
 
