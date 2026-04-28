@@ -184,9 +184,16 @@ func NewMultiManager(managers []Manager) Manager {
 // layered on top. When quota data is available, requests are routed via
 // argmax(remaining) within the highest non-empty tier (comfortable, tight,
 // or last-resort). When no candidate has quota data, consistent hashing is
-// used. Within a single oauth2.ReuseTokenSource window (~55 min) callers
-// reuse a minted token, which provides natural per-window stickiness; quota
-// drift between windows is acceptable.
+// used.
+//
+// Note that this trades the strict (scope, identity) determinism of
+// consistent hashing for capacity-aware distribution. Callers that hold a
+// minted token across many GitHub calls (e.g. via oauth2.ReuseTokenSource)
+// retain stickiness within the lifetime of a single token, but successive
+// Exchange calls for the same (scope, identity) may route to different
+// Apps and cannot update GitHub check runs created by a previous App.
+// Operators who require strict check-run ownership preservation should
+// continue to use NewMultiManager.
 func NewMultiManagerWithQuota(managers []Manager, q *QuotaConfig) Manager {
 	if len(managers) == 0 {
 		panic("ghinstall: NewMultiManagerWithQuota requires at least one manager")
