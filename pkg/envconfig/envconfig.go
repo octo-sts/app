@@ -95,6 +95,9 @@ func BaseConfig() (*EnvConfig, error) {
 	if cfg.QuotaFloorSoft < cfg.QuotaFloorHard {
 		return nil, fmt.Errorf("OCTOSTS_QUOTA_FLOOR_SOFT (%d) must be >= OCTOSTS_QUOTA_FLOOR_HARD (%d)", cfg.QuotaFloorSoft, cfg.QuotaFloorHard)
 	}
+	if cfg.QuotaStaleAfter <= 0 {
+		return nil, fmt.Errorf("OCTOSTS_QUOTA_STALE (%s) must be positive", cfg.QuotaStaleAfter)
+	}
 
 	return cfg, err
 }

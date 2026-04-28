@@ -15,13 +15,19 @@ import (
 
 // fakePickerManager implements Manager for picker tests. It returns the
 // configured installID without going through GitHub's installations API,
-// which lets the picker tests focus on tier selection logic only.
+// which lets the picker tests focus on tier selection logic only. When
+// getErr is set, Get returns that error instead of the default NotFound or
+// success path — used to model a misconfigured / failing manager.
 type fakePickerManager struct {
 	installID int64
 	installed bool
+	getErr    error
 }
 
 func (f *fakePickerManager) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	if f.getErr != nil {
+		return nil, 0, f.getErr
+	}
 	if !f.installed {
 		return nil, 0, status.Error(codes.NotFound, "not installed")
 	}
@@ -225,5 +231,83 @@ func TestPickByQuota50kBelowSoftFloorTakesBackseat(t *testing.T) {
 	}
 	if id != 2 {
 		t.Errorf("picked install %d, want 2 (comfortable beats tight even when tight has more cap)", id)
+	}
+}
+
+func TestPickByQuotaCanceledContext(t *testing.T) {
+	// A canceled context must short-circuit the picker before it touches
+	// any manager — the caller's atomic-counter fallback will then surface
+	// context.Canceled naturally on the single fallback Get call.
+	managers := newFakePickerManagers(1, 2, 3)
+	store := NewQuotaStore(time.Minute)
+	store.Update(1, 5000, 15000)
+	store.Update(2, 12000, 15000)
+	store.Update(3, 30000, 50000)
+
+	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, _, ok := pickByQuota(ctx, managers, "owner", "owner/repo", "id", cfg); ok {
+		t.Errorf("canceled context: ok = true, want false (must short-circuit)")
+	}
+}
+
+func TestPickByQuotaTieBreakHashesByIdentity(t *testing.T) {
+	// All four installs tied at exactly cap. Tie-break must be:
+	//   - stable per (scope, identity): repeated calls with the same identity
+	//     return the same install
+	//   - distributed across the tied pool over a spread of identities: not
+	//     every identity collapses to pool[0]
+	managers := newFakePickerManagers(1, 2, 3, 4)
+	store := NewQuotaStore(time.Minute)
+	for _, id := range []int64{1, 2, 3, 4} {
+		store.Update(id, 50000, 50000)
+	}
+	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
+
+	_, idA, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", "alice", cfg)
+	for range 5 {
+		_, id, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", "alice", cfg)
+		if id != idA {
+			t.Errorf("same identity, different pick: %d vs %d", id, idA)
+		}
+	}
+
+	picks := make(map[int64]bool)
+	for _, ident := range []string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi"} {
+		_, id, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", ident, cfg)
+		picks[id] = true
+	}
+	if len(picks) < 2 {
+		t.Errorf("tied pool of 4 produced only %d distinct picks across 8 identities: %v", len(picks), picks)
+	}
+}
+
+func TestPickByQuotaSkipsNonNotFoundErrors(t *testing.T) {
+	// Manager 1 is broken (Internal error). Managers 2 and 3 are healthy.
+	// The picker must skip 1 and route to the best of 2 and 3 by remaining.
+	// This locks in the resilience behavior — a misconfigured app must not
+	// poison every Nth request.
+	managers := []Manager{
+		&fakePickerManager{installID: 1, getErr: status.Error(codes.Internal, "kms borked")},
+		&fakePickerManager{installID: 2, installed: true},
+		&fakePickerManager{installID: 3, installed: true},
+	}
+	store := NewQuotaStore(time.Minute)
+	store.Update(2, 20000, 50000)
+	store.Update(3, 30000, 50000)
+	// install 1 has quota data too, but the manager errors out — picker
+	// must never reach the Store.Get for it.
+	store.Update(1, 99000, 50000)
+
+	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
+	_, id, ok := pickByQuota(context.Background(), managers, "owner", "owner/repo", "id", cfg)
+	if !ok {
+		t.Fatalf("ok = false; expected picker to route around the broken manager")
+	}
+	if id != 3 {
+		t.Errorf("picked install %d, want 3 (max remaining among healthy managers)", id)
 	}
 }

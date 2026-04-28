@@ -132,6 +132,24 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Zero stale duration rejected",
+			envVars: map[string]string{
+				"PORT":                "8080",
+				"GITHUB_APP_IDS":      "12345678",
+				"OCTOSTS_QUOTA_STALE": "0s",
+			},
+			wantErr: true,
+		},
+		{
+			name: "Negative stale duration rejected",
+			envVars: map[string]string{
+				"PORT":                "8080",
+				"GITHUB_APP_IDS":      "12345678",
+				"OCTOSTS_QUOTA_STALE": "-5m",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

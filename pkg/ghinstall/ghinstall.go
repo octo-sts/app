@@ -99,8 +99,12 @@ type QuotaConfig struct {
 }
 
 // roundRobin distributes requests across managers using an atomic counter as
-// the cold-start strategy. When a non-nil QuotaConfig is provided, requests
-// first try capacity-aware selection.
+// the cold-start strategy, optionally with capacity-aware selection layered
+// on top via QuotaConfig. It does not use scope or identity for routing, so
+// different callers with the same (scope, identity) may land on different
+// apps. Use this only when the caller's trust policy does not require
+// checks:write — i.e., when there is no GitHub check-run ownership
+// constraint.
 type roundRobin struct {
 	managers []Manager
 	counter  atomic.Uint64
@@ -108,7 +112,12 @@ type roundRobin struct {
 }
 
 // NewRoundRobin creates a Manager that distributes requests across the given
-// managers using an atomic round-robin counter on cold start.
+// managers using an atomic round-robin counter.
+//
+// Use this when the trust policy does NOT require checks:write. For policies
+// that do require checks:write, use NewMultiManager (consistent hashing) so
+// that the same GitHub App always handles a given (scope, identity) and can
+// therefore update check runs it previously created.
 func NewRoundRobin(managers []Manager) Manager {
 	if len(managers) == 0 {
 		panic("ghinstall: NewRoundRobin requires at least one manager")
@@ -121,6 +130,10 @@ func NewRoundRobin(managers []Manager) Manager {
 // argmax(remaining) within the highest non-empty tier (comfortable, tight,
 // or last-resort). When no candidate has quota data, the atomic counter is
 // used.
+//
+// Same checks:write caveat as NewRoundRobin: capacity-aware re-routing is
+// non-deterministic across (scope, identity) and will break check-run
+// ownership. Use NewMultiManager for trust policies that grant checks:write.
 func NewRoundRobinWithQuota(managers []Manager, q *QuotaConfig) Manager {
 	if len(managers) == 0 {
 		panic("ghinstall: NewRoundRobinWithQuota requires at least one manager")
@@ -239,6 +252,9 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 	if q == nil || q.Store == nil {
 		return nil, 0, false
 	}
+	if ctx.Err() != nil {
+		return nil, 0, false
+	}
 
 	type cand struct {
 		atr       *ghinstallation.AppsTransport
@@ -270,13 +286,27 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 	}
 
 	pickFromPool := func(pool []cand) cand {
+		// Find the max remaining, then break ties with a stable hash of
+		// (scope, identity) so equal-quota installs share load deterministically
+		// per request rather than always sending bursts to pool[0].
 		best := pool[0]
 		for _, c := range pool[1:] {
 			if c.remaining > best.remaining {
 				best = c
 			}
 		}
-		return best
+		var tied []cand
+		for _, c := range pool {
+			if c.remaining == best.remaining {
+				tied = append(tied, c)
+			}
+		}
+		if len(tied) == 1 {
+			return tied[0]
+		}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(scope + ":" + identity))
+		return tied[int(h.Sum32())%len(tied)]
 	}
 
 	var comfortable, tight, lastResort []cand
