@@ -57,11 +57,12 @@ func main() {
 		}
 	}
 
-	// Capacity-aware routing: a shared QuotaStore is populated by the
-	// transport tap (X-RateLimit-Remaining headers on every GitHub response)
-	// and read by the manager selection logic. Cold start (no quota data
-	// yet) safely falls back to the existing FNV-hash / atomic-counter
-	// strategies.
+	// Capacity-aware routing for the round-robin path: a shared QuotaStore
+	// is populated by the transport tap (X-RateLimit-Remaining headers on
+	// every GitHub response) and read by NewRoundRobinWithQuota. Cold start
+	// (no quota data yet) safely falls back to the existing atomic-counter
+	// strategy. multiManager keeps strict consistent hashing — necessary
+	// for GitHub check-run ownership preservation across token rotations.
 	quotaStore := ghinstall.NewQuotaStore(baseCfg.QuotaStaleAfter)
 	quotaCfg := &ghinstall.QuotaConfig{
 		Store:     quotaStore,
@@ -92,7 +93,7 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	im := ghinstall.NewMultiManagerWithQuota(managers, quotaCfg)
+	im := ghinstall.NewMultiManager(managers)
 	rrm := ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 
 	d := duplex.New(

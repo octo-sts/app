@@ -635,54 +635,6 @@ func TestRoundRobinWithQuotaColdStartFallsBack(t *testing.T) {
 	}
 }
 
-func TestMultiManagerWithQuotaPicksMaxRemaining(t *testing.T) {
-	ctx := context.Background()
-	managers, installIDs := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
-
-	store := NewQuotaStore(time.Minute)
-	store.Update(installIDs[0], 8000, 15000)
-	store.Update(installIDs[1], 1200, 15000) // last_resort
-	store.Update(installIDs[2], 30000, 50000)
-
-	mm := NewMultiManagerWithQuota(managers, &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500})
-
-	// Even though FNV would deterministically pick one slot, capacity-aware
-	// selection must override and pick installIDs[2] (only comfortable one).
-	for i := range 5 {
-		_, id, err := mm.Get(ctx, testOwner, testOwner+"/repo", "ident")
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if id != installIDs[2] {
-			t.Errorf("call %d: picked install %d, want %d (only one in comfortable tier)", i, id, installIDs[2])
-		}
-	}
-}
-
-func TestMultiManagerWithQuotaColdStartUsesFNV(t *testing.T) {
-	ctx := context.Background()
-	managers, _ := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
-
-	store := NewQuotaStore(time.Minute)
-	mm := NewMultiManagerWithQuota(managers, &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500})
-
-	// No quota data yet — must fall back to FNV consistent hashing, which
-	// is deterministic for the same (scope, identity).
-	_, firstID, err := mm.Get(ctx, testOwner, testOwner+"/repo", "ident")
-	if err != nil {
-		t.Fatalf("Get: %v", err)
-	}
-	for i := range 4 {
-		_, id, err := mm.Get(ctx, testOwner, testOwner+"/repo", "ident")
-		if err != nil {
-			t.Fatalf("Get: %v", err)
-		}
-		if id != firstID {
-			t.Errorf("call %d: FNV cold-start fallback should be deterministic, got %d, first was %d", i, id, firstID)
-		}
-	}
-}
-
 func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 

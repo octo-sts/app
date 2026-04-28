@@ -79,10 +79,11 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
-// QuotaConfig configures three-tier capacity-aware selection. When set on a
-// Manager, the Get path first attempts to pick the install with the most
-// absolute remaining quota among those above the soft floor, falling back
-// through tighter pools before reaching the cold-start strategy.
+// QuotaConfig configures three-tier capacity-aware selection for the
+// roundRobin manager. multiManager intentionally opts out: its consistent
+// (scope, identity) hash exists to preserve GitHub check-run ownership
+// across token rotations, and that determinism is incompatible with
+// capacity-aware re-routing.
 type QuotaConfig struct {
 	// Store is the source of per-installation remaining-quota snapshots,
 	// populated by the ghtransport response tap. May be nil to disable
@@ -159,7 +160,6 @@ func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*
 
 type multiManager struct {
 	managers []Manager
-	quota    *QuotaConfig
 }
 
 // NewMultiManager creates a Manager that distributes requests across the given
@@ -169,6 +169,8 @@ type multiManager struct {
 // GitHub App. This is required because GitHub check runs can only be updated
 // by the app that created them — non-deterministic app selection causes 403
 // errors when a token refresh or process restart lands on a different app.
+// Capacity-aware fairshare (QuotaConfig) intentionally does not apply here:
+// the determinism is the contract.
 //
 // Load is distributed across apps by owner: different owners hash to different
 // apps. If the selected app is not installed for an owner, the remaining apps
@@ -180,32 +182,7 @@ func NewMultiManager(managers []Manager) Manager {
 	return &multiManager{managers: managers}
 }
 
-// NewMultiManagerWithQuota is NewMultiManager with capacity-aware selection
-// layered on top. When quota data is available, requests are routed via
-// argmax(remaining) within the highest non-empty tier (comfortable, tight,
-// or last-resort). When no candidate has quota data, consistent hashing is
-// used.
-//
-// Note that this trades the strict (scope, identity) determinism of
-// consistent hashing for capacity-aware distribution. Callers that hold a
-// minted token across many GitHub calls (e.g. via oauth2.ReuseTokenSource)
-// retain stickiness within the lifetime of a single token, but successive
-// Exchange calls for the same (scope, identity) may route to different
-// Apps and cannot update GitHub check runs created by a previous App.
-// Operators who require strict check-run ownership preservation should
-// continue to use NewMultiManager.
-func NewMultiManagerWithQuota(managers []Manager, q *QuotaConfig) Manager {
-	if len(managers) == 0 {
-		panic("ghinstall: NewMultiManagerWithQuota requires at least one manager")
-	}
-	return &multiManager{managers: managers, quota: q}
-}
-
 func (rr *multiManager) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
-	if atr, id, ok := pickByQuota(ctx, rr.managers, owner, scope, identity, rr.quota); ok {
-		return atr, id, nil
-	}
-
 	// Consistent hashing on (scope, identity): the same requester acting on
 	// the same repo always maps to the same GitHub App. This is required
 	// because GitHub check runs can only be updated by the app that created
