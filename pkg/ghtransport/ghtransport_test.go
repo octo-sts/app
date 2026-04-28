@@ -13,16 +13,69 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
+
+func TestQuotaTapPopulatesStore(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "8421")
+		w.Header().Set("X-RateLimit-Limit", "15000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := ghinstall.NewQuotaStore(time.Minute)
+	tap := &quotaTap{inner: http.DefaultTransport, store: store}
+	client := &http.Client{Transport: tap}
+
+	const installID = int64(987654)
+	req, err := http.NewRequestWithContext(EnrichContext(context.Background(), 12345, installID), http.MethodGet, srv.URL, nil)
+	assert.NoError(t, err)
+	resp, err := client.Do(req)
+	assert.NoError(t, err)
+	resp.Body.Close()
+
+	rem, lim, ok := store.Get(installID)
+	assert.True(t, ok, "quota store should be populated after a tapped response")
+	assert.Equal(t, 8421, rem)
+	assert.Equal(t, 15000, lim)
+}
+
+func TestQuotaTapIgnoresMissingContext(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "1234")
+		w.Header().Set("X-RateLimit-Limit", "15000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := ghinstall.NewQuotaStore(time.Minute)
+	tap := &quotaTap{inner: http.DefaultTransport, store: store}
+	client := &http.Client{Transport: tap}
+
+	// Plain context with no EnrichContext → no installID → no store update.
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL, nil)
+	assert.NoError(t, err)
+	resp, err := client.Do(req)
+	assert.NoError(t, err)
+	resp.Body.Close()
+
+	if _, _, ok := store.Get(0); ok {
+		t.Errorf("store unexpectedly populated for installID=0")
+	}
+}
 
 func TestGCPKMS(t *testing.T) {
 	ctx := context.Background()
@@ -42,7 +95,7 @@ func TestGCPKMS(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for i, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, testConfig.KMSKeys[i], testConfig, kmsClient)
+		transport, err := New(ctx, appID, testConfig.KMSKeys[i], testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -60,7 +113,7 @@ func TestCertEnvVar(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient)
+		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -78,7 +131,7 @@ func TestCertFile(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient)
+		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}

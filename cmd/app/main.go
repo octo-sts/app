@@ -57,6 +57,18 @@ func main() {
 		}
 	}
 
+	// Capacity-aware routing: a shared QuotaStore is populated by the
+	// transport tap (X-RateLimit-Remaining headers on every GitHub response)
+	// and read by the manager selection logic. Cold start (no quota data
+	// yet) safely falls back to the existing FNV-hash / atomic-counter
+	// strategies.
+	quotaStore := ghinstall.NewQuotaStore(baseCfg.QuotaStaleAfter)
+	quotaCfg := &ghinstall.QuotaConfig{
+		Store:     quotaStore,
+		SoftFloor: baseCfg.QuotaFloorSoft,
+		HardFloor: baseCfg.QuotaFloorHard,
+	}
+
 	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
 	for i, appID := range baseCfg.AppIDs {
 		var kmsKey string
@@ -67,7 +79,7 @@ func main() {
 				continue
 			}
 		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, quotaStore)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}
@@ -80,8 +92,8 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	im := ghinstall.NewMultiManager(managers)
-	rrm := ghinstall.NewRoundRobin(managers)
+	im := ghinstall.NewMultiManagerWithQuota(managers, quotaCfg)
+	rrm := ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 
 	d := duplex.New(
 		baseCfg.Port,

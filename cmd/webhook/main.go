@@ -68,7 +68,7 @@ func main() {
 		kmsKey = baseCfg.KMSKeys[0]
 	}
 
-	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, nil)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 	}
