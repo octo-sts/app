@@ -272,10 +272,6 @@ resource "google_monitoring_alert_policy" "trust-policy-not-found" {
 
   alert_strategy {
     auto_close = "3600s"
-
-    notification_rate_limit {
-      period = "3600s"
-    }
   }
 
   conditions {
