@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-// Store is an in-memory implementation of stickystore.Store for testing.
+// Store is an in-memory implementation of stickystore.
 type Store struct {
 	mu sync.RWMutex
 	m  map[string]int64
