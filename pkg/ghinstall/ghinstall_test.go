@@ -554,6 +554,87 @@ func TestRoundRobinFallbackNotInstalled(t *testing.T) {
 	}
 }
 
+// testOwner is the GitHub org login used by makeManagersWithDistinctInstalls.
+const testOwner = "my-org"
+
+// makeManagersWithDistinctInstalls builds one Manager per appID, each backed
+// by a test server that reports a unique installation ID for testOwner.
+// Installation IDs are 1000, 1001, ..., 1000+n-1 (parallel to manager index).
+func makeManagersWithDistinctInstalls(t *testing.T, appIDs []int64) ([]Manager, []int64) {
+	t.Helper()
+	managers := make([]Manager, 0, len(appIDs))
+	installIDs := make([]int64, 0, len(appIDs))
+	for i, appID := range appIDs {
+		installID := int64(1000 + i)
+		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/app/installations" {
+				_ = json.NewEncoder(w).Encode([]github.Installation{{
+					ID:      github.Ptr(installID),
+					Account: &github.User{Login: github.Ptr(testOwner)},
+				}})
+				return
+			}
+			w.WriteHeader(http.StatusNotImplemented)
+		}), appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New: %v", err)
+		}
+		managers = append(managers, m)
+		installIDs = append(installIDs, installID)
+	}
+	return managers, installIDs
+}
+
+func TestRoundRobinWithQuotaPicksMaxRemaining(t *testing.T) {
+	ctx := context.Background()
+	managers, installIDs := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
+
+	store := NewQuotaStore(time.Minute)
+	// Make installIDs[1] the "best" by absolute remaining.
+	store.Update(installIDs[0], 5000, 15000)
+	store.Update(installIDs[1], 49000, 50000)
+	store.Update(installIDs[2], 14000, 50000)
+
+	rrm := NewRoundRobinWithQuota(managers, &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500})
+
+	// Run multiple times — capacity-aware path must always pick installIDs[1]
+	// while the data is fresh, regardless of the atomic counter.
+	for i := range 5 {
+		_, id, err := rrm.Get(ctx, testOwner, testOwner+"/repo", "ident")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if id != installIDs[1] {
+			t.Errorf("call %d: picked install %d, want %d (max remaining)", i, id, installIDs[1])
+		}
+	}
+}
+
+func TestRoundRobinWithQuotaColdStartFallsBack(t *testing.T) {
+	ctx := context.Background()
+	managers, installIDs := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
+
+	store := NewQuotaStore(time.Minute)
+	rrm := NewRoundRobinWithQuota(managers, &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500})
+
+	// No quota data yet — must fall back to atomic round-robin and visit
+	// every install across enough calls.
+	seen := make(map[int64]bool)
+	for range 12 {
+		_, id, err := rrm.Get(ctx, testOwner, testOwner+"/repo", "ident")
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		seen[id] = true
+	}
+	for _, want := range installIDs {
+		if !seen[want] {
+			t.Errorf("install %d never picked: cold-start fallback must spread across all installs (seen=%v)", want, seen)
+		}
+	}
+}
+
 func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 

@@ -7,28 +7,70 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/gcpkms"
+	"github.com/octo-sts/app/pkg/ghinstall"
 )
+
+type ctxKey int
+
+const installIDCtxKey ctxKey = 0
 
 // EnrichContext adds GitHub App and installation ID values to the context so
 // that the httpmetrics transport can label rate-limit metrics with the specific
-// installation consuming quota.
+// installation consuming quota, and so that the quota tap (if configured) can
+// attribute X-RateLimit-Remaining headers to the right installation.
 func EnrichContext(ctx context.Context, appID, installationID int64) context.Context {
 	ctx = metrics.WithGitHubAppID(ctx, appID)
 	ctx = metrics.WithGitHubInstallationID(ctx, installationID)
+	ctx = context.WithValue(ctx, installIDCtxKey, installationID)
 	return ctx
 }
 
-func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient) (*ghinstallation.AppsTransport, error) {
+func installationIDFromContext(ctx context.Context) int64 {
+	v, _ := ctx.Value(installIDCtxKey).(int64)
+	return v
+}
+
+// quotaTap is a RoundTripper that updates a QuotaStore from each response's
+// X-RateLimit-Remaining / X-RateLimit-Limit headers. The (app_id,
+// installation_id) labels populated by EnrichContext are used to attribute
+// the snapshot to the correct installation.
+type quotaTap struct {
+	inner http.RoundTripper
+	store *ghinstall.QuotaStore
+}
+
+func (q *quotaTap) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := q.inner.RoundTrip(req)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	if installID := installationIDFromContext(req.Context()); installID != 0 {
+		remaining, rerr := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining"))
+		limit, lerr := strconv.Atoi(resp.Header.Get("X-RateLimit-Limit"))
+		if rerr == nil && lerr == nil && limit > 0 {
+			q.store.Update(installID, remaining, limit)
+		}
+	}
+	return resp, err
+}
+
+// New creates a GitHub AppsTransport. If quota is non-nil, response headers
+// are also tapped into the QuotaStore for capacity-aware routing decisions.
+func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
 	// Wrap the base HTTP transport so every GitHub response's X-RateLimit-*
 	// headers populate the github_rate_limit_* metrics with the app_id and
 	// installation_id labels set on the request context by EnrichContext.
 	base := metrics.WrapTransport(http.DefaultTransport)
+	if quota != nil {
+		base = &quotaTap{inner: base, store: quota}
+	}
 
 	switch {
 	case env.AppSecretCertificateEnvVar != "":

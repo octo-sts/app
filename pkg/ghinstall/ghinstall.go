@@ -79,14 +79,36 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
-// roundRobin distributes requests across managers using an atomic counter.
-// It does not use scope or identity for routing, so different callers with
-// the same (scope, identity) may land on different apps. Use this only when
-// the caller's trust policy does not require checks:write — i.e., when there
-// is no GitHub check-run ownership constraint.
+// QuotaConfig configures three-tier capacity-aware selection for the
+// roundRobin manager. multiManager intentionally opts out: its consistent
+// (scope, identity) hash exists to preserve GitHub check-run ownership
+// across token rotations, and that determinism is incompatible with
+// capacity-aware re-routing.
+type QuotaConfig struct {
+	// Store is the source of per-installation remaining-quota snapshots,
+	// populated by the ghtransport response tap. May be nil to disable
+	// quota-aware selection.
+	Store *QuotaStore
+	// SoftFloor: remaining < SoftFloor demotes an install out of the
+	// preferred pool. Heavy/sticky callers landing on the preferred pool
+	// always have at least SoftFloor headroom.
+	SoftFloor int
+	// HardFloor: remaining < HardFloor excludes an install entirely except
+	// when every install is below it ("last resort").
+	HardFloor int
+}
+
+// roundRobin distributes requests across managers using an atomic counter as
+// the cold-start strategy, optionally with capacity-aware selection layered
+// on top via QuotaConfig. It does not use scope or identity for routing, so
+// different callers with the same (scope, identity) may land on different
+// apps. Use this only when the caller's trust policy does not require
+// checks:write — i.e., when there is no GitHub check-run ownership
+// constraint.
 type roundRobin struct {
 	managers []Manager
 	counter  atomic.Uint64
+	quota    *QuotaConfig
 }
 
 // NewRoundRobin creates a Manager that distributes requests across the given
@@ -103,7 +125,27 @@ func NewRoundRobin(managers []Manager) Manager {
 	return &roundRobin{managers: managers}
 }
 
+// NewRoundRobinWithQuota is NewRoundRobin with capacity-aware selection
+// layered on top. When quota data is available, requests are routed via
+// argmax(remaining) within the highest non-empty tier (comfortable, tight,
+// or last-resort). When no candidate has quota data, the atomic counter is
+// used.
+//
+// Same checks:write caveat as NewRoundRobin: capacity-aware re-routing is
+// non-deterministic across (scope, identity) and will break check-run
+// ownership. Use NewMultiManager for trust policies that grant checks:write.
+func NewRoundRobinWithQuota(managers []Manager, q *QuotaConfig) Manager {
+	if len(managers) == 0 {
+		panic("ghinstall: NewRoundRobinWithQuota requires at least one manager")
+	}
+	return &roundRobin{managers: managers, quota: q}
+}
+
 func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
+	if atr, id, ok := pickByQuota(ctx, rr.managers, owner, scope, identity, rr.quota); ok {
+		return atr, id, nil
+	}
+
 	idx := rr.counter.Add(1) % uint64(len(rr.managers))
 
 	atr, id, err := rr.managers[idx].Get(ctx, owner, scope, identity)
@@ -140,6 +182,8 @@ type multiManager struct {
 // GitHub App. This is required because GitHub check runs can only be updated
 // by the app that created them — non-deterministic app selection causes 403
 // errors when a token refresh or process restart lands on a different app.
+// Capacity-aware fairshare (QuotaConfig) intentionally does not apply here:
+// the determinism is the contract.
 //
 // Load is distributed across apps by owner: different owners hash to different
 // apps. If the selected app is not installed for an owner, the remaining apps
@@ -185,4 +229,113 @@ func (rr *multiManager) Get(ctx context.Context, owner, scope, identity string) 
 	}
 
 	return nil, 0, err
+}
+
+// pickByQuota selects an installed manager using three-tier capacity-aware
+// fairshare. Returns ok=false when quota selection cannot proceed (no config,
+// or no candidate has known quota data) — callers fall back to their cold-
+// start strategy.
+//
+//	comfortable = installs with remaining >= SoftFloor
+//	tight       = installs with HardFloor <= remaining < SoftFloor
+//	last_resort = installs with remaining < HardFloor
+//
+// The first non-empty pool wins; within a pool, argmax(remaining) — the
+// install with the most absolute headroom — is selected. Heavy callers thus
+// land on the install best able to absorb them.
+//
+// A candidate without quota data is included as if it had remaining = limit
+// = SoftFloor + 1 so that newly-seen installs are explored. Until at least
+// one candidate has known data, ok=false to keep cold-start deterministic
+// (FNV hash for multiManager, atomic counter for roundRobin).
+func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity string, q *QuotaConfig) (*ghinstallation.AppsTransport, int64, bool) {
+	if q == nil || q.Store == nil {
+		return nil, 0, false
+	}
+	if ctx.Err() != nil {
+		return nil, 0, false
+	}
+
+	type cand struct {
+		atr       *ghinstallation.AppsTransport
+		installID int64
+		remaining int
+	}
+
+	var candidates []cand
+	anyKnown := false
+	for _, m := range managers {
+		atr, id, err := m.Get(ctx, owner, scope, identity)
+		if err != nil {
+			continue
+		}
+		rem, _, ok := q.Store.Get(id)
+		if ok {
+			anyKnown = true
+		} else {
+			// Treat unknowns as "just above the soft floor" — they're
+			// candidates worth exploring, but known-comfortable installs
+			// (which have remaining >> SoftFloor early in the hour) win.
+			rem = q.SoftFloor + 1
+		}
+		candidates = append(candidates, cand{atr, id, rem})
+	}
+
+	if !anyKnown || len(candidates) == 0 {
+		return nil, 0, false
+	}
+
+	pickFromPool := func(pool []cand) cand {
+		// Find the max remaining, then break ties with a stable hash of
+		// (scope, identity) so equal-quota installs share load deterministically
+		// per request rather than always sending bursts to pool[0].
+		best := pool[0]
+		for _, c := range pool[1:] {
+			if c.remaining > best.remaining {
+				best = c
+			}
+		}
+		var tied []cand
+		for _, c := range pool {
+			if c.remaining == best.remaining {
+				tied = append(tied, c)
+			}
+		}
+		if len(tied) == 1 {
+			return tied[0]
+		}
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(scope + ":" + identity))
+		return tied[int(h.Sum32())%len(tied)]
+	}
+
+	var comfortable, tight, lastResort []cand
+	for _, c := range candidates {
+		switch {
+		case c.remaining >= q.SoftFloor:
+			comfortable = append(comfortable, c)
+		case c.remaining >= q.HardFloor:
+			tight = append(tight, c)
+		default:
+			lastResort = append(lastResort, c)
+		}
+	}
+
+	pool := comfortable
+	tier := "comfortable"
+	if len(pool) == 0 {
+		pool = tight
+		tier = "tight"
+	}
+	if len(pool) == 0 {
+		pool = lastResort
+		tier = "last_resort"
+	}
+	if len(pool) == 0 {
+		return nil, 0, false
+	}
+
+	chosen := pickFromPool(pool)
+	clog.DebugContextf(ctx, "ghinstall: quota-aware pick install=%d tier=%s remaining=%d", chosen.installID, tier, chosen.remaining)
+	return chosen.atr, chosen.installID, true
 }

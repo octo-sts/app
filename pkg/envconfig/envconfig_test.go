@@ -92,6 +92,64 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "Quota floors valid",
+			envVars: map[string]string{
+				"PORT":                     "8080",
+				"GITHUB_APP_IDS":           "12345678",
+				"OCTOSTS_QUOTA_FLOOR_HARD": "1500",
+				"OCTOSTS_QUOTA_FLOOR_SOFT": "15000",
+				"OCTOSTS_QUOTA_STALE":      "5m",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Quota soft floor must be >= hard floor",
+			envVars: map[string]string{
+				"PORT":                     "8080",
+				"GITHUB_APP_IDS":           "12345678",
+				"OCTOSTS_QUOTA_FLOOR_HARD": "5000",
+				"OCTOSTS_QUOTA_FLOOR_SOFT": "1500",
+			},
+			wantErr: true,
+		},
+		{
+			name: "Quota floors equal is allowed",
+			envVars: map[string]string{
+				"PORT":                     "8080",
+				"GITHUB_APP_IDS":           "12345678",
+				"OCTOSTS_QUOTA_FLOOR_HARD": "1500",
+				"OCTOSTS_QUOTA_FLOOR_SOFT": "1500",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Negative floor rejected",
+			envVars: map[string]string{
+				"PORT":                     "8080",
+				"GITHUB_APP_IDS":           "12345678",
+				"OCTOSTS_QUOTA_FLOOR_HARD": "-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "Zero stale duration rejected",
+			envVars: map[string]string{
+				"PORT":                "8080",
+				"GITHUB_APP_IDS":      "12345678",
+				"OCTOSTS_QUOTA_STALE": "0s",
+			},
+			wantErr: true,
+		},
+		{
+			name: "Negative stale duration rejected",
+			envVars: map[string]string{
+				"PORT":                "8080",
+				"GITHUB_APP_IDS":      "12345678",
+				"OCTOSTS_QUOTA_STALE": "-5m",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

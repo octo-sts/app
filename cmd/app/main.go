@@ -57,6 +57,19 @@ func main() {
 		}
 	}
 
+	// Capacity-aware routing for the round-robin path: a shared QuotaStore
+	// is populated by the transport tap (X-RateLimit-Remaining headers on
+	// every GitHub response) and read by NewRoundRobinWithQuota. Cold start
+	// (no quota data yet) safely falls back to the existing atomic-counter
+	// strategy. multiManager keeps strict consistent hashing — necessary
+	// for GitHub check-run ownership preservation across token rotations.
+	quotaStore := ghinstall.NewQuotaStore(baseCfg.QuotaStaleAfter)
+	quotaCfg := &ghinstall.QuotaConfig{
+		Store:     quotaStore,
+		SoftFloor: baseCfg.QuotaFloorSoft,
+		HardFloor: baseCfg.QuotaFloorHard,
+	}
+
 	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
 	for i, appID := range baseCfg.AppIDs {
 		var kmsKey string
@@ -67,7 +80,7 @@ func main() {
 				continue
 			}
 		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, quotaStore)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}
@@ -81,7 +94,7 @@ func main() {
 		log.Panic("no apps with valid KMS keys configured")
 	}
 	im := ghinstall.NewMultiManager(managers)
-	rrm := ghinstall.NewRoundRobin(managers)
+	rrm := ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 
 	d := duplex.New(
 		baseCfg.Port,
