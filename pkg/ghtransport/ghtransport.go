@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -38,9 +39,12 @@ func installationIDFromContext(ctx context.Context) int64 {
 }
 
 // quotaTap is a RoundTripper that updates a QuotaStore from each response's
-// X-RateLimit-Remaining / X-RateLimit-Limit headers. The (app_id,
-// installation_id) labels populated by EnrichContext are used to attribute
-// the snapshot to the correct installation.
+// X-RateLimit-Remaining / X-RateLimit-Limit headers. Only installation-token
+// requests are recorded — app-level JWT requests return the shared app rate
+// limit (~5 000/hr) which would contaminate the per-installation store.
+//
+// ghinstallation uses "token <tok>" for installation tokens and "Bearer <jwt>"
+// for app JWTs, so we gate on the "token " prefix.
 type quotaTap struct {
 	inner http.RoundTripper
 	store *ghinstall.QuotaStore
@@ -51,7 +55,8 @@ func (q *quotaTap) RoundTrip(req *http.Request) (*http.Response, error) {
 	if err != nil || resp == nil {
 		return resp, err
 	}
-	if installID := installationIDFromContext(req.Context()); installID != 0 {
+	if installID := installationIDFromContext(req.Context()); installID != 0 &&
+		strings.HasPrefix(req.Header.Get("Authorization"), "token ") {
 		remaining, rerr := strconv.Atoi(resp.Header.Get("X-RateLimit-Remaining"))
 		limit, lerr := strconv.Atoi(resp.Header.Get("X-RateLimit-Limit"))
 		if rerr == nil && lerr == nil && limit > 0 {

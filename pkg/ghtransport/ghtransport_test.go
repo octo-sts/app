@@ -43,6 +43,8 @@ func TestQuotaTapPopulatesStore(t *testing.T) {
 	const installID = int64(987654)
 	req, err := http.NewRequestWithContext(EnrichContext(context.Background(), 12345, installID), http.MethodGet, srv.URL, nil)
 	assert.NoError(t, err)
+	// Simulate an installation-token request (ghinstallation uses "token " prefix).
+	req.Header.Set("Authorization", "token ghs_fake_installation_token")
 	resp, err := client.Do(req)
 	assert.NoError(t, err)
 	resp.Body.Close()
@@ -51,6 +53,33 @@ func TestQuotaTapPopulatesStore(t *testing.T) {
 	assert.True(t, ok, "quota store should be populated after a tapped response")
 	assert.Equal(t, 8421, rem)
 	assert.Equal(t, 15000, lim)
+}
+
+func TestQuotaTapIgnoresJWTAuth(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "4900")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	store := ghinstall.NewQuotaStore(time.Minute)
+	tap := &quotaTap{inner: http.DefaultTransport, store: store}
+	client := &http.Client{Transport: tap}
+
+	const installID = int64(987654)
+	req, err := http.NewRequestWithContext(EnrichContext(context.Background(), 12345, installID), http.MethodGet, srv.URL, nil)
+	assert.NoError(t, err)
+	// Simulate an app-JWT request (ghinstallation uses "Bearer " prefix).
+	// The 5000 limit is the app-level rate limit, not per-installation.
+	req.Header.Set("Authorization", "Bearer eyJhbGciOiJSUzI1NiJ9.fake.jwt")
+	resp, err := client.Do(req)
+	assert.NoError(t, err)
+	resp.Body.Close()
+
+	if _, _, ok := store.Get(installID); ok {
+		t.Errorf("store populated for JWT request — app-level rate limits must not be recorded")
+	}
 }
 
 func TestQuotaTapIgnoresMissingContext(t *testing.T) {
