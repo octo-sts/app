@@ -74,4 +74,5 @@ module "app" {
 
   github_apps           = var.github_apps
   notification_channels = local.notification_channels
+  sticky_store          = "firestore"
 }

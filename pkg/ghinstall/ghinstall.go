@@ -22,7 +22,16 @@ import (
 // scope and identity are used by multi-app implementations for routing;
 // single-app implementations may ignore them.
 type Manager interface {
+	// Get returns the transport and installation ID for the given owner.
+	// For multi-app managers (e.g. roundRobin), scope and identity inform
+	// routing decisions such as capacity-aware selection. Single-app
+	// managers ignore them.
 	Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error)
+
+	// GetByInstallation returns the transport for a specific installation ID
+	// if it belongs to the given owner. Used by the sticky store to retrieve
+	// a previously-persisted installation.
+	GetByInstallation(ctx context.Context, owner string, installationID int64) (*ghinstallation.AppsTransport, int64, error)
 }
 
 type manager struct {
@@ -43,8 +52,8 @@ func New(atr *ghinstallation.AppsTransport) (Manager, error) {
 }
 
 // Get returns the AppsTransport and installation ID for the given owner.
-// scope and identity are unused by the single-app manager; routing is handled
-// by multiManager.
+// scope and identity are unused by the single-app manager; routing across
+// apps is handled by the roundRobin manager.
 func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
 	if v, ok := m.cache.Get(cacheKey); ok {
@@ -79,11 +88,23 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
+// GetByInstallation returns this app's transport if its installation for
+// the given owner matches installationID. Delegates to Get, which serves
+// from the LRU cache on the hot path and calls ListInstallations on a
+// cold cache (once per app per owner after a deploy).
+func (m *manager) GetByInstallation(ctx context.Context, owner string, installationID int64) (*ghinstallation.AppsTransport, int64, error) {
+	atr, id, err := m.Get(ctx, owner, "", "")
+	if err != nil {
+		return nil, 0, err
+	}
+	if id != installationID {
+		return nil, 0, status.Errorf(codes.NotFound, "installation %d not found for %q", installationID, owner)
+	}
+	return atr, id, nil
+}
+
 // QuotaConfig configures three-tier capacity-aware selection for the
-// roundRobin manager. multiManager intentionally opts out: its consistent
-// (scope, identity) hash exists to preserve GitHub check-run ownership
-// across token rotations, and that determinism is incompatible with
-// capacity-aware re-routing.
+// roundRobin manager.
 type QuotaConfig struct {
 	// Store is the source of per-installation remaining-quota snapshots,
 	// populated by the ghtransport response tap. May be nil to disable
@@ -113,11 +134,6 @@ type roundRobin struct {
 
 // NewRoundRobin creates a Manager that distributes requests across the given
 // managers using an atomic round-robin counter.
-//
-// Use this when the trust policy does NOT require checks:write. For policies
-// that do require checks:write, use NewMultiManager (consistent hashing) so
-// that the same GitHub App always handles a given (scope, identity) and can
-// therefore update check runs it previously created.
 func NewRoundRobin(managers []Manager) Manager {
 	if len(managers) == 0 {
 		panic("ghinstall: NewRoundRobin requires at least one manager")
@@ -130,10 +146,6 @@ func NewRoundRobin(managers []Manager) Manager {
 // argmax(remaining) within the highest non-empty tier (comfortable, tight,
 // or last-resort). When no candidate has quota data, the atomic counter is
 // used.
-//
-// Same checks:write caveat as NewRoundRobin: capacity-aware re-routing is
-// non-deterministic across (scope, identity) and will break check-run
-// ownership. Use NewMultiManager for trust policies that grant checks:write.
 func NewRoundRobinWithQuota(managers []Manager, q *QuotaConfig) Manager {
 	if len(managers) == 0 {
 		panic("ghinstall: NewRoundRobinWithQuota requires at least one manager")
@@ -141,6 +153,9 @@ func NewRoundRobinWithQuota(managers []Manager, q *QuotaConfig) Manager {
 	return &roundRobin{managers: managers, quota: q}
 }
 
+// Get selects an installation for the given owner. When quota data is
+// available the capacity-aware picker chooses the install with the most
+// headroom; otherwise the atomic counter distributes evenly.
 func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
 	if atr, id, ok := pickByQuota(ctx, rr.managers, owner, scope, identity, rr.quota); ok {
 		return atr, id, nil
@@ -171,64 +186,18 @@ func (rr *roundRobin) Get(ctx context.Context, owner, scope, identity string) (*
 	return nil, 0, err
 }
 
-type multiManager struct {
-	managers []Manager
-}
-
-// NewMultiManager creates a Manager that distributes requests across the given
-// managers using consistent hashing on the (scope, identity) tuple.
-//
-// Consistent hashing ensures that the same owner always maps to the same
-// GitHub App. This is required because GitHub check runs can only be updated
-// by the app that created them — non-deterministic app selection causes 403
-// errors when a token refresh or process restart lands on a different app.
-// Capacity-aware fairshare (QuotaConfig) intentionally does not apply here:
-// the determinism is the contract.
-//
-// Load is distributed across apps by owner: different owners hash to different
-// apps. If the selected app is not installed for an owner, the remaining apps
-// are tried in order.
-func NewMultiManager(managers []Manager) Manager {
-	if len(managers) == 0 {
-		panic("ghinstall: NewMultiManager requires at least one manager")
-	}
-	return &multiManager{managers: managers}
-}
-
-func (rr *multiManager) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
-	// Consistent hashing on (scope, identity): the same requester acting on
-	// the same repo always maps to the same GitHub App. This is required
-	// because GitHub check runs can only be updated by the app that created
-	// them — non-deterministic app selection causes 403 errors.
-	//
-	// Hashing on both scope and identity (rather than owner alone) distributes
-	// load across apps: different identities acting on the same repo, or the
-	// same identity acting on different repos, can land on different apps.
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(scope + ":" + identity))
-	primary := int(h.Sum32()) % len(rr.managers)
-
-	atr, id, err := rr.managers[primary].Get(ctx, owner, scope, identity)
-	if err == nil {
-		return atr, id, nil
-	}
-
-	// If the selected app is not installed for this owner, try the remaining
-	// apps in order so that installation gaps are handled gracefully.
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		clog.InfoContextf(ctx, "app not installed for %q, trying other apps", owner)
-		for i, m := range rr.managers {
-			if i == primary {
-				continue
-			}
-			atr, id, err = m.Get(ctx, owner, scope, identity)
-			if err == nil {
-				return atr, id, nil
-			}
+// GetByInstallation iterates the underlying managers to find the one
+// whose installation for the given owner matches installationID. Each
+// manager serves from its LRU cache on the hot path, so this is a
+// series of in-memory lookups after warmup.
+func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, installationID int64) (*ghinstallation.AppsTransport, int64, error) {
+	for _, m := range rr.managers {
+		atr, id, err := m.GetByInstallation(ctx, owner, installationID)
+		if err == nil {
+			return atr, id, nil
 		}
 	}
-
-	return nil, 0, err
+	return nil, 0, status.Errorf(codes.NotFound, "installation %d not found for %q", installationID, owner)
 }
 
 // pickByQuota selects an installed manager using three-tier capacity-aware

@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
+	"github.com/octo-sts/app/pkg/stickystore"
 )
 
 func main() {
@@ -93,8 +95,17 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	im := ghinstall.NewMultiManager(managers)
 	rrm := ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
+
+	var sticky stickystore.Store
+	if len(managers) > 1 && baseCfg.StickyStore != "" {
+		var closer io.Closer
+		sticky, closer, err = stickystore.New(ctx, baseCfg)
+		if err != nil {
+			log.Panicf("failed to create sticky store: %v", err)
+		}
+		defer closer.Close()
+	}
 
 	d := duplex.New(
 		baseCfg.Port,
@@ -112,7 +123,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, rrm, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

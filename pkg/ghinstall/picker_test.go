@@ -34,6 +34,13 @@ func (f *fakePickerManager) Get(_ context.Context, _, _, _ string) (*ghinstallat
 	return nil, f.installID, nil
 }
 
+func (f *fakePickerManager) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	if f.installed && f.installID == id {
+		return nil, f.installID, nil
+	}
+	return nil, 0, status.Error(codes.NotFound, "not installed")
+}
+
 func newFakePickerManagers(installIDs ...int64) []Manager {
 	out := make([]Manager, len(installIDs))
 	for i, id := range installIDs {
