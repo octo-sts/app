@@ -66,7 +66,7 @@ func TestPickByQuotaNilStore(t *testing.T) {
 
 func TestPickByQuotaColdStartFallsThrough(t *testing.T) {
 	// All installs unknown → must report ok=false so the caller falls back
-	// to its cold-start strategy (FNV / atomic counter).
+	// to the atomic counter.
 	managers := newFakePickerManagers(1, 2, 3)
 	store := NewQuotaStore(time.Minute)
 	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
@@ -261,12 +261,9 @@ func TestPickByQuotaCanceledContext(t *testing.T) {
 	}
 }
 
-func TestPickByQuotaTieBreakHashesByIdentity(t *testing.T) {
-	// All four installs tied at exactly cap. Tie-break must be:
-	//   - stable per (scope, identity): repeated calls with the same identity
-	//     return the same install
-	//   - distributed across the tied pool over a spread of identities: not
-	//     every identity collapses to pool[0]
+func TestPickByQuotaTiedInstallsReturnStableResult(t *testing.T) {
+	// All four installs tied at exactly cap. The picker must return a
+	// deterministic result across repeated calls.
 	managers := newFakePickerManagers(1, 2, 3, 4)
 	store := NewQuotaStore(time.Minute)
 	for _, id := range []int64{1, 2, 3, 4} {
@@ -274,21 +271,15 @@ func TestPickByQuotaTieBreakHashesByIdentity(t *testing.T) {
 	}
 	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
 
-	_, idA, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", "alice", cfg)
+	_, firstID, ok := pickByQuota(context.Background(), managers, "owner", "owner/repo", "alice", cfg)
+	if !ok {
+		t.Fatal("ok = false")
+	}
 	for range 5 {
 		_, id, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", "alice", cfg)
-		if id != idA {
-			t.Errorf("same identity, different pick: %d vs %d", id, idA)
+		if id != firstID {
+			t.Errorf("tied pick not stable: got %d, want %d", id, firstID)
 		}
-	}
-
-	picks := make(map[int64]bool)
-	for _, ident := range []string{"alice", "bob", "carol", "dave", "eve", "frank", "grace", "heidi"} {
-		_, id, _ := pickByQuota(context.Background(), managers, "owner", "owner/repo", ident, cfg)
-		picks[id] = true
-	}
-	if len(picks) < 2 {
-		t.Errorf("tied pool of 4 produced only %d distinct picks across 8 identities: %v", len(picks), picks)
 	}
 }
 

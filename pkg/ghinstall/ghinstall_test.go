@@ -184,7 +184,7 @@ func TestRoundRobin(t *testing.T) {
 	rr := NewRoundRobin(managers)
 
 	// Round-robin must distribute across apps: the same (scope, identity) must
-	// NOT always return the same app (unlike consistent hashing).
+	// NOT always return the same app.
 	const scope, identity = "my-org/repo", "my-identity"
 	seen := map[int64]bool{}
 	for range 4 {

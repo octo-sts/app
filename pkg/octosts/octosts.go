@@ -34,6 +34,7 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
+	"github.com/octo-sts/app/pkg/routekey"
 	"github.com/octo-sts/app/pkg/stickystore"
 )
 
@@ -271,7 +272,7 @@ func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity str
 // is no longer installed for this owner) it falls through to round-robin
 // for a capacity-aware assignment and persists the result.
 func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
-	key := stickystore.Key(scope, identity)
+	key := routekey.Key(scope, identity)
 	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
 		atr, id, err := s.rrm.GetByInstallation(ctx, owner, cachedID)
 		if err == nil {
@@ -358,7 +359,7 @@ func (s *sts) ensureSticky(ctx context.Context, scope, identity string, id int64
 	if s.sticky == nil || !hasChecksWrite(perms) {
 		return
 	}
-	key := stickystore.Key(scope, identity)
+	key := routekey.Key(scope, identity)
 	if _, ok, err := s.sticky.Get(ctx, key); err != nil || !ok {
 		if putErr := s.sticky.Put(ctx, key, id, scope, identity); putErr != nil {
 			clog.FromContext(ctx).Warnf("stickystore: retroactive Put failed for key %s: %v", key, putErr)

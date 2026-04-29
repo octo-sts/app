@@ -59,12 +59,11 @@ func main() {
 		}
 	}
 
-	// Capacity-aware routing for the round-robin path: a shared QuotaStore
-	// is populated by the transport tap (X-RateLimit-Remaining headers on
-	// every GitHub response) and read by NewRoundRobinWithQuota. Cold start
-	// (no quota data yet) safely falls back to the existing atomic-counter
-	// strategy. multiManager keeps strict consistent hashing — necessary
-	// for GitHub check-run ownership preservation across token rotations.
+	// Capacity-aware routing: a shared QuotaStore is populated by the
+	// transport tap (X-RateLimit-Remaining headers on every GitHub response)
+	// and read by NewRoundRobinWithQuota. Cold start (no quota data yet)
+	// safely falls back to the atomic-counter strategy. Check-run ownership
+	// for checks:write policies is handled by the sticky store.
 	quotaStore := ghinstall.NewQuotaStore(baseCfg.QuotaStaleAfter)
 	quotaCfg := &ghinstall.QuotaConfig{
 		Store:     quotaStore,
@@ -95,9 +94,13 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	rrm := ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
-
+	var rrm ghinstall.Manager
 	var sticky stickystore.Store
+	if len(managers) == 1 {
+		rrm = ghinstall.NewRoundRobin(managers)
+	} else {
+		rrm = ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
+	}
 	if len(managers) > 1 && baseCfg.StickyStore != "" {
 		var closer io.Closer
 		sticky, closer, err = stickystore.New(ctx, baseCfg)

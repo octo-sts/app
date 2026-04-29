@@ -6,7 +6,6 @@ package ghinstall
 import (
 	"context"
 	"fmt"
-	"hash/fnv"
 	"net/http"
 	"sync/atomic"
 
@@ -202,21 +201,19 @@ func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, insta
 
 // pickByQuota selects an installed manager using three-tier capacity-aware
 // fairshare. Returns ok=false when quota selection cannot proceed (no config,
-// or no candidate has known quota data) — callers fall back to their cold-
-// start strategy.
+// or no candidate has known quota data) — callers fall back to the atomic
+// counter.
 //
 //	comfortable = installs with remaining >= SoftFloor
 //	tight       = installs with HardFloor <= remaining < SoftFloor
 //	last_resort = installs with remaining < HardFloor
 //
-// The first non-empty pool wins; within a pool, argmax(remaining) — the
-// install with the most absolute headroom — is selected. Heavy callers thus
-// land on the install best able to absorb them.
+// The first non-empty pool wins; within a pool the install with the most
+// absolute remaining headroom is selected.
 //
-// A candidate without quota data is included as if it had remaining = limit
-// = SoftFloor + 1 so that newly-seen installs are explored. Until at least
-// one candidate has known data, ok=false to keep cold-start deterministic
-// (FNV hash for multiManager, atomic counter for roundRobin).
+// A candidate without quota data is included as if it had remaining =
+// SoftFloor + 1 so that newly-seen installs are explored. Until at least
+// one candidate has known data, ok=false to keep cold-start deterministic.
 func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity string, q *QuotaConfig) (*ghinstallation.AppsTransport, int64, bool) {
 	if q == nil || q.Store == nil {
 		return nil, 0, false
@@ -255,27 +252,13 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 	}
 
 	pickFromPool := func(pool []cand) cand {
-		// Find the max remaining, then break ties with a stable hash of
-		// (scope, identity) so equal-quota installs share load deterministically
-		// per request rather than always sending bursts to pool[0].
 		best := pool[0]
 		for _, c := range pool[1:] {
 			if c.remaining > best.remaining {
 				best = c
 			}
 		}
-		var tied []cand
-		for _, c := range pool {
-			if c.remaining == best.remaining {
-				tied = append(tied, c)
-			}
-		}
-		if len(tied) == 1 {
-			return tied[0]
-		}
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(scope + ":" + identity))
-		return tied[int(h.Sum32())%len(tied)]
+		return best
 	}
 
 	var comfortable, tight, lastResort []cand
