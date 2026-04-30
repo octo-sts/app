@@ -94,6 +94,7 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
+
 	var rrm ghinstall.Manager
 	var sticky stickystore.Store
 	if len(managers) == 1 {
@@ -112,9 +113,6 @@ func main() {
 
 	d := duplex.New(
 		baseCfg.Port,
-		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		// grpc.ChainStreamInterceptor(grpc_prometheus.StreamServerInterceptor),
-		// grpc.ChainUnaryInterceptor(grpc_prometheus.UnaryServerInterceptor, interceptors.ServerErrorInterceptor),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 

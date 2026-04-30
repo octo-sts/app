@@ -201,8 +201,9 @@ func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, insta
 
 // pickByQuota selects an installed manager using three-tier capacity-aware
 // fairshare. Returns ok=false when quota selection cannot proceed (no config,
-// or no candidate has known quota data) — callers fall back to the atomic
-// counter.
+// or any candidate lacks quota data) — callers fall back to the atomic
+// counter. This ensures the counter distributes evenly on cold start until
+// every installation has been seen at least once via the transport tap.
 //
 //	comfortable = installs with remaining >= SoftFloor
 //	tight       = installs with HardFloor <= remaining < SoftFloor
@@ -210,10 +211,6 @@ func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, insta
 //
 // The first non-empty pool wins; within a pool the install with the most
 // absolute remaining headroom is selected.
-//
-// A candidate without quota data is included as if it had remaining =
-// SoftFloor + 1 so that newly-seen installs are explored. Until at least
-// one candidate has known data, ok=false to keep cold-start deterministic.
 func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity string, q *QuotaConfig) (*ghinstallation.AppsTransport, int64, bool) {
 	if q == nil || q.Store == nil {
 		return nil, 0, false
@@ -229,25 +226,19 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 	}
 
 	var candidates []cand
-	anyKnown := false
 	for _, m := range managers {
 		atr, id, err := m.Get(ctx, owner, scope, identity)
 		if err != nil {
 			continue
 		}
 		rem, _, ok := q.Store.Get(id)
-		if ok {
-			anyKnown = true
-		} else {
-			// Treat unknowns as "just above the soft floor" — they're
-			// candidates worth exploring, but known-comfortable installs
-			// (which have remaining >> SoftFloor early in the hour) win.
-			rem = q.SoftFloor + 1
+		if !ok {
+			return nil, 0, false
 		}
 		candidates = append(candidates, cand{atr, id, rem})
 	}
 
-	if !anyKnown || len(candidates) == 0 {
+	if len(candidates) == 0 {
 		return nil, 0, false
 	}
 
