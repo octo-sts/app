@@ -65,3 +65,21 @@ variable "github_webhook_organization_filter" {
   type        = string
   default     = ""
 }
+
+variable "sticky_store" {
+  description = "Backend for sticky routing (checks:write). Empty string disables."
+  type        = string
+  default     = ""
+}
+
+variable "sticky_store_firestore_collection" {
+  description = "Firestore collection for sticky route mappings."
+  type        = string
+  default     = "sticky-routes"
+}
+
+variable "sticky_store_firestore_ttl" {
+  description = "TTL for sticky route documents (e.g. 720h)."
+  type        = string
+  default     = "720h"
+}

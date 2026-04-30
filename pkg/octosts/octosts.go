@@ -34,6 +34,8 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
 	"github.com/octo-sts/app/pkg/provider"
+	"github.com/octo-sts/app/pkg/routekey"
+	"github.com/octo-sts/app/pkg/stickystore"
 )
 
 const (
@@ -42,10 +44,13 @@ const (
 	negativeCacheConst = ""
 )
 
-func NewSecurityTokenServiceServer(im, rrm ghinstall.Manager, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+// NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
+// GitHub installation tokens. rrm handles installation selection; sticky (may
+// be nil) persists checks:write routing for check-run ownership.
+func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		im:       im,
 		rrm:      rrm,
+		sticky:   sticky,
 		appCount: appCount,
 		ceclient: ceclient,
 		domain:   domain,
@@ -58,16 +63,8 @@ var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, t
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
 
-	// im is the consistent-hash manager used when the trust policy requires
-	// checks:write. Consistent hashing ensures the same GitHub App always
-	// handles a given (scope, identity), which is required because GitHub
-	// check runs can only be updated by the app that created them.
-	im ghinstall.Manager
-	// rrm is the round-robin manager used for all trust policy reads and for
-	// token exchanges when the trust policy does NOT require checks:write.
-	rrm ghinstall.Manager
-	// appCount is the number of underlying GitHub App managers. Used to cap
-	// rate-limit retries so that each app is tried at most once.
+	rrm      ghinstall.Manager
+	sticky   stickystore.Store
 	appCount int
 	ceclient cloudevents.Client
 	domain   string
@@ -241,34 +238,58 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}, nil
 }
 
-// managerFor returns the appropriate Manager for the given trust policy key.
-//
-// If the trust policy is already cached and does NOT require checks:write,
-// round-robin is used to distribute load across apps. Otherwise consistent
-// hashing is used, which guarantees that the same (scope, identity) always
-// routes to the same GitHub App — a requirement for updating check runs.
-//
-// On a cache miss we cannot know the required permissions yet, so we default
-// to consistent hashing (the safe choice: it is always correct for
-// checks:write policies and merely suboptimal for others on the first call).
-func (s *sts) managerFor(key cacheTrustPolicyKey) ghinstall.Manager {
-	raw, ok := trustPolicies.Get(key)
-	if !ok {
-		return s.im
-	}
-	var tp OrgTrustPolicy
-	if err := yaml.UnmarshalStrict([]byte(raw), &tp); err != nil {
-		return s.im
-	}
-	if hasChecksWrite(tp.Permissions) {
-		return s.im
-	}
-	return s.rrm
-}
-
 // hasChecksWrite reports whether the given permissions include checks:write.
 func hasChecksWrite(perms github.InstallationPermissions) bool {
 	return perms.Checks != nil && *perms.Checks == "write"
+}
+
+// getExchangeInstall picks the installation for the token exchange.
+//
+// It peeks the trust policy LRU cache to determine whether the policy
+// requires checks:write. If so and a sticky store is configured, it
+// delegates to stickyExchange which returns the persisted installation
+// (fast path) or assigns a new one via capacity-aware round-robin.
+//
+// On a trust policy cache miss (first request for a given key) the
+// permissions are unknown, so this falls through to plain round-robin.
+// The caller (lookupInstallAndTrustPolicy) retroactively persists the
+// assignment once the policy is fetched and found to have checks:write.
+func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity string, tpKey cacheTrustPolicyKey) (*ghinstallation.AppsTransport, int64, error) {
+	if s.sticky != nil {
+		if raw, ok := trustPolicies.Get(tpKey); ok && raw != negativeCacheConst {
+			var cached OrgTrustPolicy
+			if err := yaml.UnmarshalStrict([]byte(raw), &cached); err == nil && hasChecksWrite(cached.Permissions) {
+				return s.stickyExchange(ctx, owner, scope, identity)
+			}
+		}
+	}
+	return s.rrm.Get(ctx, owner, scope, identity)
+}
+
+// stickyExchange returns a persisted installation for a checks:write caller.
+// On a cache hit it retrieves the exact installation via GetByInstallation,
+// preserving check-run ownership. On a miss (or if the cached installation
+// is no longer installed for this owner) it falls through to round-robin
+// for a capacity-aware assignment and persists the result.
+func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
+	key := routekey.Key(scope, identity)
+	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
+		atr, id, err := s.rrm.GetByInstallation(ctx, owner, cachedID)
+		if err == nil {
+			return atr, id, nil
+		}
+		clog.FromContext(ctx).Infof("sticky install %d no longer valid for %s, reassigning", cachedID, owner)
+	}
+
+	atr, id, err := s.rrm.Get(ctx, owner, scope, identity)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if putErr := s.sticky.Put(ctx, key, id, scope, identity); putErr != nil {
+		clog.FromContext(ctx).Warnf("stickystore: Put failed for key %s: %v", key, putErr)
+	}
+	return atr, id, nil
 }
 
 func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
@@ -282,67 +303,68 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		otp.Repositories = []string{repo}
 	}
 
-	// If the repo is .github, then parse with an org policy even if the repo
-	// was specified as .github because we will reject the repositories field
-	// in policies otherwise.
 	if repo == ".github" {
 		tp = otp
 	}
 
-	trustPolicyKey := cacheTrustPolicyKey{
-		owner:    owner,
-		repo:     repo,
-		identity: identity,
+	tpKey := cacheTrustPolicyKey{owner: owner, repo: repo, identity: identity}
+
+	if cached, ok := trustPolicies.Get(tpKey); ok && cached == negativeCacheConst {
+		clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
+		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 
-	if cached, ok := trustPolicies.Get(trustPolicyKey); ok && cached == negativeCacheConst {
-		clog.InfoContextf(ctx, "negative cache hit for %s", trustPolicyKey)
-		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
-	}
-
-	// Choose exchange routing strategy. managerFor peeks the trust policy
-	// cache so that, after the first call, policies without checks:write use
-	// round-robin instead of consistent hashing for the exchange.
-	im := s.managerFor(trustPolicyKey)
-	atr, id, err := im.Get(ctx, owner, scope, identity)
+	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, tpKey)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
-	// Policy reads always use round-robin to spread GitHub API calls across
-	// apps. Any installed app can read the policy file — there is no
-	// state dependency between which app reads the policy and which app
-	// performs the exchange. The exchange transport (atr, id) is returned
-	// to the caller unchanged.
-	readAtr, readId := atr, id
-	if rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity); rErr == nil {
-		readAtr, readId = rAtr, rId
+	atr, id, err = s.lookupTrustPolicyWithRetry(ctx, atr, id, owner, scope, identity, tpKey, tp)
+	if err != nil {
+		return nil, 0, nil, err
 	}
 
-	err = s.lookupTrustPolicy(ctx, readAtr, readId, trustPolicyKey, tp)
+	s.ensureSticky(ctx, scope, identity, id, otp.Permissions)
 
-	// If the policy read was rate-limited and there are multiple apps,
-	// retry with the remaining apps in the round-robin rotation.
-	// Cap retries at maxRetry to avoid hammering all apps on a broad outage.
-	if isRateLimit(err) && s.appCount > 1 {
-		retries := min(maxRetry, s.appCount-1)
-		for i := 0; i < retries; i++ {
-			clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
-			rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity)
-			if rErr != nil {
-				continue
-			}
-			err = s.lookupTrustPolicy(ctx, rAtr, rId, trustPolicyKey, tp)
-			if !isRateLimit(err) {
-				break
-			}
+	return atr, id, otp, nil
+}
+
+// lookupTrustPolicyWithRetry fetches the trust policy, retrying with
+// different installations if the first attempt is rate-limited.
+func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
+	err := s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
+	if !isRateLimit(err) || s.appCount <= 1 {
+		return atr, id, err
+	}
+
+	retries := min(maxRetry, s.appCount-1)
+	for i := range retries {
+		clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
+		rAtr, rId, rErr := s.rrm.Get(ctx, owner, scope, identity)
+		if rErr != nil {
+			continue
+		}
+		err = s.lookupTrustPolicy(ctx, rAtr, rId, tpKey, tp)
+		if !isRateLimit(err) {
+			return rAtr, rId, err
 		}
 	}
+	return atr, id, err
+}
 
-	if err != nil {
-		return atr, id, nil, err
+// ensureSticky persists the installation assignment for checks:write
+// policies when the sticky store was not consulted during routing (e.g.
+// first request when the trust policy cache is cold).
+func (s *sts) ensureSticky(ctx context.Context, scope, identity string, id int64, perms github.InstallationPermissions) {
+	if s.sticky == nil || !hasChecksWrite(perms) {
+		return
 	}
-	return atr, id, otp, nil
+	key := routekey.Key(scope, identity)
+	if _, ok, err := s.sticky.Get(ctx, key); err != nil || !ok {
+		if putErr := s.sticky.Put(ctx, key, id, scope, identity); putErr != nil {
+			clog.FromContext(ctx).Warnf("stickystore: retroactive Put failed for key %s: %v", key, putErr)
+		}
+	}
 }
 
 // isRateLimit reports whether err is a gRPC ResourceExhausted error,
@@ -359,97 +381,90 @@ type trustPolicy interface {
 	Compile() error
 }
 
-func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, trustPolicyKey cacheTrustPolicyKey, tp trustPolicy) error {
-	// Enrich context with app/installation IDs so the httpmetrics transport
-	// can label rate limit metrics with the specific installation consuming quota.
+// lookupTrustPolicy fetches, parses, and compiles a trust policy into tp.
+// The raw YAML is served from the LRU cache when available; on a miss
+// it is read from GitHub via a short-lived contents:read token that is
+// revoked after the read.
+func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey, tp trustPolicy) error {
 	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
 
-	raw := ""
-	// check the LRU cache for the TrustPolicy
-	if cachedRawPolicy, ok := trustPolicies.Get(trustPolicyKey); ok {
-		if cachedRawPolicy == negativeCacheConst {
-			clog.InfoContextf(ctx, "negative cache hit for %s", trustPolicyKey)
-			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
-		}
-		clog.InfoContextf(ctx, "found trust policy in cache for %s", trustPolicyKey)
-		raw = cachedRawPolicy
-	}
-
-	// if is not cached will get the trustpolicy from the api
-	if raw == "" {
-		atr := ghinstallation.NewFromAppsTransport(base, install)
-		// We only need to read from the repository, so create that token to fetch
-		// the trust policy.
-		atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-			Repositories: []string{trustPolicyKey.repo},
-			Permissions: &github.InstallationPermissions{
-				Contents: ptr("read"),
-			},
-		}
-		// Once we have looked up the trust policy we should revoke the token.
-		defer func() {
-			tok, err := atr.Token(ctx)
-			if err != nil {
-				clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
-				return
-			}
-			if err := Revoke(ctx, tok); err != nil {
-				clog.WarnContextf(ctx, "failed to revoke token: %v", err)
-				return
-			}
-		}()
-
-		client := github.NewClient(&http.Client{
-			Transport: atr,
-		})
-
-		file, _, _, err := client.Repositories.GetContents(ctx,
-			trustPolicyKey.owner, trustPolicyKey.repo,
-			fmt.Sprintf(".github/chainguard/%s.sts.yaml", trustPolicyKey.identity),
-			&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
-		)
-		if err != nil {
-			clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
-			// Don't leak the error to the client.
-			var ghErr *github.ErrorResponse
-			if errors.As(err, &ghErr) && ghErr.Response != nil {
-				switch ghErr.Response.StatusCode {
-				case http.StatusForbidden:
-					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", trustPolicyKey.identity)
-				case http.StatusTooManyRequests:
-					return status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", trustPolicyKey.identity)
-				case http.StatusNotFound:
-					trustPolicies.Add(trustPolicyKey, negativeCacheConst)
-				}
-			}
-			return status.Errorf(codes.NotFound, "unable to find trust policy for %q", trustPolicyKey.identity)
-		}
-
-		raw, err = file.GetContent()
-		if err != nil {
-			clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
-			// Don't leak the error to the client.
-			return status.Errorf(codes.NotFound, "unable to read trust policy found for %q", trustPolicyKey.identity)
-		}
-
-		if evicted := trustPolicies.Add(trustPolicyKey, raw); evicted {
-			clog.InfoContextf(ctx, "evicted cachekey %s", trustPolicyKey)
-		}
+	raw, err := s.fetchTrustPolicyRaw(ctx, base, install, tpKey)
+	if err != nil {
+		return err
 	}
 
 	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
-		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", trustPolicyKey.identity)
+		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", tpKey.identity)
 	}
-
 	if err := tp.Compile(); err != nil {
 		clog.InfoContextf(ctx, "failed to compile trust policy: %v", err)
-		// Don't leak the error to the client.
-		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", trustPolicyKey.identity)
+		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", tpKey.identity)
+	}
+	return nil
+}
+
+// fetchTrustPolicyRaw returns the raw YAML for a trust policy, serving
+// from the LRU cache when possible and falling back to the GitHub API.
+func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	if cached, ok := trustPolicies.Get(tpKey); ok {
+		if cached == negativeCacheConst {
+			clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
+			return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+		}
+		clog.InfoContextf(ctx, "found trust policy in cache for %s", tpKey)
+		return cached, nil
 	}
 
-	return nil
+	atr := ghinstallation.NewFromAppsTransport(base, install)
+	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
+		Repositories: []string{tpKey.repo},
+		Permissions: &github.InstallationPermissions{
+			Contents: ptr("read"),
+		},
+	}
+	defer func() {
+		tok, err := atr.Token(ctx)
+		if err != nil {
+			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
+			return
+		}
+		if err := Revoke(ctx, tok); err != nil {
+			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
+		}
+	}()
+
+	file, _, _, err := github.NewClient(&http.Client{Transport: atr}).Repositories.GetContents(ctx,
+		tpKey.owner, tpKey.repo,
+		fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
+		&github.RepositoryContentGetOptions{},
+	)
+	if err != nil {
+		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
+		var ghErr *github.ErrorResponse
+		if errors.As(err, &ghErr) && ghErr.Response != nil {
+			switch ghErr.Response.StatusCode {
+			case http.StatusForbidden:
+				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", tpKey.identity)
+			case http.StatusTooManyRequests:
+				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", tpKey.identity)
+			case http.StatusNotFound:
+				trustPolicies.Add(tpKey, negativeCacheConst)
+			}
+		}
+		return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+	}
+
+	raw, err := file.GetContent()
+	if err != nil {
+		clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
+		return "", status.Errorf(codes.NotFound, "unable to read trust policy found for %q", tpKey.identity)
+	}
+
+	if evicted := trustPolicies.Add(tpKey, raw); evicted {
+		clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
+	}
+	return raw, nil
 }
 
 // ExchangeRefreshToken implements pboidc.SecurityTokenServiceServer

@@ -52,6 +52,13 @@ func (f *fakeInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation
 	return f.atr, 1234, nil
 }
 
+func (f *fakeInstallMgr) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	if id == 1234 {
+		return f.atr, 1234, nil
+	}
+	return nil, 0, status.Errorf(codes.NotFound, "not found")
+}
+
 var _ ghinstall.Manager = (*fakeInstallMgr)(nil)
 
 type fakeGitHub struct {
@@ -138,7 +145,6 @@ func TestExchange(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im:       &fakeInstallMgr{atr: atr},
 		rrm:      &fakeInstallMgr{atr: atr},
 		appCount: 1,
 	}
@@ -226,7 +232,6 @@ func TestExchangeValidation(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im:       &fakeInstallMgr{atr: atr},
 		rrm:      &fakeInstallMgr{atr: atr},
 		appCount: 1,
 	}
@@ -368,7 +373,6 @@ func TestExchangeRateLimit(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 			s := &sts{
-				im:       &fakeInstallMgr{atr: atr},
 				rrm:      &fakeInstallMgr{atr: atr},
 				appCount: 1,
 			}
@@ -390,68 +394,14 @@ func TestExchangeRateLimit(t *testing.T) {
 	}
 }
 
-func TestManagerFor(t *testing.T) {
-	im := &fakeInstallMgr{}
-	rrm := &fakeInstallMgr{}
-	s := &sts{im: im, rrm: rrm}
-
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "ci"}
-
-	t.Run("cache miss uses consistent hashing", func(t *testing.T) {
-		trustPolicies.Remove(key)
-		if got := s.managerFor(key); got != im {
-			t.Error("expected consistent-hash manager on cache miss, got round-robin")
-		}
-	})
-
-	t.Run("cached policy with checks write uses consistent hashing", func(t *testing.T) {
-		trustPolicies.Add(key, `
-issuer: https://token.actions.githubusercontent.com
-subject_pattern: "repo:org/repo:.*"
-permissions:
-  checks: write
-`)
-		if got := s.managerFor(key); got != im {
-			t.Error("expected consistent-hash manager for checks:write policy, got round-robin")
-		}
-	})
-
-	t.Run("cached policy without checks write uses round-robin", func(t *testing.T) {
-		trustPolicies.Add(key, `
-issuer: https://token.actions.githubusercontent.com
-subject_pattern: "repo:org/repo:.*"
-permissions:
-  contents: read
-`)
-		if got := s.managerFor(key); got != rrm {
-			t.Error("expected round-robin manager for non-checks:write policy, got consistent-hash")
-		}
-	})
-
-	t.Run("cached policy with checks read uses round-robin", func(t *testing.T) {
-		trustPolicies.Add(key, `
-issuer: https://token.actions.githubusercontent.com
-subject_pattern: "repo:org/repo:.*"
-permissions:
-  checks: read
-`)
-		if got := s.managerFor(key); got != rrm {
-			t.Error("expected round-robin manager for checks:read policy, got consistent-hash")
-		}
-	})
-
-	t.Run("malformed cached policy uses consistent hashing", func(t *testing.T) {
-		trustPolicies.Add(key, `{not valid yaml: [`)
-		if got := s.managerFor(key); got != im {
-			t.Error("expected consistent-hash manager on parse error, got round-robin")
-		}
-	})
-}
-
 // failInstallMgr is a Manager whose Get always returns an error.
 type failInstallMgr struct{}
 
 func (f *failInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	return nil, 0, fmt.Errorf("not installed")
+}
+
+func (f *failInstallMgr) GetByInstallation(_ context.Context, _ string, _ int64) (*ghinstallation.AppsTransport, int64, error) {
 	return nil, 0, fmt.Errorf("not installed")
 }
 
@@ -473,43 +423,14 @@ func (s *sequentialInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstal
 	return s.transports[i], 1234, nil
 }
 
-var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
-
-// newFakeGitHubNoContents returns a fake GitHub server that handles
-// installations and access_tokens but returns 404 for all content requests.
-// Used to prove that a given transport was NOT used for the policy read.
-func newFakeGitHubNoContents() *fakeGitHub {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("org")},
-		}})
-	})
-	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
-		b, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
-			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
-		})
-	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotFound)
-	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNotImplemented)
-		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
-	})
-	return &fakeGitHub{mux: mux}
+func (s *sequentialInstallMgr) GetByInstallation(ctx context.Context, owner string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	return s.Get(ctx, owner, "", "")
 }
 
+var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
+
 // TestPolicyReadUsesRoundRobin verifies that trust policy reads use the rrm
-// transport, not the im transport. im points to a server with no contents
-// handler; rrm points to a server with the policy file. Exchange succeeds
+// transport. rrm points to a server with the policy file. Exchange succeeds
 // only if rrm was used for the read.
 func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
@@ -517,7 +438,6 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	t.Cleanup(func() { trustPolicies.Remove(key) })
 
 	ctx := context.Background()
-	imAtr := newGitHubClient(t, newFakeGitHubNoContents())
 	rrmAtr := newGitHubClient(t, newFakeGitHub())
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -543,66 +463,16 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	s := &sts{
-		im:       &fakeInstallMgr{atr: imAtr},
 		rrm:      &fakeInstallMgr{atr: rrmAtr},
 		appCount: 2,
 	}
-	// Trust policy lives on the rrm server. If im were used for the read it
-	// would 404 and the exchange would fail.
+	// Trust policy lives on the rrm server.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
 		Scope:    "org/repo",
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v — policy read did not use rrm transport", err)
-	}
-}
-
-// TestPolicyReadFallsBackToIM verifies that when rrm.Get fails the policy
-// read falls back to the im transport so that single-app deployments and
-// transient installation-lookup failures are handled gracefully.
-func TestPolicyReadFallsBackToIM(t *testing.T) {
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
-	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
-
-	ctx := context.Background()
-	imAtr := newGitHubClient(t, newFakeGitHub())
-
-	pk, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("cannot generate RSA key %v", err)
-	}
-	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
-	if err != nil {
-		t.Fatalf("jose.NewSigner() = %v", err)
-	}
-
-	iss := "https://token.actions.githubusercontent.com"
-	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
-		Subject:  "foo",
-		Issuer:   iss,
-		Audience: josejwt.Audience{"octosts"},
-		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
-	}).Serialize()
-	if err != nil {
-		t.Fatalf("CompactSerialize failed: %v", err)
-	}
-	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
-	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
-
-	s := &sts{
-		im:       &fakeInstallMgr{atr: imAtr},
-		rrm:      &failInstallMgr{},
-		appCount: 1,
-	}
-	// rrm.Get() always errors; exchange must still succeed via im fallback.
-	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
-		Identity: "foo",
-		Scope:    "org/repo",
-	})
-	if err != nil {
-		t.Fatalf("Exchange failed: %v — fallback to im transport did not work", err)
 	}
 }
 
@@ -640,7 +510,6 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	s := &sts{
-		im: &fakeInstallMgr{atr: workingAtr},
 		rrm: &sequentialInstallMgr{
 			transports: []*ghinstallation.AppsTransport{rateLimitedAtr, workingAtr},
 		},
@@ -691,7 +560,6 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	s := &sts{
-		im: &fakeInstallMgr{atr: rl1},
 		rrm: &sequentialInstallMgr{
 			transports: []*ghinstallation.AppsTransport{rl1, rl2},
 		},
@@ -763,7 +631,6 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	atr := newGitHubClient(t, gh)
 
 	s := &sts{
-		im:       &fakeInstallMgr{atr: atr},
 		rrm:      &fakeInstallMgr{atr: atr},
 		appCount: 1,
 	}
@@ -804,7 +671,6 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	t.Cleanup(func() { trustPolicies.Remove(key) })
 
 	s := &sts{
-		im:       &failInstallMgr{},
 		rrm:      &failInstallMgr{},
 		appCount: 1,
 	}

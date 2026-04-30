@@ -119,7 +119,23 @@ module "this" {
         {
           name  = "STS_DOMAIN",
           value = var.domain,
-        }
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE"
+          value = var.sticky_store
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT"
+          value = var.sticky_store == "firestore" ? var.project_id : ""
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION"
+          value = var.sticky_store_firestore_collection
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_TTL"
+          value = var.sticky_store_firestore_ttl
+        },
       ]
       regional-env = [{
         name  = "EVENT_INGRESS_URI"

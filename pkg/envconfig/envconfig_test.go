@@ -150,6 +150,43 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "Sticky store firestore valid",
+			envVars: map[string]string{
+				"PORT":                               "8080",
+				"GITHUB_APP_IDS":                     "12345678",
+				"OCTOSTS_STICKY_STORE":               "firestore",
+				"OCTOSTS_STICKY_STORE_FIRESTORE_TTL": "720h",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Sticky store disabled by default",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Sticky store invalid backend rejected",
+			envVars: map[string]string{
+				"PORT":                 "8080",
+				"GITHUB_APP_IDS":       "12345678",
+				"OCTOSTS_STICKY_STORE": "redis",
+			},
+			wantErr: true,
+		},
+		{
+			name: "Sticky store negative TTL rejected",
+			envVars: map[string]string{
+				"PORT":                               "8080",
+				"GITHUB_APP_IDS":                     "12345678",
+				"OCTOSTS_STICKY_STORE":               "firestore",
+				"OCTOSTS_STICKY_STORE_FIRESTORE_TTL": "-1h",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
