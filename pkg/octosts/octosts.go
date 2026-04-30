@@ -244,34 +244,14 @@ func hasChecksWrite(perms github.InstallationPermissions) bool {
 }
 
 // getExchangeInstall picks the installation for the token exchange.
-//
-// It peeks the trust policy LRU cache to determine whether the policy
-// requires checks:write. If so and a sticky store is configured, it
-// delegates to stickyExchange which returns the persisted installation
-// (fast path) or assigns a new one via capacity-aware round-robin.
-//
-// On a trust policy cache miss (first request for a given key) the
-// permissions are unknown, so this falls through to plain round-robin.
-// The caller (lookupInstallAndTrustPolicy) retroactively persists the
-// assignment once the policy is fetched and found to have checks:write.
-func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity, subject string, tpKey cacheTrustPolicyKey) (*ghinstallation.AppsTransport, int64, error) {
-	if s.sticky != nil {
-		if raw, ok := trustPolicies.Get(tpKey); ok && raw != negativeCacheConst {
-			var cached OrgTrustPolicy
-			if err := yaml.UnmarshalStrict([]byte(raw), &cached); err == nil && hasChecksWrite(cached.Permissions) {
-				return s.stickyExchange(ctx, owner, scope, identity, subject)
-			}
-		}
+// For checks:write policies it returns the persisted sticky installation,
+// or assigns a new one via capacity-aware round-robin and persists it.
+// For all other policies it returns the installation that read the policy.
+func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity, subject string, perms github.InstallationPermissions, readAtr *ghinstallation.AppsTransport, readID int64) (*ghinstallation.AppsTransport, int64, error) {
+	if s.sticky == nil || !hasChecksWrite(perms) {
+		return readAtr, readID, nil
 	}
-	return s.rrm.Get(ctx, owner, scope, identity)
-}
 
-// stickyExchange returns a persisted installation for a checks:write caller.
-// On a cache hit it retrieves the exact installation via GetByInstallation,
-// preserving check-run ownership. On a miss (or if the cached installation
-// is no longer installed for this owner) it falls through to round-robin
-// for a capacity-aware assignment and persists the result.
-func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity, subject string) (*ghinstallation.AppsTransport, int64, error) {
 	key := routekey.Key(scope, identity, subject)
 	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
 		atr, id, err := s.rrm.GetByInstallation(ctx, owner, cachedID)
@@ -314,17 +294,22 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 
-	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, subject, tpKey)
+	// Read the trust policy using any available installation.
+	readAtr, readID, err := s.rrm.Get(ctx, owner, scope, identity)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
-	atr, id, err = s.lookupTrustPolicyWithRetry(ctx, atr, id, owner, scope, identity, tpKey, tp)
+	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, readAtr, readID, owner, scope, identity, tpKey, tp)
 	if err != nil {
 		return nil, 0, nil, err
 	}
 
-	s.ensureSticky(ctx, scope, identity, subject, id, otp.Permissions)
+	// Now that we know the permissions, pick the exchange installation.
+	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, subject, otp.Permissions, readAtr, readID)
+	if err != nil {
+		return nil, 0, nil, err
+	}
 
 	return atr, id, otp, nil
 }
@@ -350,21 +335,6 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, atr *ghinstallatio
 		}
 	}
 	return atr, id, err
-}
-
-// ensureSticky persists the installation assignment for checks:write
-// policies when the sticky store was not consulted during routing (e.g.
-// first request when the trust policy cache is cold).
-func (s *sts) ensureSticky(ctx context.Context, scope, identity, subject string, id int64, perms github.InstallationPermissions) {
-	if s.sticky == nil || !hasChecksWrite(perms) {
-		return
-	}
-	key := routekey.Key(scope, identity, subject)
-	if _, ok, err := s.sticky.Get(ctx, key); err != nil || !ok {
-		if putErr := s.sticky.Put(ctx, key, id, scope, identity, subject); putErr != nil {
-			clog.FromContext(ctx).Warnf("stickystore: retroactive Put failed for key %s: %v", key, putErr)
-		}
-	}
 }
 
 // isRateLimit reports whether err is a gRPC ResourceExhausted error,
