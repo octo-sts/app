@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -104,6 +105,11 @@ func runSingleTest(ctx context.Context, cfg *Config, tc TestCase) TestResult {
 func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	result := TestResult{Name: tc.Name}
 
+	if tc.StickyRepeat < 2 {
+		result.Error = "sticky_repeat must be >= 2 to verify routing"
+		return result
+	}
+
 	owner, repo := parseScope(tc.Scope)
 	if owner == "" || repo == "" {
 		result.Error = fmt.Sprintf("invalid scope %q: expected owner/repo", tc.Scope)
@@ -116,10 +122,14 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		result.Error = fmt.Sprintf("exchange 1: %v", err)
 		return result
 	}
+	defer func() {
+		if err := octosts.Revoke(ctx, token1); err != nil {
+			clog.FromContext(ctx).Warnf("failed to revoke token 1 for %q: %v", tc.Name, err)
+		}
+	}()
 
 	ghc1 := newGitHubClient(ctx, token1)
 
-	// Get the latest commit SHA — CreateCheckRun requires a real SHA.
 	branch, _, err := ghc1.Repositories.GetBranch(ctx, owner, repo, "main", 0)
 	if err != nil {
 		result.Error = fmt.Sprintf("getting HEAD SHA: %v", err)
@@ -139,15 +149,8 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	}
 	clog.FromContext(ctx).Infof("created check run %d on %s/%s", checkRun.GetID(), owner, repo)
 
-	// Clean up the check run and revoke token1 on exit.
-	// Cleanup runs first (registered second, LIFO), then revoke.
 	defer func() {
-		if err := octosts.Revoke(ctx, token1); err != nil {
-			clog.FromContext(ctx).Warnf("failed to revoke token 1 for %q: %v", tc.Name, err)
-		}
-	}()
-	defer func() {
-		_, _, _ = ghc1.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
+		if _, _, err := ghc1.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
 			Status:     github.Ptr("completed"),
 			Conclusion: github.Ptr("neutral"),
@@ -155,9 +158,13 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 				Title:   github.Ptr("Sticky routing smoke test"),
 				Summary: github.Ptr("Automated test to verify sticky routing. Can be ignored."),
 			},
-		})
+		}); err != nil {
+			clog.FromContext(ctx).Warnf("failed to clean up check run %d: %v", checkRun.GetID(), err)
+		}
 	}()
 
+	// Subsequent exchanges: update the same check run. Only the app that
+	// created it can update it — a 403 proves sticky routing is broken.
 	for i := 1; i < tc.StickyRepeat; i++ {
 		tokenN, err := exchangeToken(ctx, domain, tc.Scope, tc.Identity)
 		if err != nil {
@@ -166,7 +173,7 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		}
 
 		ghcN := newGitHubClient(ctx, tokenN)
-		_, _, err = ghcN.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
+		_, _, updateErr := ghcN.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
 			Status:     github.Ptr("completed"),
 			Conclusion: github.Ptr("success"),
@@ -176,8 +183,13 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 			clog.FromContext(ctx).Warnf("failed to revoke token %d for %q: %v", i+1, tc.Name, rErr)
 		}
 
-		if err != nil {
-			result.Error = fmt.Sprintf("exchange %d: updating check run %d failed (different app?): %v", i+1, checkRun.GetID(), err)
+		if updateErr != nil {
+			var ghErr *github.ErrorResponse
+			if errors.As(updateErr, &ghErr) && ghErr.Response.StatusCode == 403 {
+				result.Error = fmt.Sprintf("exchange %d: sticky routing broken — different app cannot update check run %d", i+1, checkRun.GetID())
+			} else {
+				result.Error = fmt.Sprintf("exchange %d: updating check run %d failed: %v", i+1, checkRun.GetID(), updateErr)
+			}
 			return result
 		}
 		clog.FromContext(ctx).Infof("exchange %d: successfully updated check run %d (same app confirmed)", i+1, checkRun.GetID())
