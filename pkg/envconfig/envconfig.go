@@ -32,7 +32,7 @@ type EnvConfig struct {
 	StickyStore                    string        `envconfig:"OCTOSTS_STICKY_STORE" required:"false"`
 	StickyStoreFirestoreProject    string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT" required:"false"`
 	StickyStoreFirestoreCollection string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION" required:"false" default:"sticky-routes"`
-	StickyStoreFirestoreTTL        time.Duration `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_TTL" required:"false" default:"720h"`
+	StickyStoreFirestoreTTL        time.Duration `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_TTL" required:"false" default:"1h"`
 }
 
 type EnvConfigApp struct {

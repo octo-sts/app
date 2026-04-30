@@ -156,7 +156,7 @@ func TestBaseConfig(t *testing.T) {
 				"PORT":                               "8080",
 				"GITHUB_APP_IDS":                     "12345678",
 				"OCTOSTS_STICKY_STORE":               "firestore",
-				"OCTOSTS_STICKY_STORE_FIRESTORE_TTL": "720h",
+				"OCTOSTS_STICKY_STORE_FIRESTORE_TTL": "1h",
 			},
 			wantErr: false,
 		},

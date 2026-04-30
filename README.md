@@ -120,7 +120,7 @@ back to round-robin (non-sticky) routing which may break check-run updates.
 | `OCTOSTS_STICKY_STORE` | (empty) | Set to `firestore` to enable |
 | `OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT` | running GCP project | Firestore GCP project |
 | `OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION` | `sticky-routes` | Firestore collection name |
-| `OCTOSTS_STICKY_STORE_FIRESTORE_TTL` | `720h` (30 days) | TTL for inactive mappings |
+| `OCTOSTS_STICKY_STORE_FIRESTORE_TTL` | `1h` | TTL for inactive mappings |
 
 Active mappings have their TTL refreshed on every use, so they never expire.
 Only mappings unused for the TTL duration are automatically cleaned up.

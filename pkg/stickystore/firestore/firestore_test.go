@@ -29,11 +29,11 @@ func TestDocFields(t *testing.T) {
 }
 
 func TestNewStoreFields(t *testing.T) {
-	s := New(nil, "my-collection", 30*24*time.Hour)
+	s := New(nil, "my-collection", time.Hour)
 	if s.collection != "my-collection" {
 		t.Errorf("collection = %q, want my-collection", s.collection)
 	}
-	if s.ttl != 30*24*time.Hour {
-		t.Errorf("ttl = %v, want 720h", s.ttl)
+	if s.ttl != time.Hour {
+		t.Errorf("ttl = %v, want 1h", s.ttl)
 	}
 }

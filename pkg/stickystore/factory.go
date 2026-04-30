@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"time"
 
 	gofirestore "cloud.google.com/go/firestore"
 
@@ -42,15 +41,5 @@ func newFirestore(ctx context.Context, cfg *envconfig.EnvConfig) (Store, io.Clos
 		return nil, nil, fmt.Errorf("stickystore: creating Firestore client: %w", err)
 	}
 
-	collection := cfg.StickyStoreFirestoreCollection
-	if collection == "" {
-		collection = "sticky-routes"
-	}
-
-	ttl := cfg.StickyStoreFirestoreTTL
-	if ttl == 0 {
-		ttl = 720 * time.Hour
-	}
-
-	return firestore.New(client, collection, ttl), client, nil
+	return firestore.New(client, cfg.StickyStoreFirestoreCollection, cfg.StickyStoreFirestoreTTL), client, nil
 }

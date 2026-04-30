@@ -79,7 +79,7 @@ variable "sticky_store_firestore_collection" {
 }
 
 variable "sticky_store_firestore_ttl" {
-  description = "TTL for sticky route documents (e.g. 720h)."
+  description = "TTL for sticky route documents (e.g. 1h)."
   type        = string
-  default     = "720h"
+  default     = "1h"
 }
