@@ -76,21 +76,17 @@ func TestPickByQuotaColdStartFallsThrough(t *testing.T) {
 	}
 }
 
-func TestPickByQuotaSomeKnownPicksKnownComfortable(t *testing.T) {
-	// One install has known headroom comfortably above the soft floor; the
-	// other two are unknown (treated as soft+1). The known install must win
-	// because its remaining is greater.
+func TestPickByQuotaPartialDataFallsThrough(t *testing.T) {
+	// Only one of three installs has known data. The picker must return
+	// ok=false so the atomic counter distributes evenly until all installs
+	// have been discovered.
 	managers := newFakePickerManagers(1, 2, 3)
 	store := NewQuotaStore(time.Minute)
-	store.Update(2, 49000, 50000) // install 2 known, well above SoftFloor
+	store.Update(2, 49000, 50000)
 
 	cfg := &QuotaConfig{Store: store, SoftFloor: 15000, HardFloor: 1500}
-	_, id, ok := pickByQuota(context.Background(), managers, "owner", "owner/repo", "id", cfg)
-	if !ok {
-		t.Fatalf("ok = false, want true (one install has data)")
-	}
-	if id != 2 {
-		t.Errorf("picked install %d, want 2 (49000 > soft+1 = 15001)", id)
+	if _, _, ok := pickByQuota(context.Background(), managers, "owner", "owner/repo", "id", cfg); ok {
+		t.Errorf("partial data: ok = true, want false (not all installs have data)")
 	}
 }
 
