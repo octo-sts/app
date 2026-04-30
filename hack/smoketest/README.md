@@ -116,7 +116,7 @@ The config file is YAML with two top-level fields:
 | `expect_failure` | bool   | no       | `false` | If `true`, expect the exchange to fail                |
 | `expected_error` | string | no       |         | Substring to match in the error message               |
 | `verify`         | object | no       |         | Optional verification block (see below)               |
-| `sticky_repeat`  | int    | no       | `0`     | Exchange N times and verify all use the same app      |
+| `sticky_repeat`  | int    | no       | `0`     | Create a check run, then exchange N-1 more times and update it to verify same app |
 
 ### Verify Block
 
@@ -183,12 +183,15 @@ verify:
 ### Sticky Routing Verification
 
 The `sticky_repeat` field tests that multi-app sticky routing is working for
-`checks: write` policies. When set, the tool exchanges N times with the same
-(scope, identity) and calls `GET /app` with each token to discover which GitHub
-App issued it. All N app IDs must match — if any differ, the test fails.
+`checks: write` policies. It exploits the GitHub check-run ownership constraint:
+only the app that created a check run can update it. The test exchanges a token,
+creates a check run on the target repo, then exchanges N-1 more times and
+updates the same check run with each token. If any update fails with 403, a
+different app was used — proving sticky routing is broken.
 
-This requires a trust policy with `checks: write` permissions and a deployment
-with multiple GitHub Apps and a sticky store configured.
+This requires a trust policy with `checks: write` and `contents: read`
+permissions, and a deployment with multiple GitHub Apps and a sticky store
+configured.
 
 ```yaml
 - name: "checks:write sticky routing"
