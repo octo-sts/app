@@ -29,7 +29,7 @@ tests:
   - name: "checks:write sticky routing"
     scope: octo-sts/prober
     identity: smoke-test-checks
-    sticky_repeat: 3
+    sticky_repeat: 30
 
   - name: "missing STS policy"
     scope: octo-sts/prober

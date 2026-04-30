@@ -13,6 +13,7 @@ func TestDocFields(t *testing.T) {
 		InstallationID: 12345,
 		Scope:          "org/repo",
 		Identity:       "bot",
+		Subject:        "repo:org/mono:ref:refs/heads/main",
 		CreatedAt:      time.Now(),
 		ExpireAt:       time.Now().Add(720 * time.Hour),
 	}
@@ -21,6 +22,9 @@ func TestDocFields(t *testing.T) {
 	}
 	if d.Scope != "org/repo" {
 		t.Errorf("Scope = %q, want org/repo", d.Scope)
+	}
+	if d.Subject != "repo:org/mono:ref:refs/heads/main" {
+		t.Errorf("Subject = %q, want repo:org/mono:ref:refs/heads/main", d.Subject)
 	}
 }
 

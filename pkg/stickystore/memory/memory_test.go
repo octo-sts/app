@@ -23,7 +23,7 @@ func TestPutThenGet(t *testing.T) {
 	s := New()
 	ctx := context.Background()
 
-	if err := s.Put(ctx, "k1", 42, "scope", "id"); err != nil {
+	if err := s.Put(ctx, "k1", 42, "scope", "id", "sub"); err != nil {
 		t.Fatalf("Put: %v", err)
 	}
 
@@ -43,8 +43,8 @@ func TestPutOverwrites(t *testing.T) {
 	s := New()
 	ctx := context.Background()
 
-	_ = s.Put(ctx, "k1", 42, "s", "i")
-	_ = s.Put(ctx, "k1", 99, "s", "i")
+	_ = s.Put(ctx, "k1", 42, "s", "i", "sub")
+	_ = s.Put(ctx, "k1", 99, "s", "i", "sub")
 
 	id, ok, err := s.Get(ctx, "k1")
 	if err != nil {
@@ -59,8 +59,8 @@ func TestIndependentKeys(t *testing.T) {
 	s := New()
 	ctx := context.Background()
 
-	_ = s.Put(ctx, "a", 1, "s", "i")
-	_ = s.Put(ctx, "b", 2, "s", "i")
+	_ = s.Put(ctx, "a", 1, "s", "i", "sub")
+	_ = s.Put(ctx, "b", 2, "s", "i", "sub")
 
 	id1, _, _ := s.Get(ctx, "a")
 	id2, _, _ := s.Get(ctx, "b")

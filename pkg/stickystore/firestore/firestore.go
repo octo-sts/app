@@ -23,6 +23,7 @@ type doc struct {
 	InstallationID int64     `firestore:"installation_id"`
 	Scope          string    `firestore:"scope"`
 	Identity       string    `firestore:"identity"`
+	Subject        string    `firestore:"subject"`
 	CreatedAt      time.Time `firestore:"created_at"`
 	ExpireAt       time.Time `firestore:"expire_at"`
 }
@@ -66,13 +67,14 @@ func (s *Store) Get(ctx context.Context, key string) (int64, bool, error) {
 }
 
 // Put persists a sticky mapping. Overwrites any existing document for the
-// key. scope and identity are stored for operator debuggability.
-func (s *Store) Put(ctx context.Context, key string, installationID int64, scope, identity string) error {
+// key. scope, identity, and subject are stored for operator debuggability.
+func (s *Store) Put(ctx context.Context, key string, installationID int64, scope, identity, subject string) error {
 	now := time.Now()
 	_, err := s.client.Collection(s.collection).Doc(key).Set(ctx, doc{
 		InstallationID: installationID,
 		Scope:          scope,
 		Identity:       identity,
+		Subject:        subject,
 		CreatedAt:      now,
 		ExpireAt:       now.Add(s.ttl),
 	})
