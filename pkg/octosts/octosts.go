@@ -177,7 +177,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	var base *ghinstallation.AppsTransport
-	base, e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity())
+	base, e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject)
 	if err != nil {
 		return nil, err
 	}
@@ -254,12 +254,12 @@ func hasChecksWrite(perms github.InstallationPermissions) bool {
 // permissions are unknown, so this falls through to plain round-robin.
 // The caller (lookupInstallAndTrustPolicy) retroactively persists the
 // assignment once the policy is fetched and found to have checks:write.
-func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity string, tpKey cacheTrustPolicyKey) (*ghinstallation.AppsTransport, int64, error) {
+func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity, subject string, tpKey cacheTrustPolicyKey) (*ghinstallation.AppsTransport, int64, error) {
 	if s.sticky != nil {
 		if raw, ok := trustPolicies.Get(tpKey); ok && raw != negativeCacheConst {
 			var cached OrgTrustPolicy
 			if err := yaml.UnmarshalStrict([]byte(raw), &cached); err == nil && hasChecksWrite(cached.Permissions) {
-				return s.stickyExchange(ctx, owner, scope, identity)
+				return s.stickyExchange(ctx, owner, scope, identity, subject)
 			}
 		}
 	}
@@ -271,8 +271,8 @@ func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity str
 // preserving check-run ownership. On a miss (or if the cached installation
 // is no longer installed for this owner) it falls through to round-robin
 // for a capacity-aware assignment and persists the result.
-func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
-	key := routekey.Key(scope, identity)
+func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity, subject string) (*ghinstallation.AppsTransport, int64, error) {
+	key := routekey.Key(scope, identity, subject)
 	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
 		atr, id, err := s.rrm.GetByInstallation(ctx, owner, cachedID)
 		if err == nil {
@@ -286,13 +286,13 @@ func (s *sts) stickyExchange(ctx context.Context, owner, scope, identity string)
 		return nil, 0, err
 	}
 
-	if putErr := s.sticky.Put(ctx, key, id, scope, identity); putErr != nil {
+	if putErr := s.sticky.Put(ctx, key, id, scope, identity, subject); putErr != nil {
 		clog.FromContext(ctx).Warnf("stickystore: Put failed for key %s: %v", key, putErr)
 	}
 	return atr, id, nil
 }
 
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, subject string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -314,7 +314,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 
-	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, tpKey)
+	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, subject, tpKey)
 	if err != nil {
 		return nil, 0, nil, err
 	}
@@ -324,7 +324,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity s
 		return nil, 0, nil, err
 	}
 
-	s.ensureSticky(ctx, scope, identity, id, otp.Permissions)
+	s.ensureSticky(ctx, scope, identity, subject, id, otp.Permissions)
 
 	return atr, id, otp, nil
 }
@@ -355,13 +355,13 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, atr *ghinstallatio
 // ensureSticky persists the installation assignment for checks:write
 // policies when the sticky store was not consulted during routing (e.g.
 // first request when the trust policy cache is cold).
-func (s *sts) ensureSticky(ctx context.Context, scope, identity string, id int64, perms github.InstallationPermissions) {
+func (s *sts) ensureSticky(ctx context.Context, scope, identity, subject string, id int64, perms github.InstallationPermissions) {
 	if s.sticky == nil || !hasChecksWrite(perms) {
 		return
 	}
-	key := routekey.Key(scope, identity)
+	key := routekey.Key(scope, identity, subject)
 	if _, ok, err := s.sticky.Get(ctx, key); err != nil || !ok {
-		if putErr := s.sticky.Put(ctx, key, id, scope, identity); putErr != nil {
+		if putErr := s.sticky.Put(ctx, key, id, scope, identity, subject); putErr != nil {
 			clog.FromContext(ctx).Warnf("stickystore: retroactive Put failed for key %s: %v", key, putErr)
 		}
 	}

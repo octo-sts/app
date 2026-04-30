@@ -15,8 +15,8 @@ type Store interface {
 	// round-robin).
 	Get(ctx context.Context, key string) (installationID int64, ok bool, err error)
 
-	// Put persists a mapping. scope and identity are stored by backends
-	// that support operator debuggability (e.g. Firestore); backends that
-	// do not need them may ignore them.
-	Put(ctx context.Context, key string, installationID int64, scope, identity string) error
+	// Put persists a mapping. scope, identity, and subject are stored by
+	// backends that support operator debuggability (e.g. Firestore);
+	// backends that do not need them may ignore them.
+	Put(ctx context.Context, key string, installationID int64, scope, identity, subject string) error
 }

@@ -27,8 +27,8 @@ func (s *Store) Get(_ context.Context, key string) (int64, bool, error) {
 	return id, ok, nil
 }
 
-// Put stores a mapping. scope and identity are ignored by this implementation.
-func (s *Store) Put(_ context.Context, key string, installationID int64, _, _ string) error {
+// Put stores a mapping. scope, identity, and subject are ignored by this implementation.
+func (s *Store) Put(_ context.Context, key string, installationID int64, _, _, _ string) error {
 	s.mu.Lock()
 	s.m[key] = installationID
 	s.mu.Unlock()

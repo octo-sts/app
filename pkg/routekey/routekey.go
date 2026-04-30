@@ -8,10 +8,12 @@ import (
 	"hash/fnv"
 )
 
-// Key returns a stable FNV-32a string key for a (scope, identity) pair.
-// Used by the sticky store to consistently identify a routing target.
-func Key(scope, identity string) string {
+// Key returns a stable FNV-32a string key for a (scope, identity, subject)
+// tuple. Using subject gives each distinct caller its own sticky mapping,
+// improving distribution across installations while preserving check-run
+// ownership.
+func Key(scope, identity, subject string) string {
 	h := fnv.New32a()
-	_, _ = h.Write([]byte(scope + ":" + identity))
+	_, _ = h.Write([]byte(scope + ":" + identity + ":" + subject))
 	return fmt.Sprintf("%d", h.Sum32())
 }

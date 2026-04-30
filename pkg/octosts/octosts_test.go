@@ -675,7 +675,7 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 		appCount: 1,
 	}
 
-	_, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing")
+	_, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
