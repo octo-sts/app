@@ -116,11 +116,6 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		result.Error = fmt.Sprintf("exchange 1: %v", err)
 		return result
 	}
-	defer func() {
-		if err := octosts.Revoke(ctx, token1); err != nil {
-			clog.FromContext(ctx).Warnf("failed to revoke token 1 for %q: %v", tc.Name, err)
-		}
-	}()
 
 	ghc1 := newGitHubClient(ctx, token1)
 
@@ -144,19 +139,21 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	}
 	clog.FromContext(ctx).Infof("created check run %d on %s/%s", checkRun.GetID(), owner, repo)
 
-	// Subsequent exchanges: update the same check run. If the token came
-	// from a different app, this fails with 403 — proving sticky routing
-	// is broken.
+	// Clean up the check run and revoke token1 on exit.
+	// Cleanup runs first (registered second, LIFO), then revoke.
 	defer func() {
-		// Clean up: mark the check run as completed so it doesn't linger.
-		// Use token1 which is still valid (deferred revoke runs after this).
+		if err := octosts.Revoke(ctx, token1); err != nil {
+			clog.FromContext(ctx).Warnf("failed to revoke token 1 for %q: %v", tc.Name, err)
+		}
+	}()
+	defer func() {
 		_, _, _ = ghc1.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
 			Status:     github.Ptr("completed"),
 			Conclusion: github.Ptr("neutral"),
 			Output: &github.CheckRunOutput{
 				Title:   github.Ptr("Sticky routing smoke test"),
-				Summary: github.Ptr("This check was created by the OctoSTS smoke test to verify sticky routing. It can be ignored."),
+				Summary: github.Ptr("Automated test to verify sticky routing. Can be ignored."),
 			},
 		})
 	}()
