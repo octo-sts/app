@@ -41,6 +41,10 @@ func RunTests(ctx context.Context, cfg *Config) []TestResult {
 func runSingleTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	result := TestResult{Name: tc.Name}
 
+	if tc.StickyRepeat > 0 {
+		return runStickyTest(ctx, domain, tc)
+	}
+
 	token, err := MintGitHubActionsToken(domain)
 	if err != nil {
 		result.Error = fmt.Sprintf("minting OIDC token: %v", err)
@@ -83,6 +87,62 @@ func runSingleTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	if tc.Verify != nil {
 		if err := runVerifications(ctx, res.AccessToken, tc.Verify); err != nil {
 			result.Error = fmt.Sprintf("verification failed: %v", err)
+			return result
+		}
+	}
+
+	result.Passed = true
+	return result
+}
+
+// runStickyTest exchanges N times with the same identity and verifies all
+// tokens come from the same GitHub App, proving sticky routing is working.
+func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
+	result := TestResult{Name: tc.Name}
+
+	var appIDs []int64
+	for i := range tc.StickyRepeat {
+		token, err := MintGitHubActionsToken(domain)
+		if err != nil {
+			result.Error = fmt.Sprintf("exchange %d: minting OIDC token: %v", i+1, err)
+			return result
+		}
+
+		xchg := sts.New(
+			fmt.Sprintf("https://%s", domain),
+			"does-not-matter",
+			sts.WithScope(tc.Scope),
+			sts.WithIdentity(tc.Identity),
+		)
+
+		res, err := xchg.Exchange(ctx, token)
+		if err != nil {
+			result.Error = fmt.Sprintf("exchange %d: %v", i+1, err)
+			return result
+		}
+
+		ghc := github.NewClient(
+			oauth2.NewClient(ctx,
+				oauth2.StaticTokenSource(&oauth2.Token{
+					AccessToken: res.AccessToken,
+				}),
+			),
+		)
+		app, _, err := ghc.Apps.Get(ctx, "")
+		if err != nil {
+			result.Error = fmt.Sprintf("exchange %d: GET /app failed: %v", i+1, err)
+			return result
+		}
+		appIDs = append(appIDs, app.GetID())
+
+		if err := octosts.Revoke(ctx, res.AccessToken); err != nil {
+			clog.FromContext(ctx).Warnf("failed to revoke token for %q exchange %d: %v", tc.Name, i+1, err)
+		}
+	}
+
+	for i, id := range appIDs {
+		if id != appIDs[0] {
+			result.Error = fmt.Sprintf("sticky routing broken: exchange 1 used app %d, exchange %d used app %d", appIDs[0], i+1, id)
 			return result
 		}
 	}

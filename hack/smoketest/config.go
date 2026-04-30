@@ -22,6 +22,7 @@ type TestCase struct {
 	ExpectFailure bool    `json:"expect_failure"`
 	ExpectedError string  `json:"expected_error"`
 	Verify        *Verify `json:"verify,omitempty"`
+	StickyRepeat  int     `json:"sticky_repeat,omitempty"`
 }
 
 type Verify struct {

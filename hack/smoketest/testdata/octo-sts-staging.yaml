@@ -26,6 +26,11 @@ tests:
     identity: smoke-test
     expect_failure: false
 
+  - name: "checks:write sticky routing"
+    scope: octo-sts/prober
+    identity: smoke-test-checks
+    sticky_repeat: 3
+
   - name: "missing STS policy"
     scope: octo-sts/prober
     identity: does-not-exist
