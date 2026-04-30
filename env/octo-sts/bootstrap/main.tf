@@ -8,6 +8,13 @@ resource "google_project_service" "iamcredentials-api" {
   disable_on_destroy         = false
 }
 
+resource "google_project_service" "firestore-api" {
+  project                    = var.project_id
+  service                    = "firestore.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
 data "google_monitoring_notification_channel" "notify-chainguard-slack" {
   display_name = "Slack Octo STS Notification"
 }
