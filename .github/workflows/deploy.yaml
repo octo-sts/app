@@ -55,12 +55,14 @@ jobs:
             compute.googleapis.com:443
             dl.google.com:443
             dns.googleapis.com:443
+            firestore.googleapis.com:443
             octo-staging.dev:443
             octo-sts.dev:443
             fulcio.sigstore.dev:443
             gcr.io:443
             github.com:443
             go.dev:443
+            hooks.slack.com:443
             iam.googleapis.com:443
             iamcredentials.googleapis.com:443
             logging.googleapis.com:443
