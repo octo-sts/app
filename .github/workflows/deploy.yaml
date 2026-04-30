@@ -77,6 +77,7 @@ jobs:
             releases.hashicorp.com:443
             run.googleapis.com:443
             secretmanager.googleapis.com:443
+            serviceusage.googleapis.com:443
             storage.googleapis.com:443
             sts.googleapis.com:443
             sum.golang.org:443
