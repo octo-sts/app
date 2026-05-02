@@ -1,0 +1,10 @@
+apiVersion: v2
+name: octosts
+description: |
+  octo-sts: a GitHub OIDC token broker. PoC deployment for CoreWeave SecEng.
+  Verifies GitHub Actions OIDC tokens and exchanges them for scoped GitHub
+  App installation tokens. App private key lives in Vault Transit; this
+  service never sees the key bytes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

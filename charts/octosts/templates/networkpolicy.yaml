@@ -1,0 +1,62 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "octosts.fullname" . }}
+  labels:
+    {{- include "octosts.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "octosts.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Public-facing traefik (us-lab-01a-core-services); sends user requests
+    # to the OIDC token-exchange endpoint.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.traefikNamespace | default "traefik" }}
+      ports:
+        - port: {{ .Values.service.port }}
+          protocol: TCP
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # GitHub API + JWKS aggregator + Vault — all HTTPS over public/private
+    # routes. Vault listens on 8200 internally; the address used here
+    # (secvault.int.coreweave.com) terminates TLS on 443 via the secvault
+    # ingress, so 443 covers all three. Open 8200 too in case direct
+    # routing is ever used.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              # Reject inter-pod traffic except via DNS/Vault egress above.
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+    # Internal Vault (secvault.int.coreweave.com resolves to RFC1918 space).
+    # Allow 443 to private CIDRs specifically for Vault.
+    - to:
+        - ipBlock:
+            cidr: 10.0.0.0/8
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 8200
+          protocol: TCP
+{{- end }}

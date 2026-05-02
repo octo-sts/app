@@ -1,0 +1,73 @@
+---
+# Default values for octosts. PoC deployment.
+# Most contract values (Vault paths, role, audience, hostname) are pinned in
+# the deploy-repo's config/services.yaml under valuesObject. The chart-level
+# defaults below match the contract table in POC.md so a default `helm
+# template` produces a deployable manifest.
+
+replicaCount: 1
+
+image:
+  repository: docker.artifacts.coreweave.com/octosts-deploy/octosts
+  # Override at deploy time with the dev-<sha> tag pushed from laptop.
+  # Renovate watches services.yaml; chart default tag is pinned at AppVersion.
+  tag: ""
+  pullPolicy: IfNotPresent
+
+# cloudsmith-registry is provisioned in the cluster via ExternalSecrets/Doppler
+# (pattern: multicloud-interconnect, wiz). The secret already exists in the
+# octosts namespace before the deployment lands.
+imagePullSecrets:
+  - name: cloudsmith-registry
+
+# ServiceAccount name is LOCKED. The Vault JWT auth role's bound_claims.sub
+# is `system:serviceaccount:octosts:octosts`. Don't make this configurable.
+serviceAccount:
+  name: octosts
+
+service:
+  type: ClusterIP
+  port: 8080
+
+ingress:
+  enabled: true
+  className: traefik
+  host: octosts.us-lab.core-services.ingress.coreweave.com
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: true
+    # Cert-manager creates the secret from the ingress; name follows
+    # multicloud-interconnect convention.
+    secretName: octosts-tls
+
+# All env vars below match the LOCKED contract table in POC.md. Names are
+# what the upstream binary's envconfig package expects (plus the new
+# VAULT_TRANSIT_* fields the fork adds in chunk A).
+env:
+  port: "8080"
+  # GitHub App "octosts-poc" in the jfrantz-cw personal account.
+  githubAppIds: "3580313"
+  stsDomain: octosts.us-lab.core-services.ingress.coreweave.com
+  vault:
+    addr: https://secvault.int.coreweave.com
+    role: octosts-poc
+    jwtPath: /var/run/secrets/vault/token
+    transitMount: transit/octosts
+    transitKey: github-app-jfrantz-cw-poc
+  metrics: "false"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+networkPolicy:
+  enabled: true
+  # Namespace where traefik runs on us-lab-01a-core-services.
+  # Per network-ts thread (Apr 2026): public traefik on core-services lives
+  # in namespace `traefik`. (`traefik-internal` is the internal-only one.)
+  traefikNamespace: traefik

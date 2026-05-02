@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "octosts.fullname" . }}
+  labels:
+    {{- include "octosts.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "octosts.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "octosts.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: octosts
+          image: {{ include "octosts.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          # Env var names below are LOCKED — see POC.md "Locked-in contracts"
+          # table. The fork's pkg/envconfig + pkg/vaulttransit reads exactly
+          # these names.
+          env:
+            - name: PORT
+              value: {{ .Values.env.port | quote }}
+            - name: GITHUB_APP_IDS
+              value: {{ .Values.env.githubAppIds | quote }}
+            - name: STS_DOMAIN
+              value: {{ .Values.env.stsDomain | quote }}
+            - name: VAULT_ADDR
+              value: {{ .Values.env.vault.addr | quote }}
+            - name: VAULT_ROLE
+              value: {{ .Values.env.vault.role | quote }}
+            - name: VAULT_JWT_PATH
+              value: {{ .Values.env.vault.jwtPath | quote }}
+            - name: VAULT_TRANSIT_MOUNT
+              value: {{ .Values.env.vault.transitMount | quote }}
+            - name: VAULT_TRANSIT_KEY
+              value: {{ .Values.env.vault.transitKey | quote }}
+            - name: METRICS
+              value: {{ .Values.env.metrics | quote }}
+          # Upstream octo-sts (cmd/app/main.go) only registers the OIDC gRPC
+          # service and a "/" GET handler — there is no /healthz or /readyz
+          # endpoint as of HEAD 68cc677. Probes are intentionally omitted for
+          # the PoC; revisit if upstream adds health endpoints.
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          volumeMounts:
+            # Projected SA token: the Vault JWT auth role `octosts-poc`
+            # validates this token's audience=secvault claim and binds the
+            # k8s SA to a short-lived Vault token, which then signs via
+            # transit/octosts/sign/<key>. Pattern cribbed from
+            # ~/workspace/stargate/charts/stargate/templates/deployment.yaml.
+            - name: vault-token
+              mountPath: /var/run/secrets/vault
+              readOnly: true
+      volumes:
+        - name: vault-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: secvault
+                  expirationSeconds: 3600
+                  path: token
