@@ -16,6 +16,7 @@ import (
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/gcpkms"
 	"github.com/octo-sts/app/pkg/ghinstall"
+	"github.com/octo-sts/app/pkg/vaulttransit"
 )
 
 type ctxKey int
@@ -93,9 +94,27 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 			return nil, err
 		}
 		return atr, nil
+
+	case env.VaultTransitMount != "" && env.VaultTransitKey != "":
+		signer, err := vaulttransit.New(ctx, vaulttransit.Config{
+			Addr:         env.VaultAddr,
+			Role:         env.VaultRole,
+			JWTPath:      env.VaultJWTPath,
+			TransitMount: env.VaultTransitMount,
+			TransitKey:   env.VaultTransitKey,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error creating vault transit signer: %w", err)
+		}
+		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(signer))
+		if err != nil {
+			return nil, err
+		}
+		return atr, nil
+
 	default:
 		if kmsKey == "" {
-			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
+			return nil, fmt.Errorf("no signing key configured for app %d (set KMS_KEYS, APP_SECRET_CERTIFICATE_*, or VAULT_TRANSIT_MOUNT+VAULT_TRANSIT_KEY)", appID)
 		}
 
 		signer, err := gcpkms.New(ctx, kmsClient, kmsKey)

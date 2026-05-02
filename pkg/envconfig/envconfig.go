@@ -17,7 +17,17 @@ type EnvConfig struct {
 	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"true"`
 	AppSecretCertificateFile   string   `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string   `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
-	Metrics                    bool     `envconfig:"METRICS" required:"false" default:"true"`
+
+	// Vault Transit signing source. Setting both VaultTransitMount and
+	// VaultTransitKey selects pkg/vaulttransit as the signer. Auth uses
+	// Kubernetes-projected ServiceAccount tokens (JWT auth method).
+	VaultAddr         string `envconfig:"VAULT_ADDR" required:"false"`
+	VaultRole         string `envconfig:"VAULT_ROLE" required:"false"`
+	VaultJWTPath      string `envconfig:"VAULT_JWT_PATH" required:"false" default:"/var/run/secrets/vault/token"`
+	VaultTransitMount string `envconfig:"VAULT_TRANSIT_MOUNT" required:"false"`
+	VaultTransitKey   string `envconfig:"VAULT_TRANSIT_KEY" required:"false"`
+
+	Metrics bool `envconfig:"METRICS" required:"false" default:"true"`
 	// QuotaFloorHard / QuotaFloorSoft tune the three-tier capacity-aware
 	// picker in pkg/ghinstall. Defaults target GitHub's default 15,000/hr
 	// installation rate-limit cap: drop out of the preferred pool below
@@ -86,12 +96,31 @@ func BaseConfig() (*EnvConfig, error) {
 	if cfg.AppSecretCertificateEnvVar != "" {
 		sources++
 	}
+	vaultConfigured := cfg.VaultTransitMount != "" || cfg.VaultTransitKey != ""
+	if vaultConfigured {
+		sources++
+	}
 	if sources > 1 {
-		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
+		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR, VAULT_TRANSIT_MOUNT+VAULT_TRANSIT_KEY may be set")
 	}
 
 	if len(cfg.KMSKeys) > 0 && len(cfg.KMSKeys) != len(cfg.AppIDs) {
 		return nil, fmt.Errorf("KMS_KEYS length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.KMSKeys), len(cfg.AppIDs))
+	}
+
+	if vaultConfigured {
+		if cfg.VaultTransitMount == "" || cfg.VaultTransitKey == "" {
+			return nil, errors.New("VAULT_TRANSIT_MOUNT and VAULT_TRANSIT_KEY must both be set")
+		}
+		if cfg.VaultAddr == "" {
+			return nil, errors.New("VAULT_ADDR is required when Vault Transit signing is enabled")
+		}
+		if cfg.VaultRole == "" {
+			return nil, errors.New("VAULT_ROLE is required when Vault Transit signing is enabled")
+		}
+		if len(cfg.AppIDs) != 1 {
+			return nil, fmt.Errorf("Vault Transit signing currently supports a single GitHub App; got %d entries in GITHUB_APP_IDS", len(cfg.AppIDs))
+		}
 	}
 
 	if cfg.QuotaFloorHard < 0 || cfg.QuotaFloorSoft < 0 {
