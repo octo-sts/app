@@ -7,7 +7,7 @@ require (
 	chainguard.dev/sdk v0.1.54
 	cloud.google.com/go/firestore v1.22.0
 	cloud.google.com/go/kms v1.30.0
-	cloud.google.com/go/secretmanager v1.19.0
+	cloud.google.com/go/secretmanager v1.20.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.18.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.0
