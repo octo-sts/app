@@ -22,7 +22,7 @@ require (
 	github.com/invopop/jsonschema v0.14.0
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.36.0
-	google.golang.org/api v0.277.0
+	google.golang.org/api v0.278.0
 	google.golang.org/grpc v1.81.0
 	k8s.io/apimachinery v0.36.0
 	sigs.k8s.io/yaml v1.6.0
