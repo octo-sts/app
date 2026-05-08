@@ -426,6 +426,55 @@ func TestGetNotFoundCached(t *testing.T) {
 	}
 }
 
+func TestGetNotFoundCacheExpires(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			calls++
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(int64(1)),
+				Account: &github.User{
+					Login: github.Ptr("other-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}))
+
+	mgr, err := NewWithNegativeTTL(atr, 50*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewWithNegativeTTL() = %v", err)
+	}
+
+	// First call: populates negative cache.
+	_, _, err = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if err == nil {
+		t.Fatal("expected error on first call, got nil")
+	}
+	if calls != 1 {
+		t.Fatalf("API calls after first Get: got = %d, wanted = 1", calls)
+	}
+
+	// Second call: served from negative cache.
+	_, _, _ = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if calls != 1 {
+		t.Fatalf("API calls after second Get: got = %d, wanted = 1", calls)
+	}
+
+	// Wait for TTL to expire.
+	time.Sleep(100 * time.Millisecond)
+
+	// Third call: negative cache expired, should hit API again.
+	_, _, _ = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if calls != 2 {
+		t.Errorf("API calls after TTL expiry: got = %d, wanted = 2", calls)
+	}
+}
+
 func TestRoundRobinNotFoundCached(t *testing.T) {
 	ctx := context.Background()
 	appIDs := []int64{12345678, 87654321}

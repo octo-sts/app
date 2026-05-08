@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v84/github"
 	lru "github.com/hashicorp/golang-lru/v2"
+	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -33,38 +35,43 @@ type Manager interface {
 	GetByInstallation(ctx context.Context, owner string, installationID int64) (*ghinstallation.AppsTransport, int64, error)
 }
 
+const defaultNegativeTTL = 5 * time.Minute
+
 type manager struct {
-	atr   *ghinstallation.AppsTransport
-	cache *lru.TwoQueueCache[string, int64]
+	atr           *ghinstallation.AppsTransport
+	cache         *lru.TwoQueueCache[string, int64]
+	negativeCache *expirablelru.LRU[string, bool]
 }
 
 // New creates a Manager backed by the given AppsTransport.
 func New(atr *ghinstallation.AppsTransport) (Manager, error) {
+	return NewWithNegativeTTL(atr, defaultNegativeTTL)
+}
+
+// NewWithNegativeTTL creates a Manager with a configurable TTL for
+// negative (not-installed) cache entries.
+func NewWithNegativeTTL(atr *ghinstallation.AppsTransport, negativeTTL time.Duration) (Manager, error) {
 	cache, err := lru.New2Q[string, int64](200)
 	if err != nil {
 		return nil, err
 	}
 	return &manager{
-		atr:   atr,
-		cache: cache,
+		atr:           atr,
+		cache:         cache,
+		negativeCache: expirablelru.NewLRU[string, bool](200, nil, negativeTTL),
 	}, nil
 }
-
-// negativeCacheConst is the sentinel value stored in the installation
-// LRU cache when a GitHub App is not installed for an owner. Valid
-// installation IDs are always positive, so 0 is unambiguous.
-const negativeCacheConst int64 = 0
 
 // Get returns the AppsTransport and installation ID for the given owner.
 // scope and identity are unused by the single-app manager; routing across
 // apps is handled by the roundRobin manager.
 func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
+	if _, ok := m.negativeCache.Get(cacheKey); ok {
+		clog.InfoContextf(ctx, "negative install cache hit for %s", cacheKey)
+		return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+	}
 	if v, ok := m.cache.Get(cacheKey); ok {
-		if v == negativeCacheConst {
-			clog.InfoContextf(ctx, "negative install cache hit for %s", cacheKey)
-			return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
-		}
 		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
 		return m.atr, v, nil
 	}
@@ -93,7 +100,7 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 		}
 		page = resp.NextPage
 	}
-	m.cache.Add(cacheKey, negativeCacheConst)
+	m.negativeCache.Add(cacheKey, true)
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
