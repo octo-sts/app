@@ -375,6 +375,108 @@ func TestRoundRobinWithQuotaColdStartFallsBack(t *testing.T) {
 	}
 }
 
+func TestGetNotFoundCached(t *testing.T) {
+	ctx := context.Background()
+	calls := 0
+
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/app/installations":
+			calls++
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(int64(1)),
+				Account: &github.User{
+					Login: github.Ptr("other-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+		}
+	}))
+
+	mgr, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	// First call: should hit GitHub API and get NotFound.
+	_, _, err = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if err == nil {
+		t.Fatal("expected error on first call, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("API calls after first Get: got = %d, wanted = 1", calls)
+	}
+
+	// Second call: should be served from negative cache, no API call.
+	_, _, err = mgr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if err == nil {
+		t.Fatal("expected error on second call, got nil")
+	}
+	st, ok = status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("API calls after second Get: got = %d, wanted = 1 (negative cache should prevent API call)", calls)
+	}
+}
+
+func TestRoundRobinNotFoundCached(t *testing.T) {
+	ctx := context.Background()
+	appIDs := []int64{12345678, 87654321}
+	callsByApp := map[int64]int{}
+
+	managers := make([]Manager, 0, len(appIDs))
+	for _, appID := range appIDs {
+		calls := &callsByApp
+		id := appID
+		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/app/installations":
+				(*calls)[id]++
+				json.NewEncoder(w).Encode([]github.Installation{})
+			default:
+				w.WriteHeader(http.StatusNotImplemented)
+			}
+		}), appID)
+		m, err := New(atr)
+		if err != nil {
+			t.Fatalf("New() = %v", err)
+		}
+		managers = append(managers, m)
+	}
+
+	rr := NewRoundRobin(managers)
+
+	// First call: both apps should be checked (primary miss + fallback).
+	_, _, err := rr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if err == nil {
+		t.Fatal("expected error on first call, got nil")
+	}
+	firstTotal := 0
+	for _, c := range callsByApp {
+		firstTotal += c
+	}
+
+	// Second call: negative cache should prevent any new API calls.
+	_, _, err = rr.Get(ctx, "missing-org", "missing-org/repo", "my-identity")
+	if err == nil {
+		t.Fatal("expected error on second call, got nil")
+	}
+	secondTotal := 0
+	for _, c := range callsByApp {
+		secondTotal += c
+	}
+	if secondTotal != firstTotal {
+		t.Errorf("API calls increased from %d to %d on second round-robin Get (negative cache should prevent new calls)", firstTotal, secondTotal)
+	}
+}
+
 func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 

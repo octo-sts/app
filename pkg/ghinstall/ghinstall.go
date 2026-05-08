@@ -50,12 +50,21 @@ func New(atr *ghinstallation.AppsTransport) (Manager, error) {
 	}, nil
 }
 
+// negativeCacheConst is the sentinel value stored in the installation
+// LRU cache when a GitHub App is not installed for an owner. Valid
+// installation IDs are always positive, so 0 is unambiguous.
+const negativeCacheConst int64 = 0
+
 // Get returns the AppsTransport and installation ID for the given owner.
 // scope and identity are unused by the single-app manager; routing across
 // apps is handled by the roundRobin manager.
 func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
 	if v, ok := m.cache.Get(cacheKey); ok {
+		if v == negativeCacheConst {
+			clog.InfoContextf(ctx, "negative install cache hit for %s", cacheKey)
+			return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+		}
 		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
 		return m.atr, v, nil
 	}
@@ -84,6 +93,7 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 		}
 		page = resp.NextPage
 	}
+	m.cache.Add(cacheKey, negativeCacheConst)
 	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
 }
 
