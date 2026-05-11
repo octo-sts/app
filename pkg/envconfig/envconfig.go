@@ -29,10 +29,14 @@ type EnvConfig struct {
 	QuotaFloorSoft  int           `envconfig:"OCTOSTS_QUOTA_FLOOR_SOFT" required:"false" default:"5000"`
 	QuotaStaleAfter time.Duration `envconfig:"OCTOSTS_QUOTA_STALE" required:"false" default:"5m"`
 
-	StickyStore                    string        `envconfig:"OCTOSTS_STICKY_STORE" required:"false"`
-	StickyStoreFirestoreProject    string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT" required:"false"`
-	StickyStoreFirestoreCollection string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION" required:"false" default:"sticky-routes"`
-	StickyStoreFirestoreTTL        time.Duration `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_TTL" required:"false" default:"1h"`
+	// StickyStoreURL is a gocloud.dev/docstore URL identifying the backing
+	// collection. Empty disables sticky routing entirely. The URL scheme picks
+	// the backend:
+	//   firestore://projects/PROJECT/databases/(default)/documents/COLLECTION?name_field=key
+	//   dynamodb://TABLE?partition_key=key&region=us-east-1
+	//   mem://COLLECTION/key
+	StickyStoreURL string        `envconfig:"OCTOSTS_STICKY_STORE_URL" required:"false"`
+	StickyStoreTTL time.Duration `envconfig:"OCTOSTS_STICKY_STORE_TTL" required:"false" default:"1h"`
 }
 
 type EnvConfigApp struct {
@@ -104,11 +108,8 @@ func BaseConfig() (*EnvConfig, error) {
 		return nil, fmt.Errorf("OCTOSTS_QUOTA_STALE (%s) must be positive", cfg.QuotaStaleAfter)
 	}
 
-	if cfg.StickyStore != "" && cfg.StickyStore != "firestore" && cfg.StickyStore != "memory" {
-		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE %q is not supported (valid: memory, firestore)", cfg.StickyStore)
-	}
-	if cfg.StickyStore == "firestore" && cfg.StickyStoreFirestoreTTL <= 0 {
-		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_FIRESTORE_TTL (%s) must be positive", cfg.StickyStoreFirestoreTTL)
+	if cfg.StickyStoreURL != "" && cfg.StickyStoreTTL <= 0 {
+		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_TTL (%s) must be positive", cfg.StickyStoreTTL)
 	}
 
 	return cfg, err

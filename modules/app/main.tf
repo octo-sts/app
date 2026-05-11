@@ -121,20 +121,12 @@ module "this" {
           value = var.domain,
         },
         {
-          name  = "OCTOSTS_STICKY_STORE"
-          value = var.sticky_store
+          name  = "OCTOSTS_STICKY_STORE_URL"
+          value = local.sticky_store_url
         },
         {
-          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT"
-          value = var.sticky_store == "firestore" ? var.project_id : ""
-        },
-        {
-          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION"
-          value = var.sticky_store_firestore_collection
-        },
-        {
-          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_TTL"
-          value = var.sticky_store_firestore_ttl
+          name  = "OCTOSTS_STICKY_STORE_TTL"
+          value = var.sticky_store_ttl
         },
       ]
       regional-env = [{

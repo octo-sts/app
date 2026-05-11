@@ -104,7 +104,7 @@ func main() {
 	} else {
 		rrm = ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 	}
-	if len(managers) > 1 && baseCfg.StickyStore != "" {
+	if len(managers) > 1 && baseCfg.StickyStoreURL != "" {
 		var closer io.Closer
 		sticky, closer, err = stickystore.New(ctx, baseCfg)
 		if err != nil {

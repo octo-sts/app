@@ -66,20 +66,20 @@ variable "github_webhook_organization_filter" {
   default     = ""
 }
 
-variable "sticky_store" {
-  description = "Backend for sticky routing (checks:write). Empty string disables."
+variable "sticky_store_firestore_collection" {
+  description = "Firestore collection for sticky routing. When set, the module provisions a Firestore database, TTL policy on expire_at, and the IAM grant, and constructs the docstore URL automatically. Leave empty to disable sticky routing (or set sticky_store_url for a non-Firestore backend)."
   type        = string
   default     = ""
 }
 
-variable "sticky_store_firestore_collection" {
-  description = "Firestore collection for sticky route mappings."
+variable "sticky_store_url" {
+  description = "Override for the docstore URL. Defaults to a Firestore URL constructed from project_id and sticky_store_firestore_collection. Set explicitly for non-Firestore backends, e.g. \"dynamodb://table?partition_key=key&region=us-east-1\"."
   type        = string
-  default     = "sticky-routes"
+  default     = ""
 }
 
-variable "sticky_store_firestore_ttl" {
-  description = "TTL for sticky route documents (e.g. 1h)."
+variable "sticky_store_ttl" {
+  description = "TTL for sticky route documents (e.g. 1h). Only meaningful when sticky routing is enabled."
   type        = string
   default     = "1h"
 }

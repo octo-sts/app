@@ -76,8 +76,8 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_apps                = var.github_apps
-  notification_channels      = local.notification_channels
-  sticky_store               = "firestore"
-  sticky_store_firestore_ttl = "1h"
+  github_apps                       = var.github_apps
+  notification_channels             = local.notification_channels
+  sticky_store_firestore_collection = "sticky-routes"
+  sticky_store_ttl                  = "1h"
 }
