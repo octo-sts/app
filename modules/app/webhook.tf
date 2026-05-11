@@ -7,7 +7,7 @@ resource "random_password" "webhook-secret" {
 
 module "webhook-secret" {
   source  = "chainguard-dev/common/infra//modules/configmap"
-  version = "1.0.4"
+  version = "1.0.6"
 
   team = "developer-platform"
 
@@ -22,7 +22,7 @@ module "webhook-secret" {
 
 module "webhook" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "1.0.4"
+  version = "1.0.6"
 
   team = "developer-platform"
 
