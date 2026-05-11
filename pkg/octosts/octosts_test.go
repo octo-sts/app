@@ -201,6 +201,78 @@ func TestExchange(t *testing.T) {
 	}
 }
 
+// TestExchangeCustomOrgPolicyRepo verifies that an org-scoped exchange reads
+// its trust policy from the repo named by ORG_POLICY_REPO rather than the
+// hardcoded ".github" default.
+func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "my-policies", identity: "foo"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	ctx := context.Background()
+	atr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{
+		Algorithm: jose.RS256,
+		Key:       pk,
+	}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	sts := &sts{
+		rrm:           &fakeInstallMgr{atr: atr},
+		appCount:      1,
+		orgPolicyRepo: "my-policies",
+	}
+
+	tok, err := sts.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v", err)
+	}
+
+	b, err := base64.StdEncoding.DecodeString(tok.Token)
+	if err != nil {
+		t.Fatalf("DecodeString failed: %v", err)
+	}
+	got := new(github.InstallationTokenOptions)
+	if err := json.Unmarshal(b, got); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	// Distinct permission from testdata/org/.github/foo.sts.yaml so this
+	// test would fail if the lookup silently fell back to the default repo.
+	want := &github.InstallationTokenOptions{
+		Permissions: &github.InstallationPermissions{
+			Contents: github.Ptr("read"),
+		},
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Error(diff)
+	}
+}
+
 func TestExchangeValidation(t *testing.T) {
 	ctx := context.Background()
 	atr := newGitHubClient(t, newFakeGitHub())
