@@ -89,7 +89,7 @@ func TestOrgFilter(t *testing.T) {
 		{"bar", http.StatusOK},
 	} {
 		t.Run(tc.org, func(t *testing.T) {
-			body, err := json.Marshal(github.PushEvent{
+			resp, err := sendWebhook(t, srv, secret, "push", github.PushEvent{
 				Organization: &github.Organization{
 					Login: github.Ptr(tc.org),
 				},
@@ -99,17 +99,6 @@ func TestOrgFilter(t *testing.T) {
 					},
 				},
 			})
-			if err != nil {
-				t.Fatal(err)
-			}
-			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
-			if err != nil {
-				t.Fatal(err)
-			}
-			req.Header.Set("X-Hub-Signature", signature(secret, body))
-			req.Header.Set("X-GitHub-Event", "push")
-			req.Header.Set("Content-Type", "application/json")
-			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -177,7 +166,7 @@ func TestWebhookOK(t *testing.T) {
 	srv := httptest.NewServer(v)
 	defer srv.Close()
 
-	body, err := json.Marshal(github.PushEvent{
+	resp, err := sendWebhook(t, srv, secret, "push", github.PushEvent{
 		Installation: &github.Installation{
 			ID: github.Ptr(int64(1111)),
 		},
@@ -193,17 +182,6 @@ func TestWebhookOK(t *testing.T) {
 		Before: github.Ptr("1234"),
 		After:  github.Ptr("5678"),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Hub-Signature", signature(secret, body))
-	req.Header.Set("X-GitHub-Event", "push")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +261,7 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	srv := httptest.NewServer(v)
 	defer srv.Close()
 
-	body, err := json.Marshal(github.PushEvent{
+	resp, err := sendWebhook(t, srv, secret, "push", github.PushEvent{
 		Installation: &github.Installation{
 			ID: github.Ptr(int64(1111)),
 		},
@@ -299,17 +277,6 @@ func TestWebhookDeletedSTS(t *testing.T) {
 		Before: github.Ptr("9876"),
 		After:  github.Ptr("4321"),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Hub-Signature", signature(secret, body))
-	req.Header.Set("X-GitHub-Event", "push")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,4 +306,137 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("unexpected check run (-want +got):\n%s", diff)
 	}
+}
+
+func TestCheckSuiteActionFiltering(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mock GitHub server that should not be called for ignored actions
+	ghCalled := false
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ghCalled = true
+		http.Error(w, "should not be called for ignored actions", http.StatusInternalServerError)
+	}))
+	defer gh.Close()
+
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("test-secret")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	testCases := []struct {
+		eventType     string
+		action        string
+		shouldProcess bool
+	}{
+		{"check_suite", "requested", true},
+		{"check_suite", "rerequested", true},
+		{"check_suite", "completed", false},
+		{"check_run", "created", true},
+		{"check_run", "requested_action", true},
+		{"check_run", "rerequested", true},
+		{"check_run", "completed", false},
+		{"check_suite", "unknown", false},
+		{"check_run", "unknown", false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("%s_%s", tc.eventType, tc.action), func(t *testing.T) {
+			ghCalled = false
+
+			var data any
+			if tc.eventType == "check_suite" {
+				data = github.CheckSuiteEvent{
+					Action: github.Ptr(tc.action),
+					Installation: &github.Installation{
+						ID: github.Ptr(int64(1111)),
+					},
+					Repo: &github.Repository{
+						Owner: &github.User{
+							Login: github.Ptr("testorg"),
+						},
+						Name: github.Ptr("testrepo"),
+					},
+					CheckSuite: &github.CheckSuite{
+						ID:        github.Ptr(int64(12345)),
+						HeadSHA:   github.Ptr("abcdef123456"),
+						BeforeSHA: github.Ptr("fedcba654321"),
+					},
+					Sender: &github.User{
+						Login: github.Ptr("testuser"),
+					},
+				}
+			} else {
+				data = github.CheckRunEvent{
+					Action: github.Ptr(tc.action),
+					Installation: &github.Installation{
+						ID: github.Ptr(int64(1111)),
+					},
+					Repo: &github.Repository{
+						Owner: &github.User{
+							Login: github.Ptr("testorg"),
+						},
+						Name: github.Ptr("testrepo"),
+					},
+					CheckRun: &github.CheckRun{
+						CheckSuite: &github.CheckSuite{
+							ID:        github.Ptr(int64(12345)),
+							HeadSHA:   github.Ptr("abcdef123456"),
+							BeforeSHA: github.Ptr("fedcba654321"),
+						},
+					},
+					Sender: &github.User{
+						Login: github.Ptr("testuser"),
+					},
+				}
+			}
+
+			resp, err := sendWebhook(t, srv, secret, tc.eventType, data)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+
+			if tc.shouldProcess {
+				if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusInternalServerError {
+					t.Errorf("expected 200 or 500 for processed action, got %d", resp.StatusCode)
+				}
+			} else {
+				if resp.StatusCode != http.StatusOK {
+					t.Errorf("expected 200 for ignored action, got %d", resp.StatusCode)
+				}
+				if ghCalled {
+					t.Error("GitHub API should not be called for ignored actions")
+				}
+			}
+		})
+	}
+}
+
+func sendWebhook(t *testing.T, srv *httptest.Server, secret []byte, eventType string, body interface{}) (*http.Response, error) {
+	t.Helper()
+
+	data, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, data))
+	req.Header.Set("X-GitHub-Event", eventType)
+	req.Header.Set("Content-Type", "application/json")
+
+	return srv.Client().Do(req.WithContext(slogtest.Context(t)))
 }
