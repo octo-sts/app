@@ -98,6 +98,9 @@ func TestOrgFilter(t *testing.T) {
 						Login: github.Ptr(tc.org),
 					},
 				},
+				Commits: []*github.HeadCommit{{
+					Added: []string{".github/chainguard/test.sts.yaml"},
+				}},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -192,6 +195,9 @@ func TestWebhookOK(t *testing.T) {
 		},
 		Before: github.Ptr("1234"),
 		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test.sts.yaml"},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -232,6 +238,43 @@ func TestWebhookOK(t *testing.T) {
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("unexpected check run (-want +got):\n%s", diff)
+	}
+}
+
+func TestFilterSTSFiles(t *testing.T) {
+	v := &Validator{}
+	for _, tc := range []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{
+			name:  "matches sts.yaml files",
+			input: []string{".github/chainguard/test.sts.yaml", "README.md", ".github/chainguard/other.sts.yaml"},
+			want:  []string{".github/chainguard/test.sts.yaml", ".github/chainguard/other.sts.yaml"},
+		},
+		{
+			name:  "no matches",
+			input: []string{"README.md", "go.mod"},
+			want:  nil,
+		},
+		{
+			name:  "empty input",
+			input: nil,
+			want:  nil,
+		},
+		{
+			name:  "nested path not matched",
+			input: []string{".github/chainguard/subdir/test.sts.yaml"},
+			want:  nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := v.filterSTSFiles(tc.input)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("filterSTSFiles() mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 
@@ -298,6 +341,11 @@ func TestWebhookDeletedSTS(t *testing.T) {
 		},
 		Before: github.Ptr("9876"),
 		After:  github.Ptr("4321"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test2.sts.yaml"},
+		}, {
+			Removed: []string{".github/chainguard/removed-example.sts.yaml"},
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,5 +386,386 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Fatalf("unexpected check run (-want +got):\n%s", diff)
+	}
+}
+
+func TestFilesFromPushEvent(t *testing.T) {
+	v := &Validator{}
+	for _, tc := range []struct {
+		name    string
+		commits []*github.HeadCommit
+		want    []string
+	}{
+		{
+			name: "single commit with added file",
+			commits: []*github.HeadCommit{{
+				Added: []string{".github/chainguard/test.sts.yaml"},
+			}},
+			want: []string{".github/chainguard/test.sts.yaml"},
+		},
+		{
+			name: "modified file included",
+			commits: []*github.HeadCommit{{
+				Modified: []string{".github/chainguard/test.sts.yaml"},
+			}},
+			want: []string{".github/chainguard/test.sts.yaml"},
+		},
+		{
+			name: "removed file excluded",
+			commits: []*github.HeadCommit{{
+				Removed: []string{".github/chainguard/test.sts.yaml"},
+			}},
+			want: nil,
+		},
+		{
+			name: "multiple commits deduplicated downstream",
+			commits: []*github.HeadCommit{
+				{Added: []string{".github/chainguard/a.sts.yaml"}},
+				{Modified: []string{".github/chainguard/a.sts.yaml"}},
+			},
+			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/a.sts.yaml"},
+		},
+		{
+			name: "non-sts files filtered out",
+			commits: []*github.HeadCommit{{
+				Added:    []string{"README.md", ".github/chainguard/test.sts.yaml"},
+				Modified: []string{"go.mod"},
+			}},
+			want: []string{".github/chainguard/test.sts.yaml"},
+		},
+		{
+			name:    "nil commits",
+			commits: nil,
+			want:    nil,
+		},
+		{
+			name: "boundary 19 commits uses payload",
+			commits: func() []*github.HeadCommit {
+				commits := make([]*github.HeadCommit, 19)
+				for i := range commits {
+					commits[i] = &github.HeadCommit{Added: []string{"README.md"}}
+				}
+				commits[18] = &github.HeadCommit{Added: []string{".github/chainguard/test.sts.yaml"}}
+				return commits
+			}(),
+			want: []string{".github/chainguard/test.sts.yaml"},
+		},
+		{
+			name: "mixed commits with sts files scattered",
+			commits: []*github.HeadCommit{
+				{Added: []string{"README.md", "go.mod"}},
+				{Added: []string{".github/chainguard/a.sts.yaml"}, Modified: []string{"main.go"}},
+				{Modified: []string{".github/chainguard/b.sts.yaml"}, Removed: []string{".github/chainguard/c.sts.yaml"}},
+			},
+			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"},
+		},
+		{
+			name: "no sts files in any commit",
+			commits: []*github.HeadCommit{
+				{Added: []string{"README.md"}},
+				{Modified: []string{"go.mod", "main.go"}},
+			},
+			want: nil,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event := &github.PushEvent{Commits: tc.commits}
+			got := v.filesFromPushEvent(event)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("filesFromPushEvent() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestWebhookPushTruncatedFallback(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			clog.FromContext(r.Context()).Errorf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	// Build 20 commits with no STS files to trigger truncation fallback.
+	commits := make([]*github.HeadCommit, 20)
+	for i := range commits {
+		commits[i] = &github.HeadCommit{
+			Added: []string{"README.md"},
+		}
+	}
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Organization: &github.Organization{
+			Login: github.Ptr("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name: github.Ptr("bar"),
+		},
+		Before:  github.Ptr("1234"),
+		After:   github.Ptr("5678"),
+		Commits: commits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", 200, string(out))
+	}
+
+	// The Compare testdata for 1234...5678 has test.sts.yaml,
+	// so the fallback should find it and create a CheckRun.
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run from Compare fallback, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
+func TestWebhookPushNoSTSFiles(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	compareHit := false
+	mux.HandleFunc("/api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		compareHit = true
+		t.Error("Compare API should not be called for < 20 commits")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Organization: &github.Organization{
+			Login: github.Ptr("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name: github.Ptr("bar"),
+		},
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{
+			{Added: []string{"README.md"}},
+			{Modified: []string{"go.mod", "main.go"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs for non-STS push, got %d", len(got))
+	}
+	if compareHit {
+		t.Fatal("Compare API was called but should not have been for < 20 commits")
+	}
+}
+
+func TestWebhookPushBoundary19Commits(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	compareHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		compareHit = true
+		t.Error("Compare API should not be called for exactly 19 commits")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	// 19 commits — last one has an STS file. Should use payload, not Compare API.
+	commits := make([]*github.HeadCommit, 19)
+	for i := range commits {
+		commits[i] = &github.HeadCommit{Added: []string{"README.md"}}
+	}
+	commits[18] = &github.HeadCommit{Added: []string{".github/chainguard/test.sts.yaml"}}
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Organization: &github.Organization{
+			Login: github.Ptr("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name: github.Ptr("bar"),
+		},
+		Before:  github.Ptr("1234"),
+		After:   github.Ptr("5678"),
+		Commits: commits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run from payload path, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+	if compareHit {
+		t.Fatal("Compare API was called but should not have been for 19 commits")
 	}
 }
