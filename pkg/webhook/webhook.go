@@ -239,17 +239,22 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		}
 	}
 
-	// Check diff
-	// TODO: Pagination?
-	resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
-	if err != nil {
-		return nil, err
-	}
 	var files []string
-	for _, file := range resp.Files {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			if file.GetStatus() != "removed" {
-				files = append(files, file.GetFilename())
+
+	// GitHub push payloads include up to 20 commits. When not truncated,
+	// use the payload directly to avoid a Compare API call.
+	if len(event.Commits) < 20 {
+		files = e.filesFromPushEvent(event)
+	} else {
+		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range resp.Files {
+			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}
@@ -418,4 +423,23 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 		}
 	}
 	return true
+}
+
+func (e *Validator) filterSTSFiles(files []string) []string {
+	var filtered []string
+	for _, file := range files {
+		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file); err == nil && ok {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
+}
+
+func (e *Validator) filesFromPushEvent(event *github.PushEvent) []string {
+	var files []string //nolint:prealloc // size depends on file content, not commit count
+	for _, commit := range event.Commits {
+		files = append(files, e.filterSTSFiles(commit.Added)...)
+		files = append(files, e.filterSTSFiles(commit.Modified)...)
+	}
+	return files
 }
