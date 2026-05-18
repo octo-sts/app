@@ -39,6 +39,18 @@ func main() {
 	}
 
 	if baseCfg.Metrics {
+		// Label outbound HTTP traffic by host so dashboards can distinguish
+		// GitHub API calls from background Google API traffic instead of
+		// collapsing everything into "other".
+		metrics.SetBuckets(map[string]string{
+			"api.github.com":                      "GH API",
+			"token.actions.githubusercontent.com": "GitHub Actions Token",
+			"github.com":                          "GitHub",
+		})
+		metrics.SetBucketSuffixes(map[string]string{
+			"googleapis.com": "Google API",
+		})
+
 		go metrics.ServeMetrics()
 
 		// Setup tracing.
