@@ -42,7 +42,7 @@ func main() {
 		// Label outbound HTTP traffic by host so dashboards can distinguish
 		// GitHub API calls from background Google API traffic instead of
 		// collapsing everything into "other".
-		metrics.SetBuckets(map[string]string{
+		metrics.SetBuckets(map[string]string{ //nolint:gosec // G101: hostname -> metric bucket map, not credentials
 			"api.github.com":                      "GH API",
 			"token.actions.githubusercontent.com": "GitHub Actions Token",
 			"github.com":                          "GitHub",
