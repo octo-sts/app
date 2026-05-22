@@ -122,7 +122,7 @@ jobs:
           workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
           service_account: "${{ steps.auth-config.outputs.service_account }}"
 
-      - uses: "docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121" # v2
+      - uses: "docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee" # v2
         with:
           username: "oauth2accesstoken"
           password: "${{ steps.auth.outputs.access_token }}"
