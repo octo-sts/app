@@ -6,6 +6,7 @@ package envconfig
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
@@ -33,6 +34,11 @@ type EnvConfig struct {
 	StickyStoreFirestoreProject    string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT" required:"false"`
 	StickyStoreFirestoreCollection string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION" required:"false" default:"sticky-routes"`
 	StickyStoreFirestoreTTL        time.Duration `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_TTL" required:"false" default:"1h"`
+
+	// GitHubBaseURL overrides the GitHub API base URL for GitHub Enterprise
+	// Server deployments (e.g. "https://github.example.com/api/v3").
+	// When empty, the default https://api.github.com is used.
+	GitHubBaseURL string `envconfig:"GITHUB_BASE_URL" required:"false"`
 }
 
 type EnvConfigApp struct {
@@ -109,6 +115,16 @@ func BaseConfig() (*EnvConfig, error) {
 	}
 	if cfg.StickyStore == "firestore" && cfg.StickyStoreFirestoreTTL <= 0 {
 		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_FIRESTORE_TTL (%s) must be positive", cfg.StickyStoreFirestoreTTL)
+	}
+
+	if cfg.GitHubBaseURL != "" {
+		u, err := url.Parse(cfg.GitHubBaseURL)
+		if err != nil {
+			return nil, fmt.Errorf("GITHUB_BASE_URL is not a valid URL: %w", err)
+		}
+		if u.Scheme != "https" {
+			return nil, fmt.Errorf("GITHUB_BASE_URL must use https scheme, got %q", u.Scheme)
+		}
 	}
 
 	return cfg, err

@@ -166,6 +166,43 @@ func TestCertFile(t *testing.T) {
 	}
 }
 
+func TestGitHubBaseURLPropagated(t *testing.T) {
+	ctx := context.Background()
+
+	testConfig := &envconfig.EnvConfig{
+		Port:                       8080,
+		AppIDs:                     []int64{12345678},
+		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		GitHubBaseURL:              "https://github.example.com/api/v3",
+		Metrics:                    true,
+	}
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := New(ctx, testConfig.AppIDs[0], "", testConfig, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+	assert.Equal(t, "https://github.example.com/api/v3", transport.BaseURL)
+}
+
+func TestGitHubBaseURLEmptyKeepsDefault(t *testing.T) {
+	ctx := context.Background()
+
+	testConfig := &envconfig.EnvConfig{
+		Port:                       8080,
+		AppIDs:                     []int64{12345678},
+		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		GitHubBaseURL:              "",
+		Metrics:                    true,
+	}
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := New(ctx, testConfig.AppIDs[0], "", testConfig, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+	// Default ghinstallation base URL when not overridden.
+	assert.Equal(t, "https://api.github.com", transport.BaseURL)
+}
+
 func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {
 	l, err := net.Listen("tcp", "localhost:0")
 	if err != nil {

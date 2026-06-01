@@ -81,7 +81,7 @@ func runSingleTest(ctx context.Context, cfg *Config, tc TestCase) TestResult {
 	}
 
 	defer func() {
-		if err := octosts.Revoke(ctx, res.AccessToken); err != nil {
+		if err := octosts.Revoke(ctx, res.AccessToken, ""); err != nil {
 			clog.FromContext(ctx).Warnf("failed to revoke token for %q: %v", tc.Name, err)
 		}
 	}()
@@ -123,7 +123,7 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		return result
 	}
 	defer func() {
-		if err := octosts.Revoke(ctx, token1); err != nil {
+		if err := octosts.Revoke(ctx, token1, ""); err != nil {
 			clog.FromContext(ctx).Warnf("failed to revoke token 1 for %q: %v", tc.Name, err)
 		}
 	}()
@@ -179,7 +179,7 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 			Conclusion: github.Ptr("success"),
 		})
 
-		if rErr := octosts.Revoke(ctx, tokenN); rErr != nil {
+		if rErr := octosts.Revoke(ctx, tokenN, ""); rErr != nil {
 			clog.FromContext(ctx).Warnf("failed to revoke token %d for %q: %v", i+1, tc.Name, rErr)
 		}
 

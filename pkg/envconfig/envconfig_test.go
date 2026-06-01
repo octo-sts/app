@@ -187,6 +187,42 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "GITHUB_BASE_URL valid HTTPS",
+			envVars: map[string]string{
+				"PORT":            "8080",
+				"GITHUB_APP_IDS":  "12345678",
+				"GITHUB_BASE_URL": "https://github.example.com/api/v3",
+			},
+			wantErr: false,
+		},
+		{
+			name: "GITHUB_BASE_URL rejects HTTP",
+			envVars: map[string]string{
+				"PORT":            "8080",
+				"GITHUB_APP_IDS":  "12345678",
+				"GITHUB_BASE_URL": "http://github.example.com/api/v3",
+			},
+			wantErr: true,
+		},
+		{
+			name: "GITHUB_BASE_URL rejects invalid URL",
+			envVars: map[string]string{
+				"PORT":            "8080",
+				"GITHUB_APP_IDS":  "12345678",
+				"GITHUB_BASE_URL": "://not-a-url",
+			},
+			wantErr: true,
+		},
+		{
+			name: "GITHUB_BASE_URL empty is allowed",
+			envVars: map[string]string{
+				"PORT":            "8080",
+				"GITHUB_APP_IDS":  "12345678",
+				"GITHUB_BASE_URL": "",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {

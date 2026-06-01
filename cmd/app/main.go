@@ -87,7 +87,7 @@ func main() {
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}
-		m, err := ghinstall.New(atr)
+		m, err := ghinstall.NewWithBaseURL(atr, baseCfg.GitHubBaseURL)
 		if err != nil {
 			log.Panicf("error creating install manager for app %d: %v", appID, err)
 		}
@@ -126,7 +126,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

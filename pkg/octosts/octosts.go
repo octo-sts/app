@@ -47,7 +47,7 @@ const (
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
 // GitHub installation tokens. rrm handles installation selection; sticky (may
 // be nil) persists checks:write routing for check-run ownership.
-func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Store, appCount int, ceclient cloudevents.Client, domain string, metrics bool, baseURL string) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		rrm:      rrm,
 		sticky:   sticky,
@@ -55,6 +55,7 @@ func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Sto
 		ceclient: ceclient,
 		domain:   domain,
 		metrics:  metrics,
+		baseURL:  baseURL,
 	}
 }
 
@@ -69,6 +70,7 @@ type sts struct {
 	ceclient cloudevents.Client
 	domain   string
 	metrics  bool
+	baseURL  string
 }
 
 type cacheTrustPolicyKey struct {
@@ -399,12 +401,21 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
 			return
 		}
-		if err := Revoke(ctx, tok); err != nil {
+		if err := Revoke(ctx, tok, s.baseURL); err != nil {
 			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
 		}
 	}()
 
-	file, _, _, err := github.NewClient(&http.Client{Transport: atr}).Repositories.GetContents(ctx,
+	client := github.NewClient(&http.Client{Transport: atr})
+	if s.baseURL != "" {
+		var eerr error
+		client, eerr = client.WithEnterpriseURLs(s.baseURL, s.baseURL)
+		if eerr != nil {
+			return "", status.Errorf(codes.Internal, "configuring enterprise URLs: %v", eerr)
+		}
+	}
+
+	file, _, _, err := client.Repositories.GetContents(ctx,
 		tpKey.owner, tpKey.repo,
 		fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
 		&github.RepositoryContentGetOptions{},
