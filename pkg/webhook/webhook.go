@@ -362,6 +362,21 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 
 	var files []string
 	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
+		// New non-default branch: skip if there are no associated PRs.
+		// A feature branch points at a commit already present in the
+		// repository and doesn't need a full directory scan. This
+		// avoids reading every policy file (O(N) API calls) on every
+		// new-branch event.
+		//
+		// We still process the default branch (initial commit) and
+		// any branch with associated PRs, since those may introduce
+		// new or modified policy files.
+		defaultBranch := cs.GetRepo().GetDefaultBranch()
+		headBranch := cs.GetCheckSuite().GetHeadBranch()
+		if headBranch != defaultBranch && len(cs.GetCheckSuite().PullRequests) == 0 {
+			log.Infof("skipping new non-default branch with no PRs")
+			return nil, nil
+		}
 		_, dirContents, _, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			return nil, err
