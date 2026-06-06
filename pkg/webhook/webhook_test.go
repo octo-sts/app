@@ -769,3 +769,431 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 		t.Fatal("Compare API was called but should not have been for 19 commits")
 	}
 }
+
+func TestCheckSuiteNewBranchNoPRsSkipped(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	apiCalled := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/contents/", func(w http.ResponseWriter, r *http.Request) {
+		apiCalled = true
+		t.Error("Contents API should not be called for skipped new branch")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		apiCalled = true
+		t.Error("Compare API should not be called for skipped new branch")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("feature-x"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs for skipped new branch, got %d", len(got))
+	}
+	if apiCalled {
+		t.Fatal("GitHub API was called but should not have been for new non-default branch with no PRs")
+	}
+}
+
+func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	prFilesHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/pulls/42/files", func(w http.ResponseWriter, r *http.Request) {
+		prFilesHit = true
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	// The zeroHash path does GetContents for the directory listing even
+	// when PRs are present, so we need to serve that response.
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Return an empty directory — the PR files handler provides the STS file.
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:         github.Ptr(int64(1)),
+			HeadSHA:    github.Ptr("deadbeef"),
+			HeadBranch: github.Ptr("feature-x"),
+			BeforeSHA:  github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{
+				{Number: github.Ptr(42)},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if !prFilesHit {
+		t.Fatal("PR files API was not called but should have been for new branch with PRs")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
+func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	dirScanHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		dirScanHit = true
+		// Return a directory listing with one STS file.
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{
+			{
+				Type: github.Ptr("file"),
+				Name: github.Ptr("test.sts.yaml"),
+				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+			},
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if !dirScanHit {
+		t.Fatal("Directory scan API was not called but should have been for default branch initial commit")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
+func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	compareHit := false
+	dirScanHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		compareHit = true
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			clog.FromContext(r.Context()).Errorf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		dirScanHit = true
+		t.Error("Directory scan should not be called for existing branch")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("5678"),
+			HeadBranch:   github.Ptr("feature-y"),
+			BeforeSHA:    github.Ptr("abcd1234"),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if !compareHit {
+		t.Fatal("Compare API was not called but should have been for existing branch")
+	}
+	if dirScanHit {
+		t.Fatal("Directory scan was called but should not have been for existing branch")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
