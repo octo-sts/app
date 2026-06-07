@@ -60,6 +60,35 @@ locals {
   #     --algorithm rsa-sign-pkcs1-2048-sha256 \
   #     --target-key-file key.data
   kms_keys = [for app in var.github_apps : app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""]
+
+  # Whether multi-org routing is enabled (at least one app has org_name set).
+  multi_org_enabled = anytrue([for app in var.github_apps : app.org_name != ""])
+
+  # Group apps by org_name for YAML config generation. Org names are
+  # lowercased here so that mixed-case entries (e.g. "Octo-STS" vs
+  # "octo-sts") fail at `terraform plan` if duplicated, instead of
+  # crashing the server at startup when appconfig.Validate rejects the
+  # generated YAML.
+  org_names = distinct([for app in var.github_apps : lower(app.org_name) if app.org_name != ""])
+  apps_by_org = {
+    for org in local.org_names : org => [
+      for app in var.github_apps : {
+        app_id  = app.app_id
+        kms_key = app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""
+      } if lower(app.org_name) == org
+    ]
+  }
+
+  # YAML config for multi-org routing.
+  app_config_yaml = local.multi_org_enabled ? yamlencode({
+    orgs = [for org in local.org_names : {
+      name = org
+      apps = [for app in local.apps_by_org[org] : {
+        app_id  = app.app_id
+        kms_key = app.kms_key
+      } if app.kms_key != ""]
+    }]
+  }) : ""
 }
 
 // Create a dedicated GSA for the IAM datastore service.
@@ -107,7 +136,16 @@ module "this" {
     "sts" = {
       image = var.images.app
       ports = [{ container_port = 8080 }]
-      env = [
+      env = local.multi_org_enabled ? [
+        {
+          name  = "APP_CONFIG_FILE"
+          value = "/etc/octo-sts/config.yaml"
+        },
+        {
+          name  = "STS_DOMAIN",
+          value = var.domain,
+        }
+        ] : [
         {
           name  = "GITHUB_APP_IDS"
           value = join(",", [for app in var.github_apps : app.app_id])
@@ -141,10 +179,53 @@ module "this" {
         name  = "EVENT_INGRESS_URI"
         value = { for k, v in module.sts-emits-events : k => v.uri }
       }]
+      volume_mounts = local.multi_org_enabled ? [{
+        name       = "app-config"
+        mount_path = "/etc/octo-sts"
+      }] : []
     }
   }
 
+  volumes = local.multi_org_enabled ? [{
+    name = "app-config"
+    secret = {
+      secret = google_secret_manager_secret.app-config[0].secret_id
+      items = [{
+        version = "latest"
+        path    = "config.yaml"
+      }]
+    }
+  }] : []
+
   notification_channels = var.notification_channels
+}
+
+// Store the multi-org YAML config in Secret Manager (only when multi-org is enabled).
+resource "google_secret_manager_secret" "app-config" {
+  count = local.multi_org_enabled ? 1 : 0
+
+  project   = var.project_id
+  secret_id = "${var.name}-app-config"
+
+  replication {
+    auto {}
+  }
+}
+
+resource "google_secret_manager_secret_version" "app-config" {
+  count = local.multi_org_enabled ? 1 : 0
+
+  secret      = google_secret_manager_secret.app-config[0].id
+  secret_data = local.app_config_yaml
+}
+
+resource "google_secret_manager_secret_iam_member" "app-config-accessor" {
+  count = local.multi_org_enabled ? 1 : 0
+
+  project   = var.project_id
+  secret_id = google_secret_manager_secret.app-config[0].secret_id
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.octo-sts.email}"
 }
 
 // Allow the STS service to call the sign method on the keys in the keyring.
