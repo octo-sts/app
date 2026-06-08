@@ -1197,3 +1197,213 @@ func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
 		t.Fatalf("expected success, got %s", *got[0].Conclusion)
 	}
 }
+
+func TestWebhookCheckSuiteBotSkipped(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitHub API should not be called for bot check_suite events, got %s %s", r.Method, r.URL.Path)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Action: github.Ptr("requested"),
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Sender: &github.User{
+			Login: github.Ptr("octo-sts[bot]"),
+		},
+		CheckSuite: &github.CheckSuite{
+			HeadSHA:   github.Ptr("abc123"),
+			BeforeSHA: github.Ptr("def456"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 202 Accepted for bot sender, got\n%s", string(out))
+	}
+}
+
+func TestWebhookCheckRunBotSkipped(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitHub API should not be called for bot check_run events, got %s %s", r.Method, r.URL.Path)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckRunEvent{
+		Action: github.Ptr("created"),
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Sender: &github.User{
+			Login: github.Ptr("some-other-app[bot]"),
+		},
+		CheckRun: &github.CheckRun{
+			CheckSuite: &github.CheckSuite{
+				HeadSHA:   github.Ptr("abc123"),
+				BeforeSHA: github.Ptr("def456"),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_run")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 202 Accepted for bot sender, got\n%s", string(out))
+	}
+}
+
+func TestWebhookPushAbortOnRateLimit(t *testing.T) {
+	contentHits := 0
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("CheckRun should not be created when rate-limited")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/contents/", func(w http.ResponseWriter, r *http.Request) {
+		contentHits++
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{
+			"message": "API rate limit exceeded",
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{
+				".github/chainguard/a.sts.yaml",
+				".github/chainguard/b.sts.yaml",
+				".github/chainguard/c.sts.yaml",
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = resp
+	if contentHits > 1 {
+		t.Fatalf("expected at most 1 content fetch before aborting, got %d", contentHits)
+	}
+}

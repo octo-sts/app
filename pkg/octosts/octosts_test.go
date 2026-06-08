@@ -435,7 +435,11 @@ var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
 func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rrmAtr := newGitHubClient(t, newFakeGitHub())
@@ -481,7 +485,11 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
@@ -531,7 +539,11 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rl1 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
@@ -682,6 +694,53 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	st, ok := status.FromError(err)
 	if !ok || st.Code() != codes.NotFound {
 		t.Fatalf("expected gRPC NotFound from negative cache, got %v (managers should not have been called)", err)
+	}
+}
+
+func TestRateLimitServesStaleCache(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	workingGH := newFakeGitHub()
+	workingAtr := newGitHubClient(t, workingGH)
+
+	s := &sts{
+		rrm:      &fakeInstallMgr{atr: workingAtr},
+		appCount: 1,
+	}
+
+	// First call: populates both caches.
+	otp := &OrgTrustPolicy{}
+	otp.Repositories = []string{"repo"}
+	err := s.lookupTrustPolicy(ctx, workingAtr, 1234, key, &otp.TrustPolicy)
+	if err != nil {
+		t.Fatalf("first lookup failed: %v", err)
+	}
+
+	// Expire the primary cache to force a GitHub call on next lookup.
+	trustPolicies.Remove(key)
+
+	// Verify the stale cache was populated.
+	if _, ok := staleTrustPolicies.Get(key); !ok {
+		t.Fatal("stale cache should have been populated after successful fetch")
+	}
+
+	// Switch to a rate-limited GitHub backend.
+	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	s.rrm = &fakeInstallMgr{atr: rateLimitedAtr}
+
+	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
+	otp2 := &OrgTrustPolicy{}
+	otp2.Repositories = []string{"repo"}
+	err = s.lookupTrustPolicy(ctx, rateLimitedAtr, 1234, key, &otp2.TrustPolicy)
+	if err != nil {
+		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
 	}
 }
 
