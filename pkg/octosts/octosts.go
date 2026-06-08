@@ -59,6 +59,7 @@ func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Sto
 }
 
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
@@ -414,10 +415,12 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil {
 			switch ghErr.Response.StatusCode {
-			case http.StatusForbidden:
-				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", tpKey.identity)
-			case http.StatusTooManyRequests:
-				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", tpKey.identity)
+			case http.StatusForbidden, http.StatusTooManyRequests:
+				if stale, ok := staleTrustPolicies.Get(tpKey); ok {
+					clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
+					return stale, nil
+				}
+				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (%d) for %q", ghErr.Response.StatusCode, tpKey.identity)
 			case http.StatusNotFound:
 				trustPolicies.Add(tpKey, negativeCacheConst)
 			}
@@ -434,6 +437,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	if evicted := trustPolicies.Add(tpKey, raw); evicted {
 		clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
 	}
+	staleTrustPolicies.Add(tpKey, raw)
 	return raw, nil
 }
 

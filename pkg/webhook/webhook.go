@@ -47,6 +47,16 @@ type Validator struct {
 	Organizations []string
 }
 
+func isBotSender(sender *github.User) bool {
+	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
+}
+
+func isGitHubRateLimited(err error) bool {
+	var rateLimitErr *github.RateLimitError
+	var abuseRateLimitErr *github.AbuseRateLimitError
+	return errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr)
+}
+
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := clog.FromContext(r.Context()).With(
 		HeaderDelivery, r.Header.Get(HeaderDelivery),
@@ -78,8 +88,18 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case *github.PushEvent:
 		cr, err = e.handlePush(ctx, event)
 	case *github.CheckSuiteEvent:
+		if isBotSender(event.GetSender()) {
+			log.Infof("skipping bot-triggered check_suite from %s", event.GetSender().GetLogin())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		cr, err = e.handleCheckSuite(ctx, event)
 	case *github.CheckRunEvent:
+		if isBotSender(event.GetSender()) {
+			log.Infof("skipping bot-triggered check_run from %s", event.GetSender().GetLogin())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		cr, err = e.handleCheckSuite(ctx, &fauxCheckSuite{event})
 	// TODO: CheckRun retry
 	default:
@@ -134,6 +154,11 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	}
 
 	err := validatePolicies(ctx, client, owner, repo, sha, files)
+	// If we were rate-limited, bail out immediately without creating a
+	// CheckRun — the API call would likely fail too.
+	if isGitHubRateLimited(err) {
+		return nil, err
+	}
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
 	// failure.
@@ -177,6 +202,10 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 		resp, _, _, err := client.Repositories.GetContents(ctx, owner, repo, f, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			log.Infof("failed to get content for: %v", err)
+			if isGitHubRateLimited(err) {
+				log.Warnf("rate-limited, aborting remaining policy validations")
+				return fmt.Errorf("%s: %w", f, err)
+			}
 			merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
 			continue
 		}
