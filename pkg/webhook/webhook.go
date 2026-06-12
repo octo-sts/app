@@ -47,6 +47,13 @@ type Validator struct {
 	Organizations []string
 }
 
+// prActionsThatChangeFiles is the set of pull_request actions that can alter
+// the file diff (and therefore introduce or modify a trust policy). Every other
+// action (labeled, edited, assigned, review_requested, closed, ready_for_review,
+// …) leaves the diff untouched, so there is nothing new for us to validate — we
+// don't skip drafts, so draft PRs are already validated on opened/synchronize.
+var prActionsThatChangeFiles = sets.New("opened", "synchronize", "reopened")
+
 func isBotSender(sender *github.User) bool {
 	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
 }
@@ -313,6 +320,14 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	// Skip if the organization is not in the list of organizations to validate.
 	if e.shouldSkipOrganization(owner) {
 		log.Infof("skipping organization %s", owner)
+		return nil, nil
+	}
+
+	// Only actions that can change the PR's file diff can introduce or modify
+	// a trust policy. Skipping the rest avoids a ListFiles call (and its token
+	// mint) on the ~99% of PR events that can't affect policy.
+	if !prActionsThatChangeFiles.Has(pr.GetAction()) {
+		log.Infof("skipping pull_request action %q: cannot change file diff", pr.GetAction())
 		return nil, nil
 	}
 
