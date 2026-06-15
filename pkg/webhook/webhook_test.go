@@ -1407,3 +1407,68 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 		t.Fatalf("expected at most 1 content fetch before aborting, got %d", contentHits)
 	}
 }
+
+func TestWebhookPullRequestActionSkipped(t *testing.T) {
+	// Actions that can't change the file diff must not reach the GitHub API.
+	for _, action := range []string{"labeled", "edited", "assigned", "review_requested", "closed", "ready_for_review"} {
+		t.Run(action, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("GitHub API should not be called for pull_request action %q, got %s %s", action, r.Method, r.URL.Path)
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			})
+			gh := httptest.NewServer(mux)
+			defer gh.Close()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+
+			secret := []byte("hunter2")
+			v := &Validator{
+				Transport:     tr,
+				WebhookSecret: [][]byte{secret},
+			}
+			srv := httptest.NewServer(v)
+			defer srv.Close()
+
+			body, err := json.Marshal(github.PullRequestEvent{
+				Action: github.Ptr(action),
+				Number: github.Ptr(1),
+				Installation: &github.Installation{
+					ID: github.Ptr(int64(1111)),
+				},
+				Repo: &github.Repository{
+					Owner: &github.User{Login: github.Ptr("foo")},
+					Name:  github.Ptr("bar"),
+				},
+				PullRequest: &github.PullRequest{
+					Head: &github.PullRequestBranch{SHA: github.Ptr("abc123")},
+				},
+				Sender: &github.User{Login: github.Ptr("someone")},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "pull_request")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusOK {
+				out, _ := httputil.DumpResponse(resp, true)
+				t.Fatalf("expected 200 OK, got\n%s", string(out))
+			}
+		})
+	}
+}
