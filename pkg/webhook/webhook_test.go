@@ -18,7 +18,9 @@ import (
 	"net/http/httputil"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
@@ -1470,5 +1472,89 @@ func TestWebhookPullRequestActionSkipped(t *testing.T) {
 				t.Fatalf("expected 200 OK, got\n%s", string(out))
 			}
 		})
+	}
+}
+
+// TestWebhookInstallationTokenCached checks that two events for one
+// installation mint only a single token.
+func TestWebhookInstallationTokenCached(t *testing.T) {
+	var mints atomic.Int64
+
+	mux := http.NewServeMux()
+	// Count mints; return a token valid for an hour so the cached client reuses it.
+	mux.HandleFunc("POST /app/installations/1111/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
+		fmt.Fprintf(w, `{"token":"t","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "{}")
+	})
+	// Serve the trust-policy content fixture for everything else.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test.sts.yaml"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Deliver the same event twice; the second must reuse the cached client.
+	for i := 0; i < 2; i++ {
+		req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("X-Hub-Signature", signature(secret, body))
+		req.Header.Set("X-GitHub-Event", "push")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			out, _ := httputil.DumpResponse(resp, true)
+			t.Fatalf("delivery %d: expected 200 OK, got\n%s", i, string(out))
+		}
+	}
+
+	if got := mints.Load(); got != 1 {
+		t.Fatalf("expected exactly 1 token mint across 2 events, got %d", got)
 	}
 }
