@@ -48,12 +48,13 @@ type Validator struct {
 
 	Organizations []string
 
-	// clients caches one client constructor per installation ID so the
-	// transport's token is reused (~1h) instead of re-minted per event. Keyed on
-	// installation ID alone: IDs are globally unique and the webhook serves one
-	// App. clientsMu guards the get-or-create; the OnceValues coalesces builds.
+	// clients caches one client per installation ID so the transport's token is
+	// reused (~1h) instead of re-minted per event. Keyed on installation ID
+	// alone: IDs are globally unique and the webhook serves one App. Building a
+	// client is cheap (the token is minted lazily on first use), so clientsMu
+	// can guard the whole get-or-create.
 	clientsMu sync.Mutex
-	clients   *lru.Cache[int64, func() (*github.Client, error)]
+	clients   *lru.Cache[int64, *github.Client]
 }
 
 // prActionsThatChangeFiles is the set of pull_request actions that can alter
@@ -169,31 +170,31 @@ func (e *Validator) validatePayload(r *http.Request) ([]byte, error) {
 // installation, reusing its token instead of minting one per event.
 func (e *Validator) clientForInstallation(installationID int64) (*github.Client, error) {
 	e.clientsMu.Lock()
+	defer e.clientsMu.Unlock()
+
 	if e.clients == nil {
-		cache, err := lru.New[int64, func() (*github.Client, error)](installationClientCacheSize)
+		cache, err := lru.New[int64, *github.Client](installationClientCacheSize)
 		if err != nil {
-			e.clientsMu.Unlock()
 			return nil, err
 		}
 		e.clients = cache
 	}
-	build, ok := e.clients.Get(installationID)
-	if !ok {
-		build = sync.OnceValues(func() (*github.Client, error) {
-			client := github.NewClient(&http.Client{
-				Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
-			})
-			if e.Transport.BaseURL != "" {
-				return client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
-			}
-			return client, nil
-		})
-		e.clients.Add(installationID, build)
+	if client, ok := e.clients.Get(installationID); ok {
+		return client, nil
 	}
-	e.clientsMu.Unlock()
 
-	// Build outside the lock so a slow mint doesn't serialize other lookups.
-	return build()
+	client := github.NewClient(&http.Client{
+		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
+	})
+	if e.Transport.BaseURL != "" {
+		var err error
+		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
+		if err != nil {
+			return nil, err
+		}
+	}
+	e.clients.Add(installationID, client)
+	return client, nil
 }
 
 func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner, repo, sha string, files []string) (*github.CheckRun, error) {
