@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"os"
@@ -231,22 +230,40 @@ func setupLogs(ctx context.Context, setup *Setup, res *resource.Resource) error 
 		sdklog.WithResource(res),
 		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
 	)
+	installLogBridges(setup, provider)
+	return nil
+}
+
+// installLogBridges points the OTEL global logger provider, the slog default
+// logger, and the stdlib log package at provider, recording an undo on setup.
+//
+// slog records reach OTEL exactly once, via the otelslog handler. The console
+// handler writes straight to the original log destination rather than through
+// the stdlib log package, because slog.SetDefault redirects that package into
+// this same fanout. Reusing the previous (default) handler for the console
+// would send slog records back through the stdlib log package and export every
+// record twice.
+func installLogBridges(setup *Setup, provider *sdklog.LoggerProvider) {
 	oldProvider := otellogglobal.GetLoggerProvider()
 	otellogglobal.SetLoggerProvider(provider)
 
 	oldDefault := slog.Default()
 	oldLogWriter := log.Writer()
+	oldLogFlags := log.Flags()
+	oldLogPrefix := log.Prefix()
+
 	otelHandler := otelslog.NewHandler(instrumentationName, otelslog.WithLoggerProvider(provider))
-	slog.SetDefault(slog.New(fanoutHandler{handlers: []slog.Handler{oldDefault.Handler(), otelHandler}}))
-	log.SetOutput(stdlibLogWriter{out: oldLogWriter, logger: slog.New(otelHandler)})
+	consoleHandler := slog.NewTextHandler(oldLogWriter, nil)
+	slog.SetDefault(slog.New(fanoutHandler{handlers: []slog.Handler{consoleHandler, otelHandler}}))
 
 	setup.cleanups = append(setup.cleanups, func(ctx context.Context) error {
 		slog.SetDefault(oldDefault)
 		log.SetOutput(oldLogWriter)
+		log.SetFlags(oldLogFlags)
+		log.SetPrefix(oldLogPrefix)
 		otellogglobal.SetLoggerProvider(oldProvider)
 		return provider.Shutdown(ctx)
 	})
-	return nil
 }
 
 func setupMetrics(ctx context.Context, setup *Setup, res *resource.Resource) error {
@@ -415,17 +432,4 @@ func (h fanoutHandler) WithGroup(name string) slog.Handler {
 		out.handlers[i] = handler.WithGroup(name)
 	}
 	return out
-}
-
-type stdlibLogWriter struct {
-	out    io.Writer
-	logger *slog.Logger
-}
-
-func (w stdlibLogWriter) Write(p []byte) (int, error) {
-	n, err := w.out.Write(p)
-	if msg := strings.TrimRight(string(p), "\r\n"); msg != "" {
-		w.logger.Info(msg)
-	}
-	return n, err
 }

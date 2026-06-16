@@ -9,12 +9,14 @@ import (
 	"io"
 	stdlog "log"
 	"log/slog"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	lognoop "go.opentelemetry.io/otel/log/noop"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
 )
 
 func TestSignalMode(t *testing.T) {
@@ -256,6 +258,64 @@ func TestNewSetupRollsBackMetricsOnLaterError(t *testing.T) {
 	}
 	if got := otel.GetMeterProvider(); got != baselineProvider {
 		t.Fatal("OTEL meter provider was not restored")
+	}
+}
+
+// capturingLogExporter records the body of every exported log record.
+type capturingLogExporter struct {
+	mu     sync.Mutex
+	bodies []string
+}
+
+func (e *capturingLogExporter) Export(_ context.Context, records []sdklog.Record) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, r := range records {
+		e.bodies = append(e.bodies, r.Body().String())
+	}
+	return nil
+}
+
+func (e *capturingLogExporter) Shutdown(context.Context) error   { return nil }
+func (e *capturingLogExporter) ForceFlush(context.Context) error { return nil }
+
+func (e *capturingLogExporter) snapshot() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]string(nil), e.bodies...)
+}
+
+// TestInstallLogBridgesDoesNotDoubleExport guards the fix for slog records
+// being exported twice: once structured via the otelslog handler and once as a
+// preformatted line via the slog->stdlib-log->OTEL path.
+func TestInstallLogBridgesDoesNotDoubleExport(t *testing.T) {
+	// Discard console output; restored by setup.Shutdown via t.Cleanup.
+	stdlog.SetOutput(io.Discard)
+
+	exp := &capturingLogExporter{}
+	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exp)))
+
+	setup := &Setup{}
+	installLogBridges(setup, provider)
+	t.Cleanup(func() { _ = setup.Shutdown(context.Background()) })
+
+	slog.Info("structured message", "answer", 42)
+	stdlog.Print("stdlib message")
+
+	bodies := exp.snapshot()
+	if len(bodies) != 2 {
+		t.Fatalf("expected exactly 2 exported log records, got %d: %v", len(bodies), bodies)
+	}
+
+	counts := map[string]int{}
+	for _, b := range bodies {
+		counts[b]++
+	}
+	if counts["structured message"] != 1 {
+		t.Fatalf("want exactly one structured slog record, got %d: %v", counts["structured message"], bodies)
+	}
+	if counts["stdlib message"] != 1 {
+		t.Fatalf("want exactly one stdlib log record, got %d: %v", counts["stdlib message"], bodies)
 	}
 }
 
