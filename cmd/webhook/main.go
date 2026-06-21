@@ -14,13 +14,12 @@ import (
 	"strings"
 	"time"
 
-	kms "cloud.google.com/go/kms/apiv1"
-	secretmanager "cloud.google.com/go/secretmanager/apiv1"
-	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
+	"github.com/octo-sts/app/pkg/kms"
+	"github.com/octo-sts/app/pkg/secrets"
 	"github.com/octo-sts/app/pkg/webhook"
 )
 
@@ -45,14 +44,6 @@ func main() {
 		defer metrics.SetupTracer(ctx)()
 	}
 
-	var client *kms.KeyManagementClient
-	if len(baseCfg.KMSKeys) > 0 {
-		client, err = kms.NewKeyManagementClient(ctx)
-		if err != nil {
-			log.Panicf("could not create kms client: %v", err)
-		}
-	}
-
 	// Only use the primary app ID and KMS key for the webhook transport.
 	var appID int64
 	if len(baseCfg.AppIDs) > 0 {
@@ -64,32 +55,39 @@ func main() {
 	// If kmsKey remains empty, ghtransport.New() will fall back on
 	// APP_SECRET_CERTIFICATE_FILE or APP_SECRET_CERTIFICATE_ENV_VAR.
 	var kmsKey string
+	var kmsClient kms.KMS
 	if len(baseCfg.KMSKeys) > 0 {
 		kmsKey = baseCfg.KMSKeys[0]
+		kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, kmsKey)
+		if err != nil {
+			log.Panicf("could not create kms client: %v", err)
+		}
 	}
 
-	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, nil)
+	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, kmsClient, nil)
 	if err != nil {
 		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 	}
 
 	// Fetch webhook secrets from secret manager
 	// or allow webhook secret to be defined by env var.
-	// Not everyone is using Google KMS, so we need to support other methods
+	// Not everyone is using a supported cloud provider, so we need to support other methods
 	webhookSecrets := [][]byte{}
 	if len(baseCfg.KMSKeys) > 0 {
-		secretmanager, err := secretmanager.NewClient(ctx)
+		// It's probably not ideal to assume the secret provider is the same as the KMS
+		// provider, but because of the support for environment variables before adding a
+		// second cloud provider supported, that complicates adding a new environment variable
+		// for config.
+		secretsProvider, err := secrets.NewSecretProvider(ctx, baseCfg.KMSProvider)
 		if err != nil {
-			log.Panicf("could not create secret manager client: %v", err)
+			log.Panicf("could not create secret provider: %v", err)
 		}
 		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
-			resp, err := secretmanager.AccessSecretVersion(ctx, &secretmanagerpb.AccessSecretVersionRequest{
-				Name: name,
-			})
+			val, err := secretsProvider.GetSecret(ctx, name)
 			if err != nil {
 				log.Panicf("error fetching webhook secret %s: %v", name, err)
 			}
-			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+			webhookSecrets = append(webhookSecrets, val)
 		}
 	} else {
 		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}

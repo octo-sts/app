@@ -14,6 +14,7 @@ import (
 type EnvConfig struct {
 	Port                       int      `envconfig:"PORT" required:"true"`
 	KMSKeys                    []string `envconfig:"KMS_KEYS" required:"false"`
+	KMSProvider                string   `envconfig:"KMS_PROVIDER" required:"false" default:"gcp"`
 	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"true"`
 	AppSecretCertificateFile   string   `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string   `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
