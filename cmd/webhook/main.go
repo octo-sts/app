@@ -21,12 +21,22 @@ import (
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
+	"github.com/octo-sts/app/pkg/observability"
 	"github.com/octo-sts/app/pkg/webhook"
 )
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
+	obs, err := observability.NewSetup(ctx)
+	if err != nil {
+		log.Panicf("failed to set up OpenTelemetry: %v", err)
+	}
+	defer func() {
+		if err := obs.Shutdown(context.Background()); err != nil {
+			log.Printf("failed to shut down OpenTelemetry: %v", err)
+		}
+	}()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
 	baseCfg, err := envConfig.BaseConfig()
@@ -41,8 +51,10 @@ func main() {
 	if baseCfg.Metrics {
 		go metrics.ServeMetrics()
 
-		// Setup tracing.
-		defer metrics.SetupTracer(ctx)()
+		if obs.UseLegacyTracer() {
+			// Setup tracing.
+			defer metrics.SetupTracer(ctx)()
+		}
 	}
 
 	var client *kms.KeyManagementClient
