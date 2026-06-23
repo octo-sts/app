@@ -526,6 +526,49 @@ func TestRoundRobinNotFoundCached(t *testing.T) {
 	}
 }
 
+func TestGetWithBaseURL(t *testing.T) {
+	ctx := context.Background()
+	installID := int64(42)
+
+	var calledPath string
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calledPath = r.URL.Path
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/app/installations"):
+			json.NewEncoder(w).Encode([]github.Installation{{
+				ID: github.Ptr(installID),
+				Account: &github.User{
+					Login: github.Ptr("my-org"),
+				},
+			}})
+		default:
+			w.WriteHeader(http.StatusNotImplemented)
+			fmt.Fprintf(w, "%s %s not implemented\n", r.Method, r.URL.Path)
+		}
+	}))
+
+	// Use the test server URL as the enterprise base URL.
+	mgr, err := NewWithBaseURL(atr, atr.BaseURL)
+	if err != nil {
+		t.Fatalf("NewWithBaseURL() = %v", err)
+	}
+
+	gotATR, gotID, err := mgr.Get(ctx, "my-org", "my-org/repo", "my-identity")
+	if err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if gotATR != atr {
+		t.Error("Get() returned unexpected AppsTransport")
+	}
+	if gotID != installID {
+		t.Errorf("install ID: got = %d, wanted = %d", gotID, installID)
+	}
+	// Verify the enterprise URL path was used (go-github prepends /api/v3).
+	if !strings.Contains(calledPath, "app/installations") {
+		t.Errorf("expected app/installations in path, got %s", calledPath)
+	}
+}
+
 func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallation.AppsTransport {
 	t.Helper()
 

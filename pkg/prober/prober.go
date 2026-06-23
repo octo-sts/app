@@ -50,7 +50,7 @@ func Func(ctx context.Context) error {
 		return fmt.Errorf("exchange failed: %w", err)
 	}
 	defer func() {
-		if err := octosts.Revoke(ctx, res.AccessToken); err != nil {
+		if err := octosts.Revoke(ctx, res.AccessToken, ""); err != nil {
 			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
 		}
 	}()

@@ -128,6 +128,19 @@ Only mappings unused for the TTL duration are automatically cleaned up.
 Single-app deployments (`GITHUB_APP_IDS` has one entry) do not need sticky
 routing and can ignore these settings.
 
+### GitHub Enterprise Server (GHES)
+
+OctoSTS can be deployed against a GitHub Enterprise Server instance by setting
+the `GITHUB_BASE_URL` environment variable to your GHES API endpoint:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `GITHUB_BASE_URL` | (empty — uses `https://api.github.com`) | GitHub API base URL for GHES (e.g. `https://github.example.com/api/v3`) |
+
+The URL must use HTTPS. When set, all GitHub API interactions (installation
+lookups, trust policy reads, token exchanges, and token revocations) will target
+the configured endpoint instead of the public GitHub API.
+
 ### Best Practices
 
 To ensure secure and effective use of octo-sts, follow these recommended practices:
