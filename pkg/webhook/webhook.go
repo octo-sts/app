@@ -18,7 +18,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/hashicorp/go-multierror"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -183,15 +183,15 @@ func (e *Validator) clientForInstallation(installationID int64) (*github.Client,
 		return client, nil
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
-	})
+	opts := []github.ClientOptionsFunc{
+		github.WithTransport(ghinstallation.NewFromAppsTransport(e.Transport, installationID)),
+	}
 	if e.Transport.BaseURL != "" {
-		var err error
-		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
-		if err != nil {
-			return nil, err
-		}
+		opts = append(opts, github.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL))
+	}
+	client, err := github.NewClient(opts...)
+	if err != nil {
+		return nil, err
 	}
 	e.clients.Add(installationID, client)
 	return client, nil
