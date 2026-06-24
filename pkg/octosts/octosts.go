@@ -19,7 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
@@ -405,7 +405,11 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		}
 	}()
 
-	file, _, _, err := github.NewClient(&http.Client{Transport: atr}).Repositories.GetContents(ctx,
+	client, err := github.NewClient(github.WithTransport(atr))
+	if err != nil {
+		return "", status.Errorf(codes.Internal, "creating GitHub client: %v", err)
+	}
+	file, _, _, err := client.Repositories.GetContents(ctx,
 		tpKey.owner, tpKey.repo,
 		fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
 		&github.RepositoryContentGetOptions{},

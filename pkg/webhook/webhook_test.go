@@ -26,7 +26,7 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 )
 
 func TestValidatePolicy(t *testing.T) {
@@ -46,7 +46,10 @@ func TestValidatePolicy(t *testing.T) {
 		}
 	}))
 
-	gh, err := github.NewClient(srv.Client()).WithEnterpriseURLs(srv.URL, srv.URL)
+	gh, err := github.NewClient(
+		github.WithHTTPClient(srv.Client()),
+		github.WithEnterpriseURLs(srv.URL, srv.URL),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
