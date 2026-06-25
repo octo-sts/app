@@ -1,7 +1,7 @@
 chainguard.dev/go-grpc-kit v0.17.17 h1:Jwhc0zyUwQbC2hNcsi+YMeUX/JUnM+dXVCkTw6wtPzs=
 chainguard.dev/go-grpc-kit v0.17.17/go.mod h1:qn0meP6RtrbLicE1bgBZnnVU9dvX95eLs0x0T6kZ+b4=
-chainguard.dev/sdk v0.1.84 h1:GqsOcZb7xHHy/Mg1bIX2eEbD2HJgM8/iAQQ1kWCYeuA=
-chainguard.dev/sdk v0.1.84/go.mod h1:VQ7UkdhbYpwvzapYJcHixIGE7okay8HNwKPmI1Gk8ok=
+chainguard.dev/sdk v0.1.87 h1:bhzM/81fKaxIUHMcO59RpLMjcDMEFFFhwEDe9mHcjnw=
+chainguard.dev/sdk v0.1.87/go.mod h1:VQ7UkdhbYpwvzapYJcHixIGE7okay8HNwKPmI1Gk8ok=
 cloud.google.com/go v0.123.0 h1:2NAUJwPR47q+E35uaJeYoNhuNEM9kM8SjgRgdeOJUSE=
 cloud.google.com/go v0.123.0/go.mod h1:xBoMV08QcqUGuPW65Qfm1o9Y4zKZBpGS+7bImXLTAZU=
 cloud.google.com/go/auth v0.20.0 h1:kXTssoVb4azsVDoUiF8KvxAqrsQcQtB53DcSgta74CA=
@@ -46,10 +46,10 @@ github.com/cenkalti/backoff/v5 v5.0.3 h1:ZN+IMa753KfX5hd8vVaMixjnqRZ3y8CuJKRKj1x
 github.com/cenkalti/backoff/v5 v5.0.3/go.mod h1:rkhZdG3JZukswDf7f0cwqPNk4K0sa+F97BxZthm/crw=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
-github.com/chainguard-dev/clog v1.8.0 h1:frlTMEdg3XQR+ioQ6O9i92uigY8GTUcWKpuCFkhcCHA=
-github.com/chainguard-dev/clog v1.8.0/go.mod h1:5MQOZi+Iu7fV7GcJG8ag8rCB5elEOpqRMKEASgnGVdo=
-github.com/chainguard-dev/terraform-infra-common v1.7.0 h1:zrtsuWMDDCRtRTw7+1xHg1kRQSnbdIaYmm5pCLCTWSM=
-github.com/chainguard-dev/terraform-infra-common v1.7.0/go.mod h1:+8fgOCsA9Y4794Q53tJEX7jMiezw/mNyZOxn1PrNp1Q=
+github.com/chainguard-dev/clog v1.8.1 h1:Lab3GEDsVm1J9XGlpWEBuzXX7eETRmd0vN5PYoNyT+Y=
+github.com/chainguard-dev/clog v1.8.1/go.mod h1:5MQOZi+Iu7fV7GcJG8ag8rCB5elEOpqRMKEASgnGVdo=
+github.com/chainguard-dev/terraform-infra-common v1.7.3 h1:hYkRFOqd7QUF2PRKMh4kXU4gEZxyhJzp3JYAK7uPsvs=
+github.com/chainguard-dev/terraform-infra-common v1.7.3/go.mod h1:ILqv9/bmbkZnA7idi3niuFsjyuZBEWRYZy/xqBInqbM=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 h1:aBangftG7EVZoUb69Os8IaYg++6uMOdKK83QtkkvJik=
