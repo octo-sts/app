@@ -1,0 +1,77 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Container Images
+
+on:
+  pull_request:
+    branches:
+      - "main"
+  push:
+    branches:
+      - "main"
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        component:
+          - app
+          - webhook
+
+    permissions:
+      contents: read # clone the repository contents
+      packages: write # push to GHCR
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        with:
+          egress-policy: audit
+
+      - name: Check out code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        with:
+          go-version-file: "${{ github.workspace }}/.go-version"
+          check-latest: true
+          cache: "false"
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
+
+      - name: Determine tag
+        id: tag
+        if: github.event_name == 'push'
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tags=${GITHUB_REF_NAME#v},latest" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=edge" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push ${{ matrix.component }} image
+        if: github.event_name == 'push'
+        env:
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
+        run: |
+          ko build --bare --tags=${{ steps.tag.outputs.tags }} --image-refs=${{ matrix.component }}.refs ./cmd/${{ matrix.component }}
+
+      - name: Build ${{ matrix.component }} image (PR)
+        if: github.event_name == 'pull_request'
+        run: |
+          ko build --local ./cmd/${{ matrix.component }}
+
+      - name: Display image ref
+        if: github.event_name == 'push'
+        run: cat ${{ matrix.component }}.refs
