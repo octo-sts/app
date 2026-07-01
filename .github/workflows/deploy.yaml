@@ -128,7 +128,7 @@ jobs:
           password: "${{ steps.auth.outputs.access_token }}"
           registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@e1c4977ad9cb32b12c5b222ec0134a22bec60bd5 # v1.6.25
+      - uses: chainguard-dev/actions/setup-terraform@f0be69916b439d0fcced2451b23d0f27cd46d545 # v1.6.26
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
@@ -152,7 +152,7 @@ jobs:
         run: |
           go run ./hack/smoketest/ -config "hack/smoketest/testdata/${SMOKETEST_ENV}.yaml"
 
-      - uses: step-security/action-slack-notify@7210d1a1599b9ea84d6140184222f04f1ff56070 # v2.3.6
+      - uses: step-security/action-slack-notify@e4cdee14a905d9da46ba47ad9309704407d8cd79 # v2.4.0
         if: ${{ failure() }}
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
