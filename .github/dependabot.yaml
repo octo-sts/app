@@ -7,6 +7,8 @@ updates:
     directory: "/"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 3
     groups:
       all:
         update-types:
@@ -17,6 +19,8 @@ updates:
     directory: "./"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 3
     groups:
       all:
         update-types:
@@ -29,6 +33,8 @@ updates:
       - "/modules/app"
     schedule:
       interval: "daily"
+    cooldown:
+      default-days: 3
     groups:
       all:
         update-types:

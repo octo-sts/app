@@ -96,8 +96,10 @@ jobs:
 
       - name: Resolve auth config
         id: auth-config
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}
         run: |
-          ENVIRONMENT="${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}"
+          ENVIRONMENT="${INPUT_ENVIRONMENT}"
           echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
           if [[ "${ENVIRONMENT}" == "octo-sts" ]]; then
             echo "workload_identity_provider=projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider" >> "$GITHUB_OUTPUT"
@@ -111,8 +113,10 @@ jobs:
           fi
 
       - name: Log deployment target
+        env:
+          ENVIRONMENT: ${{ steps.auth-config.outputs.environment }}
         run: |
-          echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
+          echo "Deploying to environment: ${ENVIRONMENT}"
 
       - uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
         id: auth

@@ -50,7 +50,9 @@ jobs:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
-      - run: cp "$GITHUB_WORKSPACE/.github/testdata/backend_override.tf" "$GITHUB_WORKSPACE/${{ matrix.terraform-dir }}"
+      - env:
+          TERRAFORM_DIR: ${{ matrix.terraform-dir }}
+        run: cp "$GITHUB_WORKSPACE/.github/testdata/backend_override.tf" "$GITHUB_WORKSPACE/${TERRAFORM_DIR}"
       - working-directory: ${{ matrix.terraform-dir }}
         run: |
           terraform init
