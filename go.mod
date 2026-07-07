@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.94
+	chainguard.dev/sdk v0.1.102
 	cloud.google.com/go/firestore v1.22.0
 	cloud.google.com/go/kms v1.31.0
 	cloud.google.com/go/secretmanager v1.20.0
