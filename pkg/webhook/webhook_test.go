@@ -1407,7 +1407,10 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected %d so GitHub acks the delivery, got %d", http.StatusOK, resp.StatusCode)
+	}
 	if contentHits > 1 {
 		t.Fatalf("expected at most 1 content fetch before aborting, got %d", contentHits)
 	}
