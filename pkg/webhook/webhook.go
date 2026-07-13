@@ -75,7 +75,19 @@ func isBotSender(sender *github.User) bool {
 func isGitHubRateLimited(err error) bool {
 	var rateLimitErr *github.RateLimitError
 	var abuseRateLimitErr *github.AbuseRateLimitError
-	return errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr)
+	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr) {
+		return true
+	}
+	// Fall back to the status code for rate-limit responses that lack the
+	// typed markers, mirroring pkg/octosts' generic 403/429 handling.
+	var errResp *github.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil {
+		switch errResp.Response.StatusCode {
+		case http.StatusForbidden, http.StatusTooManyRequests:
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
