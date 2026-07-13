@@ -422,6 +422,9 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			case http.StatusForbidden, http.StatusTooManyRequests:
 				if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 					clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
+					// Seed the primary cache so further exchanges during the
+					// rate-limit window hit it instead of re-probing GitHub.
+					trustPolicies.Add(tpKey, stale)
 					return stale, nil
 				}
 				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (%d) for %q", ghErr.Response.StatusCode, tpKey.identity)

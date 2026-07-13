@@ -742,6 +742,12 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
 	}
+
+	// The stale hit should have seeded the primary cache so further
+	// exchanges during the rate-limit window skip the GitHub round-trip.
+	if _, ok := trustPolicies.Get(key); !ok {
+		t.Error("primary cache should be seeded after serving stale on rate limit")
+	}
 }
 
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
