@@ -48,8 +48,8 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/chainguard-dev/clog v1.8.1 h1:Lab3GEDsVm1J9XGlpWEBuzXX7eETRmd0vN5PYoNyT+Y=
 github.com/chainguard-dev/clog v1.8.1/go.mod h1:5MQOZi+Iu7fV7GcJG8ag8rCB5elEOpqRMKEASgnGVdo=
-github.com/chainguard-dev/terraform-infra-common v1.11.1 h1:+NwvscxtSB2wMt+8K9KvQlYb6bjZsvp9XeSF0qtrF/Q=
-github.com/chainguard-dev/terraform-infra-common v1.11.1/go.mod h1:fDQWdvMmUyMBeiMMGcj5jXK8MJpjDGdcgDPa+wzgpvQ=
+github.com/chainguard-dev/terraform-infra-common v1.14.1 h1:Q5ujGgRZ4Lm25QKeau45MD1cJyUHSumxOe6fGmmN1zI=
+github.com/chainguard-dev/terraform-infra-common v1.14.1/go.mod h1:BBfNg9Dp5Zh8speVYRXWTNabtLAoQyWro9QI0IoQOio=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 h1:aBangftG7EVZoUb69Os8IaYg++6uMOdKK83QtkkvJik=
