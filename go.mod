@@ -13,7 +13,7 @@ require (
 	github.com/chainguard-dev/clog v1.8.1
 	github.com/chainguard-dev/terraform-infra-common v1.14.1
 	github.com/cloudevents/sdk-go/v2 v2.16.2
-	github.com/coreos/go-oidc/v3 v3.19.0
+	github.com/coreos/go-oidc/v3 v3.20.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-github/v88 v88.0.0
