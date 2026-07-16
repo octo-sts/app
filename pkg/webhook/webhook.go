@@ -351,7 +351,13 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 
 	// GitHub push payloads include up to 20 commits. When not truncated,
 	// use the payload directly to avoid a Compare API call.
-	if len(event.Commits) < 20 {
+	//
+	// A push that creates a new ref carries the zero SHA as "before", which
+	// the Compare API rejects with a 404, so use the payload path there
+	// regardless of commit count. Policy files beyond the truncation point
+	// were validated when their commits were first pushed, and a brand-new
+	// default branch is covered by handleCheckSuite's zero-SHA directory scan.
+	if len(event.Commits) < 20 || event.GetBefore() == zeroHash {
 		files = e.filesFromPushEvent(repo, event)
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})

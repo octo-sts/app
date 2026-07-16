@@ -598,6 +598,116 @@ func TestWebhookPushTruncatedFallback(t *testing.T) {
 	}
 }
 
+// TestWebhookPushNewRefSkipsCompare verifies that a push creating a new ref
+// (Before is the zero SHA) uses the payload path even at 20+ commits: the
+// Compare API rejects the zero SHA with a 404, which would surface as a
+// webhook 500.
+func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		// GitHub responds 404 to a compare against the zero SHA; the handler
+		// must not call Compare at all for a new-ref push.
+		t.Error("Compare API should not be called for a new-ref (zero SHA) push")
+		http.Error(w, "Not Found", http.StatusNotFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			clog.FromContext(r.Context()).Errorf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	// 20 commits would normally force the Compare fallback; the zero-SHA
+	// Before must win and route through the payload path. The policy file in
+	// the first commit proves the payload was read.
+	commits := make([]*github.HeadCommit, 20)
+	for i := range commits {
+		commits[i] = &github.HeadCommit{
+			Added: []string{"README.md"},
+		}
+	}
+	commits[0] = &github.HeadCommit{
+		Added: []string{".github/chainguard/test2.sts.yaml"},
+	}
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Organization: &github.Organization{
+			Login: github.Ptr("foo"),
+		},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name: github.Ptr("bar"),
+		},
+		Before:  github.Ptr(zeroHash),
+		After:   github.Ptr("4321"),
+		Commits: commits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", 200, string(out))
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
 func TestWebhookPushNoSTSFiles(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
