@@ -1000,6 +1000,255 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 	}
 }
 
+// TestRepoFromAPIURL unit-tests owner/name extraction from the repository API
+// URLs carried in check_suite payloads.
+func TestRepoFromAPIURL(t *testing.T) {
+	for _, tc := range []struct {
+		url       string
+		wantOwner string
+		wantRepo  string
+		wantOK    bool
+	}{
+		{"https://api.github.com/repos/foo/parent", "foo", "parent", true},
+		{"https://ghe.example.com/api/v3/repos/foo/parent", "foo", "parent", true},
+		{"", "", "", false},
+		{"https://api.github.com/orgs/foo", "", "", false},
+		{"https://api.github.com/repos/foo", "", "", false},
+	} {
+		owner, repo, ok := repoFromAPIURL(tc.url)
+		if owner != tc.wantOwner || repo != tc.wantRepo || ok != tc.wantOK {
+			t.Errorf("repoFromAPIURL(%q) = (%q, %q, %v), want (%q, %q, %v)",
+				tc.url, owner, repo, ok, tc.wantOwner, tc.wantRepo, tc.wantOK)
+		}
+	}
+}
+
+// TestCheckSuiteForkPRListsFilesFromBaseRepo verifies that a check_suite firing
+// in a fork resolves an associated PR to its base repository before listing
+// files: the PR number is only meaningful in the base repo, and listing against
+// the fork 404s (which would surface as a webhook 500).
+func TestCheckSuiteForkPRListsFilesFromBaseRepo(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	parentFilesHit := false
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/parent/pulls/7/files", func(w http.ResponseWriter, r *http.Request) {
+		parentFilesHit = true
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.CommitFile{{
+			Filename: github.Ptr(".github/chainguard/test.sts.yaml"),
+			Status:   github.Ptr("added"),
+		}})
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/pulls/7/files", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("PR files must be listed from the base repo, not the fork")
+		http.Error(w, "Not Found", http.StatusNotFound)
+	})
+	// The zeroHash path does GetContents for the directory listing even
+	// when PRs are present; return an empty directory so only the PR file
+	// drives the check run.
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+	})
+	// The head SHA lives in the fork, so file contents are still fetched
+	// from the event repo (served from testdata by the fallback handler).
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:         github.Ptr(int64(1)),
+			HeadSHA:    github.Ptr("deadbeef"),
+			HeadBranch: github.Ptr("feature-x"),
+			BeforeSHA:  github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{{
+				Number: github.Ptr(7),
+				Base: &github.PullRequestBranch{
+					Repo: &github.Repository{
+						URL: github.Ptr("https://api.github.com/repos/foo/parent"),
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if !parentFilesHit {
+		t.Fatal("PR files were not listed from the base repo")
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
+// TestCheckSuiteInaccessiblePRSkipped verifies that a 404 listing an associated
+// PR's files (e.g. the base repo is outside the installation's reach) skips
+// that PR instead of failing the whole event with a 5xx.
+func TestCheckSuiteInaccessiblePRSkipped(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/other/parent/pulls/7/files", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:         github.Ptr(int64(1)),
+			HeadSHA:    github.Ptr("deadbeef"),
+			HeadBranch: github.Ptr("feature-x"),
+			BeforeSHA:  github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{{
+				Number: github.Ptr(7),
+				Base: &github.PullRequestBranch{
+					Repo: &github.Repository{
+						URL: github.Ptr("https://api.github.com/repos/other/parent"),
+					},
+				},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs for inaccessible PR, got %d", len(got))
+	}
+}
+
 func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
