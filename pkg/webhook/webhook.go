@@ -351,15 +351,27 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 
 	// GitHub push payloads include up to 20 commits. When not truncated,
 	// use the payload directly to avoid a Compare API call.
-	//
-	// A push that creates a new ref carries the zero SHA as "before", which
-	// the Compare API rejects with a 404, so use the payload path there
-	// regardless of commit count. Policy files beyond the truncation point
-	// were validated when their commits were first pushed, and a brand-new
-	// default branch is covered by handleCheckSuite's zero-SHA directory scan.
-	if len(event.Commits) < 20 || event.GetBefore() == zeroHash {
+	switch {
+	case len(event.Commits) < 20:
 		files = e.filesFromPushEvent(repo, event)
-	} else {
+	case event.GetBefore() == zeroHash:
+		// A push that creates a new ref carries the zero SHA as "before",
+		// which the Compare API rejects with a 404 (previously surfacing as a
+		// webhook 500). The payload is also truncated, so commits beyond the
+		// first 20 could carry policy files never seen before. Scan the
+		// policy directory at the pushed SHA instead — the same approach as
+		// handleCheckSuite's zero-SHA path. A missing directory just means
+		// there are no policies to validate.
+		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
+		if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
+			return nil, err
+		}
+		for _, file := range dirContents {
+			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
+				files = append(files, file.GetPath())
+			}
+		}
+	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
 			return nil, err
@@ -372,6 +384,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 			}
 		}
 	}
+
 	if len(files) == 0 {
 		return nil, nil
 	}
