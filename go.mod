@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	chainguard.dev/go-grpc-kit v0.18.0
 	chainguard.dev/sdk v0.1.137
-	cloud.google.com/go/firestore v1.23.0
+	cloud.google.com/go/firestore v1.24.0
 	cloud.google.com/go/kms v1.31.0
 	cloud.google.com/go/secretmanager v1.20.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
@@ -30,7 +30,7 @@ require (
 
 require (
 	cloud.google.com/go v0.123.0 // indirect
-	cloud.google.com/go/longrunning v1.0.0 // indirect
+	cloud.google.com/go/longrunning v1.2.0 // indirect
 	cloud.google.com/go/trace v1.16.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.33.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.33.0 // indirect
