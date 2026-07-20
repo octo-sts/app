@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	chainguard.dev/go-grpc-kit v0.17.17
-	chainguard.dev/sdk v0.1.118
+	chainguard.dev/sdk v0.1.132
 	cloud.google.com/go/firestore v1.23.0
 	cloud.google.com/go/kms v1.31.0
 	cloud.google.com/go/secretmanager v1.20.0
@@ -23,7 +23,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.288.0
-	google.golang.org/grpc v1.82.0
+	google.golang.org/grpc v1.82.1
 	k8s.io/apimachinery v0.36.2
 	sigs.k8s.io/yaml v1.6.0
 )
