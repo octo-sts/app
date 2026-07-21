@@ -355,16 +355,16 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	case len(event.Commits) < 20:
 		files = e.filesFromPushEvent(repo, event)
 	case event.GetBefore() == zeroHash:
-		// A push that creates a new ref carries the zero SHA as "before",
-		// which the Compare API rejects with a 404 (previously surfacing as a
-		// webhook 500). The payload is also truncated, so commits beyond the
-		// first 20 could carry policy files never seen before. Scan the
-		// policy directory at the pushed SHA instead — the same approach as
-		// handleCheckSuite's zero-SHA path. A missing directory just means
-		// there are no policies to validate.
+		// A new-ref push: the Compare API rejects the zero "before" SHA with
+		// a 404, and the truncated payload may omit policy files, so scan the
+		// policy directory at the pushed SHA instead. A missing directory
+		// means there are no policies to validate.
 		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
-		if err != nil && (resp == nil || resp.StatusCode != http.StatusNotFound) {
-			return nil, err
+		if err != nil {
+			if resp == nil || resp.StatusCode != http.StatusNotFound {
+				return nil, err
+			}
+			log.Infof("no policy directory at %s, skipping validation", sha)
 		}
 		for _, file := range dirContents {
 			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {

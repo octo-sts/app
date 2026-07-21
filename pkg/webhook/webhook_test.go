@@ -598,39 +598,31 @@ func TestWebhookPushTruncatedFallback(t *testing.T) {
 	}
 }
 
-// TestWebhookPushNewRefSkipsCompare verifies that a push creating a new ref
-// (Before is the zero SHA) scans the policy directory at the pushed SHA
-// instead of calling the Compare API at 20+ commits: Compare rejects the zero
-// SHA with a 404, which would surface as a webhook 500, and the truncated
-// payload may omit policy files entirely.
-func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
-	got := []*github.CreateCheckRunOptions{}
+// newRefPushBody marshals a push event for foo/bar with the given commits and
+// a zero "before" SHA, i.e. a push that creates a new ref.
+func newRefPushBody(t *testing.T, commits []*github.HeadCommit) []byte {
+	t.Helper()
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Organization: &github.Organization{Login: github.Ptr("foo")},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Before:  github.Ptr(zeroHash),
+		After:   github.Ptr("4321"),
+		Commits: commits,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
-		opt := new(github.CreateCheckRunOptions)
-		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		got = append(got, opt)
-	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
-		// GitHub responds 404 to a compare against the zero SHA; the handler
-		// must not call Compare at all for a new-ref push.
-		t.Error("Compare API should not be called for a new-ref (zero SHA) push")
-		http.Error(w, "Not Found", http.StatusNotFound)
-	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]*github.RepositoryContent{{
-			Type: github.Ptr("file"),
-			Path: github.Ptr(".github/chainguard/test.sts.yaml"),
-		}, {
-			Type: github.Ptr("file"),
-			Path: github.Ptr(".github/chainguard/README.md"),
-		}})
-	})
+// newRefPushServer wires a Validator to the given GitHub mux and posts the
+// push body, returning the HTTP response.
+func newRefPushServer(t *testing.T, mux *http.ServeMux, body []byte) *http.Response {
+	t.Helper()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -640,13 +632,10 @@ func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
 			return
 		}
 		defer f.Close()
-		if _, err := io.Copy(w, f); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		io.Copy(w, f)
 	})
 	gh := httptest.NewServer(mux)
-	defer gh.Close()
+	t.Cleanup(gh.Close)
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -661,39 +650,8 @@ func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
 		WebhookSecret: [][]byte{secret},
 	}
 	srv := httptest.NewServer(v)
-	defer srv.Close()
+	t.Cleanup(srv.Close)
 
-	// 20 commits would normally force the Compare fallback; the zero-SHA
-	// Before must win and route through the directory scan. The payload
-	// deliberately carries no policy files: the check run can only come from
-	// the directory listing, proving truncated commits can't hide policies.
-	commits := make([]*github.HeadCommit, 20)
-	for i := range commits {
-		commits[i] = &github.HeadCommit{
-			Added: []string{"README.md"},
-		}
-	}
-
-	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
-		},
-		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
-		},
-		Repo: &github.PushEventRepository{
-			Owner: &github.User{
-				Login: github.Ptr("foo"),
-			},
-			Name: github.Ptr("bar"),
-		},
-		Before:  github.Ptr(zeroHash),
-		After:   github.Ptr("4321"),
-		Commits: commits,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
 	if err != nil {
 		t.Fatal(err)
@@ -705,24 +663,14 @@ func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != 200 {
-		out, _ := httputil.DumpResponse(resp, true)
-		t.Fatalf("expected %d, got\n%s", 200, string(out))
-	}
-	if len(got) != 1 {
-		t.Fatalf("expected 1 check run, got %d", len(got))
-	}
-	if *got[0].Conclusion != "success" {
-		t.Fatalf("expected success, got %s", *got[0].Conclusion)
-	}
+	return resp
 }
 
-// TestWebhookPushNewRefNoPolicyDir verifies that a new-ref push into a
-// repository without a policy directory is a no-op: the directory-scan 404 is
-// treated as "no policies" rather than an error.
-func TestWebhookPushNewRefNoPolicyDir(t *testing.T) {
-	got := []*github.CreateCheckRunOptions{}
-
+// checkRunCollector returns a mux preloaded with a check-run capture handler
+// and a compare handler that fails the test if the Compare API is touched.
+func checkRunCollector(t *testing.T) (*http.ServeMux, *[]*github.CreateCheckRunOptions) {
+	t.Helper()
+	got := &[]*github.CreateCheckRunOptions{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
@@ -730,83 +678,127 @@ func TestWebhookPushNewRefNoPolicyDir(t *testing.T) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		got = append(got, opt)
+		*got = append(*got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
+		// GitHub responds 404 to a compare against the zero SHA; the handler
+		// must not call Compare at all for a new-ref push.
+		t.Error("Compare API should not be called for a new-ref (zero SHA) push")
+		http.Error(w, "Not Found", http.StatusNotFound)
 	})
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		path := filepath.Join("testdata", r.URL.Path)
-		f, err := os.Open(path)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusNotFound)
-			return
-		}
-		defer f.Close()
-		io.Copy(w, f)
-	})
-	gh := httptest.NewServer(mux)
-	defer gh.Close()
+	return mux, got
+}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
-	tr.BaseURL = gh.URL
-
-	secret := []byte("hunter2")
-	v := &Validator{
-		Transport:     tr,
-		WebhookSecret: [][]byte{secret},
-	}
-	srv := httptest.NewServer(v)
-	defer srv.Close()
-
-	commits := make([]*github.HeadCommit, 20)
+// readmeCommits returns n commits carrying only non-policy files.
+func readmeCommits(n int) []*github.HeadCommit {
+	commits := make([]*github.HeadCommit, n)
 	for i := range commits {
 		commits[i] = &github.HeadCommit{
 			Added: []string{"README.md"},
 		}
 	}
+	return commits
+}
 
-	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
-		},
-		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
-		},
-		Repo: &github.PushEventRepository{
-			Owner: &github.User{
-				Login: github.Ptr("foo"),
-			},
-			Name: github.Ptr("bar"),
-		},
-		Before:  github.Ptr(zeroHash),
-		After:   github.Ptr("4321"),
-		Commits: commits,
+// TestWebhookPushNewRefSkipsCompare verifies that a push creating a new ref
+// (Before is the zero SHA) scans the policy directory at the pushed SHA
+// instead of calling the Compare API at 20+ commits: Compare rejects the zero
+// SHA with a 404 that would bubble up as a webhook 500, and the truncated
+// payload may omit policy files entirely.
+func TestWebhookPushNewRefSkipsCompare(t *testing.T) {
+	mux, got := checkRunCollector(t)
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		if ref := r.URL.Query().Get("ref"); ref != "4321" {
+			t.Errorf("directory scan must use the pushed SHA, got ref=%q", ref)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{{
+			Type: github.Ptr("file"),
+			Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+		}, {
+			Type: github.Ptr("file"),
+			Path: github.Ptr(".github/chainguard/README.md"),
+		}})
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("X-Hub-Signature", signature(secret, body))
-	req.Header.Set("X-GitHub-Event", "push")
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
-	if err != nil {
-		t.Fatal(err)
-	}
+
+	// 20 commits would normally force the Compare fallback; the zero-SHA
+	// Before must win and route through the directory scan. The payload
+	// deliberately carries no policy files: the check run can only come from
+	// the directory listing, proving truncated commits can't hide policies.
+	resp := newRefPushServer(t, mux, newRefPushBody(t, readmeCommits(20)))
 	if resp.StatusCode != 200 {
 		out, _ := httputil.DumpResponse(resp, true)
 		t.Fatalf("expected %d, got\n%s", 200, string(out))
 	}
-	if len(got) != 0 {
-		t.Fatalf("expected 0 check runs without a policy directory, got %d", len(got))
+	if len(*got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(*got))
+	}
+	if (*got)[0].Conclusion == nil || *(*got)[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %v", (*got)[0].Conclusion)
+	}
+}
+
+// TestWebhookPushNewRefNoPolicyDir verifies that a new-ref push into a
+// repository without a policy directory is a no-op: the directory-scan 404 is
+// treated as "no policies" rather than an error.
+func TestWebhookPushNewRefNoPolicyDir(t *testing.T) {
+	mux, got := checkRunCollector(t)
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+	})
+
+	resp := newRefPushServer(t, mux, newRefPushBody(t, readmeCommits(20)))
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", 200, string(out))
+	}
+	if len(*got) != 0 {
+		t.Fatalf("expected 0 check runs without a policy directory, got %d", len(*got))
+	}
+}
+
+// TestWebhookPushNewRefContentsError verifies that only a 404 from the
+// directory scan is tolerated: any other GetContents failure must propagate
+// as a webhook 500 so transient GitHub errors aren't silently treated as
+// "no policies to validate".
+func TestWebhookPushNewRefContentsError(t *testing.T) {
+	mux, got := checkRunCollector(t)
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "boom"}`, http.StatusInternalServerError)
+	})
+
+	resp := newRefPushServer(t, mux, newRefPushBody(t, readmeCommits(20)))
+	if resp.StatusCode != http.StatusInternalServerError {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 500, got\n%s", string(out))
+	}
+	if len(*got) != 0 {
+		t.Fatalf("expected 0 check runs on contents error, got %d", len(*got))
+	}
+}
+
+// TestWebhookPushNewRefUnder20UsesPayload pins the switch ordering in
+// handlePush: a new-ref push with fewer than 20 commits has a complete
+// payload, so it must use the payload path — not the directory scan, which
+// would validate every policy in the repository on every small branch push.
+func TestWebhookPushNewRefUnder20UsesPayload(t *testing.T) {
+	mux, got := checkRunCollector(t)
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		t.Error("directory scan must not run for a <20-commit new-ref push")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+
+	commits := readmeCommits(5)
+	commits[0] = &github.HeadCommit{
+		Added: []string{".github/chainguard/test2.sts.yaml"},
+	}
+	resp := newRefPushServer(t, mux, newRefPushBody(t, commits))
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected %d, got\n%s", 200, string(out))
+	}
+	if len(*got) != 1 {
+		t.Fatalf("expected 1 check run from the payload path, got %d", len(*got))
 	}
 }
 
