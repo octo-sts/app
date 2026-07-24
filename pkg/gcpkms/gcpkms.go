@@ -16,6 +16,7 @@ import (
 )
 
 type signingMethodGCP struct {
+	ctx    context.Context
 	client *kms.KeyManagementClient
 }
 
@@ -24,7 +25,7 @@ func (s *signingMethodGCP) Verify(string, string, interface{}) error {
 }
 
 func (s *signingMethodGCP) Sign(signingString string, ikey interface{}) (string, error) {
-	ctx := context.Background()
+	ctx := s.ctx
 
 	key, ok := ikey.(string)
 	if !ok {
@@ -46,12 +47,14 @@ func (s *signingMethodGCP) Alg() string {
 }
 
 type gcpSigner struct {
+	ctx    context.Context
 	client *kms.KeyManagementClient
 	key    string
 }
 
-func New(_ context.Context, client *kms.KeyManagementClient, key string) (ghinstallation.Signer, error) {
+func New(ctx context.Context, client *kms.KeyManagementClient, key string) (ghinstallation.Signer, error) {
 	return &gcpSigner{
+		ctx:    ctx,
 		client: client,
 		key:    key,
 	}, nil
@@ -60,6 +63,7 @@ func New(_ context.Context, client *kms.KeyManagementClient, key string) (ghinst
 // Sign signs the JWT claims with the RSA key.
 func (s *gcpSigner) Sign(claims jwt.Claims) (string, error) {
 	method := &signingMethodGCP{
+		ctx:    s.ctx,
 		client: s.client,
 	}
 	return jwt.NewWithClaims(method, claims).SignedString(s.key)
