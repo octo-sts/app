@@ -1,7 +1,7 @@
 chainguard.dev/go-grpc-kit v0.18.0 h1:kr451ml4eBgNcc0ytqcSSPZ3KGtyfHRrrBcYxW/oZwI=
 chainguard.dev/go-grpc-kit v0.18.0/go.mod h1:N1ZZiV3KkNHFlIS6RPhLT9ppfObC7aa1hqWMPmNiTA0=
-chainguard.dev/sdk v0.1.143 h1:UHMr0feTME0+KVVsRHpe58rCLN1IPvATT77FvHRsmns=
-chainguard.dev/sdk v0.1.143/go.mod h1:WIaM60bR6qU84RvE45u4QkOh+BN2uc1nfHuZYLnRfvU=
+chainguard.dev/sdk v0.1.145 h1:v6eJsOQKleyVagcDjRn3NuAt9ziBsDTKtWENlclpH8c=
+chainguard.dev/sdk v0.1.145/go.mod h1:WIaM60bR6qU84RvE45u4QkOh+BN2uc1nfHuZYLnRfvU=
 cloud.google.com/go v0.123.0 h1:2NAUJwPR47q+E35uaJeYoNhuNEM9kM8SjgRgdeOJUSE=
 cloud.google.com/go v0.123.0/go.mod h1:xBoMV08QcqUGuPW65Qfm1o9Y4zKZBpGS+7bImXLTAZU=
 cloud.google.com/go/auth v0.22.0 h1:Xp9wAKkLoeaYb5pYZZoQGz4E9sdPxIbzS3gywZE3ciQ=
@@ -48,8 +48,8 @@ github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UF
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/chainguard-dev/clog v1.8.1 h1:Lab3GEDsVm1J9XGlpWEBuzXX7eETRmd0vN5PYoNyT+Y=
 github.com/chainguard-dev/clog v1.8.1/go.mod h1:5MQOZi+Iu7fV7GcJG8ag8rCB5elEOpqRMKEASgnGVdo=
-github.com/chainguard-dev/terraform-infra-common v1.21.2 h1:xzOcyW8AO3Fzx5Xne419kv8Lds+jYUFm3+fJqumj3hA=
-github.com/chainguard-dev/terraform-infra-common v1.21.2/go.mod h1:NI4Xvcv3UJJBrlWpR3D8bv4hl4AO0NCquoJavBjs438=
+github.com/chainguard-dev/terraform-infra-common v1.22.0 h1:tReB7Hs22T6Yh5dYuKWPalTbpRAD0ynwgeL2Jpyfcx0=
+github.com/chainguard-dev/terraform-infra-common v1.22.0/go.mod h1:dFkMAzS1cOYF0M5h+3sP+grTjG08g69XimGxe6DcRCo=
 github.com/cloudevents/sdk-go/v2 v2.16.2 h1:ZYDFrYke4FD+jM8TZTJJO6JhKHzOQl2oqpFK1D+NnQM=
 github.com/cloudevents/sdk-go/v2 v2.16.2/go.mod h1:laOcGImm4nVJEU+PHnUrKL56CKmRL65RlQF0kRmW/kg=
 github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2 h1:aBangftG7EVZoUb69Os8IaYg++6uMOdKK83QtkkvJik=
