@@ -1407,9 +1407,52 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = resp
+	if resp != nil {
+		resp.Body.Close()
+	}
 	if contentHits > 1 {
 		t.Fatalf("expected at most 1 content fetch before aborting, got %d", contentHits)
+	}
+}
+
+func TestIsGitHubRateLimited(t *testing.T) {
+	resp := func(code int) *github.Response {
+		return &github.Response{Response: &http.Response{StatusCode: code}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{{
+		name: "typed rate limit error",
+		err:  &github.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}},
+		want: true,
+	}, {
+		name: "typed abuse rate limit error",
+		err:  &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}},
+		want: true,
+	}, {
+		name: "bare ErrorResponse 403",
+		err:  &github.ErrorResponse{Response: resp(http.StatusForbidden).Response},
+		want: true,
+	}, {
+		name: "bare ErrorResponse 429",
+		err:  &github.ErrorResponse{Response: resp(http.StatusTooManyRequests).Response},
+		want: true,
+	}, {
+		name: "ErrorResponse 404 is not a rate limit",
+		err:  &github.ErrorResponse{Response: resp(http.StatusNotFound).Response},
+		want: false,
+	}, {
+		name: "nil error",
+		err:  nil,
+		want: false,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isGitHubRateLimited(tc.err); got != tc.want {
+				t.Errorf("isGitHubRateLimited() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
 
