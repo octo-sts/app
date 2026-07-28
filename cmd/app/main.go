@@ -83,7 +83,25 @@ func main() {
 				continue
 			}
 		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, quotaStore)
+		var azureKeyVaultURL string
+		var azureKey string
+		var azureKeyVersion string
+		if len(baseCfg.AKVKeys) > 0 {
+			azureKey = baseCfg.AKVKeys[i]
+			if azureKey == "" {
+				log.Printf("skipping app %d: no Azure key configured", appID)
+				continue
+			}
+			if len(baseCfg.AKVUrls) > 1 {
+				azureKeyVaultURL = baseCfg.AKVUrls[i]
+			} else {
+				azureKeyVaultURL = baseCfg.AKVUrls[0]
+			}
+			if i < len(baseCfg.AKVKeyVersions) {
+				azureKeyVersion = baseCfg.AKVKeyVersions[i]
+			}
+		}
+		atr, err := ghtransport.New(ctx, appID, kmsKey, azureKeyVaultURL, azureKey, azureKeyVersion, baseCfg, client, quotaStore)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}

@@ -15,8 +15,10 @@ import (
 	"time"
 
 	kms "cloud.google.com/go/kms/apiv1"
-	secretmanager "cloud.google.com/go/secretmanager/apiv1"
+	kmssecretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
+	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
@@ -68,7 +70,19 @@ func main() {
 		kmsKey = baseCfg.KMSKeys[0]
 	}
 
-	atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, nil)
+	var azureKeyVaultURL, azureKey, azureKeyVersion string
+	if len(baseCfg.AKVKeys) > 0 {
+		azureKey = baseCfg.AKVKeys[0]
+		if len(baseCfg.AKVUrls) > 0 {
+			azureKeyVaultURL = baseCfg.AKVUrls[0]
+		}
+		if len(baseCfg.AKVKeyVersions) > 0 {
+			azureKeyVersion = baseCfg.AKVKeyVersions[0]
+		}
+	}
+
+	atr, err := ghtransport.New(ctx, appID, kmsKey, azureKeyVaultURL, azureKey, azureKeyVersion, baseCfg, client, nil)
+
 	if err != nil {
 		log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 	}
@@ -78,7 +92,7 @@ func main() {
 	// Not everyone is using Google KMS, so we need to support other methods
 	webhookSecrets := [][]byte{}
 	if len(baseCfg.KMSKeys) > 0 {
-		secretmanager, err := secretmanager.NewClient(ctx)
+		secretmanager, err := kmssecretmanager.NewClient(ctx)
 		if err != nil {
 			log.Panicf("could not create secret manager client: %v", err)
 		}
@@ -90,6 +104,25 @@ func main() {
 				log.Panicf("error fetching webhook secret %s: %v", name, err)
 			}
 			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
+		}
+	} else if len(baseCfg.AKVUrls) > 0 {
+		cred, err := azidentity.NewDefaultAzureCredential(nil)
+		if err != nil {
+			log.Panicf("failed to obtain a credential: %v", err)
+		}
+		akvclient, err := azsecrets.NewClient(baseCfg.AKVUrls[0], cred, nil)
+		if err != nil {
+			log.Panicf("could not create client: %v", err)
+		}
+		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
+			resp, err := akvclient.GetSecret(ctx, name, "", nil)
+			if err != nil {
+				log.Panicf("error fetching webhook secret %s: %v", name, err)
+			}
+			if resp.Value == nil {
+				log.Panicf("webhook secret %s has no value", name)
+			}
+			webhookSecrets = append(webhookSecrets, []byte(*resp.Value))
 		}
 	} else {
 		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
