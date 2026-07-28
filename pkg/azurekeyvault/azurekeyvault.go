@@ -33,7 +33,10 @@ type keyRef struct {
 
 type signingMethodAKV struct {
 	client signerClient
-	ctx    context.Context
+	// Storing a context on a struct is discouraged by Go, but the jwt
+	// SigningMethod interface has no parameter to pass one, so we carry it
+	// here to propagate shutdown cancellation to the sign call.
+	ctx context.Context
 }
 
 func (s *signingMethodAKV) Verify(string, string, interface{}) error {
@@ -68,7 +71,10 @@ func (s *signingMethodAKV) Alg() string { return string(signatureAlg) }
 type akvSigner struct {
 	client signerClient
 	key    keyRef
-	ctx    context.Context
+	// Storing a context on a struct is discouraged by Go, but the jwt
+	// SigningMethod interface has no parameter to pass one, so we carry it
+	// here to propagate shutdown cancellation to the sign call.
+	ctx context.Context
 }
 
 func (s *akvSigner) Sign(claims jwt.Claims) (string, error) {
