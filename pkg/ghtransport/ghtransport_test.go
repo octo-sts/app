@@ -124,7 +124,7 @@ func TestGCPKMS(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for i, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, testConfig.KMSKeys[i], testConfig, kmsClient, nil)
+		transport, err := New(ctx, appID, testConfig.KMSKeys[i], "", "", "", testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -142,7 +142,7 @@ func TestCertEnvVar(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
+		transport, err := New(ctx, appID, "", "", "", "", testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -160,7 +160,7 @@ func TestCertFile(t *testing.T) {
 
 	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
+		transport, err := New(ctx, appID, "", "", "", "", testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}

@@ -13,6 +13,7 @@ import (
 	kms "cloud.google.com/go/kms/apiv1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	"github.com/octo-sts/app/pkg/azurekeyvault"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/gcpkms"
 	"github.com/octo-sts/app/pkg/ghinstall"
@@ -68,7 +69,7 @@ func (q *quotaTap) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // New creates a GitHub AppsTransport. If quota is non-nil, response headers
 // are also tapped into the QuotaStore for capacity-aware routing decisions.
-func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
+func New(ctx context.Context, appID int64, kmsKey string, azureKeyVaultURL string, azureKey string, azureKeyVersion string, env *envConfig.EnvConfig, kmsClient *kms.KeyManagementClient, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
 	// Wrap the base HTTP transport so every GitHub response's X-RateLimit-*
 	// headers populate the github_rate_limit_* metrics with the app_id and
 	// installation_id labels set on the request context by EnrichContext.
@@ -93,6 +94,23 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 			return nil, err
 		}
 		return atr, nil
+
+	case azureKeyVaultURL != "":
+		if azureKey == "" {
+			return nil, fmt.Errorf("no Key Name Provided. Please set AKV_KEY_NAMES environment variable")
+		}
+		signer, err := azurekeyvault.New(ctx, azureKeyVaultURL, azureKey, azureKeyVersion)
+		if err != nil {
+			return nil, fmt.Errorf("could not create azure key vault signer: %v", err)
+		}
+
+		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(signer))
+		if err != nil {
+			return nil, err
+		}
+
+		return atr, nil
+
 	default:
 		if kmsKey == "" {
 			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
