@@ -41,7 +41,6 @@ func (s *signingMethodAKV) Verify(string, string, interface{}) error {
 }
 
 func (s *signingMethodAKV) Sign(signingString string, ikey interface{}) (string, error) {
-
 	ref, ok := ikey.(keyRef)
 
 	if !ok {
