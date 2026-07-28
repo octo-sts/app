@@ -91,7 +91,8 @@ func main() {
 	// or allow webhook secret to be defined by env var.
 	// Not everyone is using Google KMS, so we need to support other methods
 	webhookSecrets := [][]byte{}
-	if len(baseCfg.KMSKeys) > 0 {
+	switch {
+	case len(baseCfg.KMSKeys) > 0:
 		secretmanager, err := kmssecretmanager.NewClient(ctx)
 		if err != nil {
 			log.Panicf("could not create secret manager client: %v", err)
@@ -105,7 +106,7 @@ func main() {
 			}
 			webhookSecrets = append(webhookSecrets, resp.GetPayload().GetData())
 		}
-	} else if len(baseCfg.AKVUrls) > 0 {
+	case len(baseCfg.AKVUrls) > 0:
 		cred, err := azidentity.NewDefaultAzureCredential(nil)
 		if err != nil {
 			log.Panicf("failed to obtain a credential: %v", err)
@@ -124,7 +125,7 @@ func main() {
 			}
 			webhookSecrets = append(webhookSecrets, []byte(*resp.Value))
 		}
-	} else {
+	default:
 		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
 	}
 

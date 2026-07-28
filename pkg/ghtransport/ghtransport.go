@@ -101,7 +101,7 @@ func New(ctx context.Context, appID int64, kmsKey string, azureKeyVaultURL strin
 		}
 		signer, err := azurekeyvault.New(ctx, azureKeyVaultURL, azureKey, azureKeyVersion)
 		if err != nil {
-			return nil, fmt.Errorf("could not create azure key vault signer: %v", err)
+			return nil, fmt.Errorf("could not create azure key vault signer: %w", err)
 		}
 
 		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(signer))
