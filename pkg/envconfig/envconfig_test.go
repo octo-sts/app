@@ -93,6 +93,66 @@ func TestBaseConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "AKV single shared URL for multiple apps",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"AKV_URLS":       "https://vault.vault.azure.net/",
+				"AKV_KEY_NAMES":  "key-1,key-2",
+			},
+			wantErr: false,
+		},
+		{
+			name: "AKV per-app URLs matching app count",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"AKV_URLS":       "https://vault-a.vault.azure.net/,https://vault-b.vault.azure.net/",
+				"AKV_KEY_NAMES":  "key-1,key-2",
+			},
+			wantErr: false,
+		},
+		{
+			name: "AKV with key versions set",
+			envVars: map[string]string{
+				"PORT":             "8080",
+				"GITHUB_APP_IDS":   "12345678,87654321",
+				"AKV_URLS":         "https://vault.vault.azure.net/",
+				"AKV_KEY_NAMES":    "key-1,key-2",
+				"AKV_KEY_VERSIONS": "v1,v2",
+			},
+			wantErr: false,
+		},
+		{
+			name: "AKV_KEY_NAMES length mismatch with app count",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"AKV_URLS":       "https://vault.vault.azure.net/",
+				"AKV_KEY_NAMES":  "key-1",
+			},
+			wantErr: true,
+		},
+		{
+			name: "AKV_KEY_NAMES set but AKV_URLS empty",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"AKV_KEY_NAMES":  "key-1,key-2",
+			},
+			wantErr: true,
+		},
+		{
+			name: "AKV_URLS count mismatch when more than one",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"AKV_URLS":       "https://vault-a.vault.azure.net/,https://vault-b.vault.azure.net/,https://vault-c.vault.azure.net/",
+				"AKV_KEY_NAMES":  "key-1,key-2",
+			},
+			wantErr: true,
+		},
+		{
 			name: "Quota floors valid",
 			envVars: map[string]string{
 				"PORT":                     "8080",
