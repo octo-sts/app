@@ -62,7 +62,7 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 // NewProviderWithClient creates a new Provider with an existing KMS client.
 func NewProviderWithClient(ctx context.Context, client *kms.KeyManagementClient, kmsKey string) (*Provider, error) {
 	return &Provider{
-		ctx:    ctx,
+		ctx:    context.WithoutCancel(ctx),
 		client: client,
 		key:    kmsKey,
 	}, nil

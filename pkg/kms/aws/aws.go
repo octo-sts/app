@@ -60,7 +60,7 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 	client := kms.NewFromConfig(awsConfig)
 
 	return &Provider{
-		ctx:    ctx,
+		ctx:    context.WithoutCancel(ctx),
 		client: client,
 		key:    kmsKey,
 	}, nil

@@ -6,6 +6,7 @@ package secrets
 import (
 	"context"
 	"errors"
+	"strings"
 
 	gcpSM "cloud.google.com/go/secretmanager/apiv1"
 	"github.com/aws/aws-sdk-go-v2/config"
@@ -41,6 +42,7 @@ func (s *secretProvider) GetSecret(ctx context.Context, keyID string) ([]byte, e
 }
 
 func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, error) {
+	provider = strings.ToLower(provider)
 	sp := &secretProvider{
 		provider: provider,
 	}

@@ -22,5 +22,8 @@ func GetSecret(ctx context.Context, manager *awsSM.Client, keyID string) ([]byte
 	if resp.SecretString != nil {
 		return []byte(*resp.SecretString), nil
 	}
+	if resp.SecretBinary == nil {
+		return nil, fmt.Errorf("secret %s has no value", keyID)
+	}
 	return resp.SecretBinary, nil
 }
