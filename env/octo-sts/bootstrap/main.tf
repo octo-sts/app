@@ -8,6 +8,13 @@ resource "google_project_service" "iamcredentials-api" {
   disable_on_destroy         = false
 }
 
+resource "google_project_service" "firestore-api" {
+  project                    = var.project_id
+  service                    = "firestore.googleapis.com"
+  disable_dependent_services = false
+  disable_on_destroy         = false
+}
+
 data "google_monitoring_notification_channel" "notify-chainguard-slack" {
   display_name = "Slack Octo STS Notification"
 }
@@ -20,7 +27,7 @@ locals {
 
 module "github-wif" {
   source  = "chainguard-dev/common/infra//modules/github-wif-provider"
-  version = "1.0.1"
+  version = "1.0.2"
 
   project_id = var.project_id
   name       = "github-pool"
@@ -41,7 +48,7 @@ moved {
 
 module "github_identity" {
   source  = "chainguard-dev/common/infra//modules/github-gsa"
-  version = "1.0.1"
+  version = "1.0.2"
 
   project_id = var.project_id
   name       = "github-identity"
@@ -68,7 +75,7 @@ resource "google_project_iam_member" "github_owner" {
 
 module "github_pull_requests" {
   source  = "chainguard-dev/common/infra//modules/github-gsa"
-  version = "1.0.1"
+  version = "1.0.2"
 
   project_id = var.project_id
   name       = "github-pull-requests"

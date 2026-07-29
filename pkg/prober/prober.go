@@ -1,7 +1,5 @@
-/*
-Copyright 2024 Chainguard, Inc.
-SPDX-License-Identifier: Apache-2.0
-*/
+// Copyright 2024 Chainguard, Inc.
+// SPDX-License-Identifier: Apache-2.0
 
 package prober
 
@@ -11,7 +9,7 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v75/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/kelseyhightower/envconfig"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/idtoken"
@@ -57,13 +55,18 @@ func Func(ctx context.Context) error {
 		}
 	}()
 
-	ghc := github.NewClient(
-		oauth2.NewClient(ctx,
-			oauth2.StaticTokenSource(&oauth2.Token{
-				AccessToken: res.AccessToken,
-			}),
+	ghc, err := github.NewClient(
+		github.WithHTTPClient(
+			oauth2.NewClient(ctx,
+				oauth2.StaticTokenSource(&oauth2.Token{
+					AccessToken: res.AccessToken,
+				}),
+			),
 		),
 	)
+	if err != nil {
+		return fmt.Errorf("creating GitHub client: %w", err)
+	}
 
 	// Check the `contents: read` permission by reading back the STS policy we
 	// used to federate.

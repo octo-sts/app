@@ -37,16 +37,58 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.blob.core.windows.net:443
+            *.githubapp.com:443
+            9236a389bd48b984df91adc1bc924620.r2.cloudflarestorage.com:443
+            api.github.com:443
+            bigquery.googleapis.com:443
+            bigquerydatatransfer.googleapis.com:443
+            cgr.dev:443
+            checkpoint-api.hashicorp.com:443
+            cloudbilling.googleapis.com:443
+            cloudkms.googleapis.com:443
+            cloudresourcemanager.googleapis.com:443
+            compute.googleapis.com:443
+            dl.google.com:443
+            dns.googleapis.com:443
+            firestore.googleapis.com:443
+            octo-staging.dev:443
+            octo-sts.dev:443
+            fulcio.sigstore.dev:443
+            gcr.io:443
+            github.com:443
+            go.dev:443
+            hooks.slack.com:443
+            iam.googleapis.com:443
+            iamcredentials.googleapis.com:443
+            logging.googleapis.com:443
+            monitoring.googleapis.com:443
+            objects.githubusercontent.com:443
+            openidconnect.googleapis.com:443
+            proxy.golang.org:443
+            pubsub.googleapis.com:443
+            registry.terraform.io:443
+            rekor.sigstore.dev:443
+            release-assets.githubusercontent.com:443
+            releases.hashicorp.com:443
+            run.googleapis.com:443
+            secretmanager.googleapis.com:443
+            serviceusage.googleapis.com:443
+            storage.googleapis.com:443
+            sts.googleapis.com:443
+            sum.golang.org:443
+            tuf-repo-cdn.sigstore.dev:443
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@4b73464bb391d4059bd26b0524d20df3927bd417 # v6.3.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "${{ github.workspace }}/.go-version"
           check-latest: true
@@ -54,8 +96,10 @@ jobs:
 
       - name: Resolve auth config
         id: auth-config
+        env:
+          INPUT_ENVIRONMENT: ${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}
         run: |
-          ENVIRONMENT="${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}"
+          ENVIRONMENT="${INPUT_ENVIRONMENT}"
           echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
           if [[ "${ENVIRONMENT}" == "octo-sts" ]]; then
             echo "workload_identity_provider=projects/96355665038/locations/global/workloadIdentityPools/github-pool/providers/github-provider" >> "$GITHUB_OUTPUT"
@@ -69,10 +113,12 @@ jobs:
           fi
 
       - name: Log deployment target
+        env:
+          ENVIRONMENT: ${{ steps.auth-config.outputs.environment }}
         run: |
-          echo "Deploying to environment: ${{ steps.auth-config.outputs.environment }}"
+          echo "Deploying to environment: ${ENVIRONMENT}"
 
-      - uses: step-security/google-github-auth@57c51210cb4d85d8a5d39dc4c576c79bd693f914 # v3.0.1
+      - uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
         id: auth
         with:
           token_format: "access_token"
@@ -80,13 +126,13 @@ jobs:
           workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
           service_account: "${{ steps.auth-config.outputs.service_account }}"
 
-      - uses: "docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2" # v2
+      - uses: "docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7" # v4.5.1
         with:
           username: "oauth2accesstoken"
           password: "${{ steps.auth.outputs.access_token }}"
           registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
+      - uses: chainguard-dev/actions/setup-terraform@fabe4ed3f66ceb5f8ec86ed7ae6d0c945ca362fb # v1.6.28
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
@@ -103,7 +149,14 @@ jobs:
 
           terraform apply -auto-approve
 
-      - uses: step-security/action-slack-notify@e04c77a65bae8b6c0373478a1cb8fd7e012637e6 # v2.3.5
+      - name: Run smoke tests
+        if: steps.terraform-init.outcome == 'success'
+        env:
+          SMOKETEST_ENV: ${{ steps.auth-config.outputs.environment }}
+        run: |
+          go run ./hack/smoketest/ -config "hack/smoketest/testdata/${SMOKETEST_ENV}.yaml"
+
+      - uses: step-security/action-slack-notify@e4cdee14a905d9da46ba47ad9309704407d8cd79 # v2.4.0
         if: ${{ failure() }}
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48

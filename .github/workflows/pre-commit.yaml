@@ -1,0 +1,81 @@
+# Copyright 2024 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Pre-commit
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+  push:
+    branches:
+      - 'main'
+
+permissions: {}
+
+jobs:
+
+  pre-commit:
+    name: Pre-commit checks
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: block
+          allowed-endpoints: >
+            *.blob.core.windows.net:443
+            *.githubapp.com:443
+            api.github.com:443
+            dl.google.com:443
+            github.com:443
+            go.dev:443
+            golangci-lint.run:443
+            objects.githubusercontent.com:443
+            proxy.golang.org:443
+            pypi.org:443
+            files.pythonhosted.org:443
+            raw.githubusercontent.com:443
+            release-assets.githubusercontent.com:443
+            checkpoint-api.hashicorp.com:443
+            releases.hashicorp.com:443
+            storage.googleapis.com:443
+            sum.golang.org:443
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: '${{ github.workspace }}/.go-version'
+          check-latest: true
+          cache: 'false'
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.x'
+
+      - name: Install goimports
+        run: go install golang.org/x/tools/cmd/goimports@latest
+
+      - name: Set up Terraform
+        uses: chainguard-dev/actions/setup-terraform@fabe4ed3f66ceb5f8ec86ed7ae6d0c945ca362fb # v1.6.28
+        with:
+          terraform-version-file: "${{ github.workspace }}/.terraform-version"
+          terraform-wrapper: false
+
+      - name: Install pre-commit # Manually install as the precommit action doesn't pin deps.
+        run: pip install pre-commit
+
+      - name: Run pre-commit
+        run: pre-commit run --all-files
+        env:
+          SKIP: no-commit-to-branch

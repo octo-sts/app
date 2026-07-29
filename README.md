@@ -8,7 +8,7 @@ STS API in order to produce short-lived tokens for interacting with GitHub.
 **_The ultimate goal of this App is to wholly eliminate the need for GitHub
 Personal Access Tokens (aka PATs)._**
 
-The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have).
+The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have) and the page on [Chainguard Academy](https://edu.chainguard.dev/open-source/octo-sts/overview/).
 
 ## Setting up workload trust
 
@@ -97,6 +97,36 @@ policy.
 Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
 we will might make a new release.
 
+### Multi-App Routing
+
+When multiple GitHub Apps are configured (`GITHUB_APP_IDS` has more than one
+entry), OctoSTS distributes token exchanges across installations using
+capacity-aware fairshare routing. Trust policies with `checks: write` require
+sticky routing — the same `(scope, identity)` pair must always receive a token
+from the same installation because GitHub check runs can only be updated by the
+app that created them.
+
+#### Sticky Store
+
+The sticky store persists these `(scope, identity) -> installation` mappings so
+they survive process restarts and deploys. Without it, checks:write policies fall
+back to round-robin (non-sticky) routing which may break check-run updates.
+
+**Firestore backend** (recommended for GCP deployments):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_STICKY_STORE` | (empty) | Set to `firestore` to enable |
+| `OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT` | running GCP project | Firestore GCP project |
+| `OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION` | `sticky-routes` | Firestore collection name |
+| `OCTOSTS_STICKY_STORE_FIRESTORE_TTL` | `1h` | TTL for inactive mappings |
+
+Active mappings have their TTL refreshed on every use, so they never expire.
+Only mappings unused for the TTL duration are automatically cleaned up.
+
+Single-app deployments (`GITHUB_APP_IDS` has one entry) do not need sticky
+routing and can ignore these settings.
+
 ### Best Practices
 
 To ensure secure and effective use of octo-sts, follow these recommended practices:
@@ -176,12 +206,12 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 
 #### Organization Permissions
 
-- **API Insights**: `No Access`
+- **API Insights**: `Read-only`
 - **Administration**: `Read/Write`
 - **Blocking users**: `No Access`
-- **Custom organizations roles**: `No Access`
+- **Custom organizations roles**: `Read and write`
 - **Custom properties**: `No Access`
-- **Custom repository roles**: `No Access`
+- **Custom repository roles**: `Read and write`
 - **Events**: `Read-only`
 - **GitHub Copilot Business**: `No Access`
 - **Knowledge bases**: `No Access`

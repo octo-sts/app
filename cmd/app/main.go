@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -20,11 +21,14 @@ import (
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
+	"github.com/octo-sts/app/pkg/stickystore"
 )
 
 func main() {
@@ -57,6 +61,18 @@ func main() {
 		}
 	}
 
+	// Capacity-aware routing: a shared QuotaStore is populated by the
+	// transport tap (X-RateLimit-Remaining headers on every GitHub response)
+	// and read by NewRoundRobinWithQuota. Cold start (no quota data yet)
+	// safely falls back to the atomic-counter strategy. Check-run ownership
+	// for checks:write policies is handled by the sticky store.
+	quotaStore := ghinstall.NewQuotaStore(baseCfg.QuotaStaleAfter)
+	quotaCfg := &ghinstall.QuotaConfig{
+		Store:     quotaStore,
+		SoftFloor: baseCfg.QuotaFloorSoft,
+		HardFloor: baseCfg.QuotaFloorHard,
+	}
+
 	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
 	for i, appID := range baseCfg.AppIDs {
 		var kmsKey string
@@ -67,7 +83,7 @@ func main() {
 				continue
 			}
 		}
-		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client)
+		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, client, quotaStore)
 		if err != nil {
 			log.Panicf("error creating GitHub App transport for app %d: %v", appID, err)
 		}
@@ -80,13 +96,25 @@ func main() {
 	if len(managers) == 0 {
 		log.Panic("no apps with valid KMS keys configured")
 	}
-	im := ghinstall.NewRoundRobin(managers)
+
+	var rrm ghinstall.Manager
+	var sticky stickystore.Store
+	if len(managers) == 1 {
+		rrm = ghinstall.NewRoundRobin(managers)
+	} else {
+		rrm = ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
+	}
+	if len(managers) > 1 && baseCfg.StickyStore != "" {
+		var closer io.Closer
+		sticky, closer, err = stickystore.New(ctx, baseCfg)
+		if err != nil {
+			log.Panicf("failed to create sticky store: %v", err)
+		}
+		defer closer.Close()
+	}
 
 	d := duplex.New(
 		baseCfg.Port,
-		// grpc.StatsHandler(otelgrpc.NewServerHandler()),
-		// grpc.ChainStreamInterceptor(grpc_prometheus.StreamServerInterceptor),
-		// grpc.ChainUnaryInterceptor(grpc_prometheus.UnaryServerInterceptor, interceptors.ServerErrorInterceptor),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	)
 
@@ -98,7 +126,7 @@ func main() {
 		}
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(im, ceclient, appConfig.Domain, baseCfg.Metrics))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
@@ -113,6 +141,10 @@ func main() {
 	}); err != nil {
 		log.Panicf("failed to register root GET handler: %v", err)
 	}
+
+	// Register health check service
+	healthServer := health.NewServer()
+	healthpb.RegisterHealthServer(d.Server, healthServer)
 
 	if err := d.ListenAndServe(ctx); err != nil {
 		log.Panicf("ListenAndServe() = %v", err)

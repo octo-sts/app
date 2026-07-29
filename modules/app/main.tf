@@ -76,7 +76,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "1.0.1"
+  version = "1.25.1"
 
   project_id = var.project_id
   region     = each.key
@@ -87,7 +87,7 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "1.0.1"
+  version = "1.25.1"
 
   team = "developer-platform"
 
@@ -119,7 +119,23 @@ module "this" {
         {
           name  = "STS_DOMAIN",
           value = var.domain,
-        }
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE"
+          value = var.sticky_store
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT"
+          value = var.sticky_store == "firestore" ? var.project_id : ""
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION"
+          value = var.sticky_store_firestore_collection
+        },
+        {
+          name  = "OCTOSTS_STICKY_STORE_FIRESTORE_TTL"
+          value = var.sticky_store_firestore_ttl
+        },
       ]
       regional-env = [{
         name  = "EVENT_INGRESS_URI"
@@ -142,10 +158,39 @@ resource "google_kms_key_ring_iam_binding" "signer-members" {
 
 data "google_client_openid_userinfo" "me" {}
 
-resource "google_monitoring_alert_policy" "anomalous-kms-access" {
-  # In the absence of data, incident will auto-close after an hour
+resource "google_monitoring_alert_policy" "github-rate-limit" {
   alert_strategy {
-    auto_close = "3600s"
+    auto_close = "3600s" // auto close after an hour.
+
+    notification_rate_limit {
+      period = "3600s" // re-alert hourly if condition still valid.
+    }
+  }
+
+  display_name = "GitHub API Rate Limit"
+  combiner     = "OR"
+
+  conditions {
+    display_name = "GitHub API rate limit exceeded"
+
+    condition_matched_log {
+      filter = <<EOT
+      resource.type="cloud_run_revision"
+      resource.labels.service_name="${var.name}"
+      textPayload=~"API rate limit exceeded"
+      EOT
+    }
+  }
+
+  notification_channels = var.notification_channels
+
+  enabled = "true"
+  project = var.project_id
+}
+
+resource "google_monitoring_alert_policy" "anomalous-kms-access" {
+  alert_strategy {
+    auto_close = "3600s" // auto close after an hour.
 
     notification_rate_limit {
       period = "3600s" // re-alert hourly if condition still valid.
@@ -206,4 +251,68 @@ resource "google_monitoring_alert_policy" "anomalous-kms-access" {
 
   enabled = "true"
   project = var.project_id
+}
+
+resource "google_logging_metric" "trust-policy-not-found" {
+  project = var.project_id
+  name    = "${var.name}-trust-policy-not-found"
+
+  filter = <<EOT
+  resource.type="cloud_run_revision"
+  resource.labels.service_name="${var.name}"
+  textPayload=~"negative cache hit"
+  -textPayload=~"negative cache hit for {octo-sts prober does-not-exist}"
+  EOT
+
+  metric_descriptor {
+    metric_kind = "DELTA"
+    value_type  = "INT64"
+    unit        = "1"
+
+    labels {
+      key         = "identity"
+      value_type  = "STRING"
+      description = "The trust policy identity that was not found"
+    }
+  }
+
+  label_extractors = {
+    "identity" = "REGEXP_EXTRACT(textPayload, \"negative cache hit for \\\\{\\\\S+ \\\\S+ (\\\\S+)\\\\}\")"
+  }
+}
+
+resource "google_monitoring_alert_policy" "trust-policy-not-found" {
+  project      = var.project_id
+  display_name = "Trust Policy Not Found (>200/hr)"
+  combiner     = "OR"
+
+  alert_strategy {
+    auto_close = "3600s"
+  }
+
+  conditions {
+    display_name = "Trust policy negative cache hits exceed 200/hr"
+
+    condition_threshold {
+      filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.trust-policy-not-found.name}\" AND resource.type=\"cloud_run_revision\""
+      comparison      = "COMPARISON_GT"
+      threshold_value = 200
+      duration        = "0s"
+
+      aggregations {
+        alignment_period     = "3600s"
+        per_series_aligner   = "ALIGN_SUM"
+        cross_series_reducer = "REDUCE_SUM"
+        group_by_fields      = ["metric.labels.identity"]
+      }
+    }
+  }
+
+  documentation {
+    content   = "Trust policy identity `$${metric.labels.identity}` has exceeded 200 negative cache hits in the last hour."
+    mime_type = "text/markdown"
+  }
+
+  notification_channels = var.notification_channels
+  enabled               = true
 }

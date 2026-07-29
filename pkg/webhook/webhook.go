@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v75/github"
+	"github.com/google/go-github/v88/github"
 	"github.com/hashicorp/go-multierror"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
@@ -45,6 +47,35 @@ type Validator struct {
 	WebhookSecret [][]byte
 
 	Organizations []string
+
+	// clients caches one client per installation ID so the transport's token is
+	// reused (~1h) instead of re-minted per event. Keyed on installation ID
+	// alone: IDs are globally unique and the webhook serves one App. Building a
+	// client is cheap (the token is minted lazily on first use), so clientsMu
+	// can guard the whole get-or-create.
+	clientsMu sync.Mutex
+	clients   *lru.Cache[int64, *github.Client]
+}
+
+// prActionsThatChangeFiles is the set of pull_request actions that can alter
+// the file diff (and therefore introduce or modify a trust policy). Every other
+// action (labeled, edited, assigned, review_requested, closed, ready_for_review,
+// …) leaves the diff untouched, so there is nothing new for us to validate — we
+// don't skip drafts, so draft PRs are already validated on opened/synchronize.
+var prActionsThatChangeFiles = sets.New("opened", "synchronize", "reopened")
+
+// installationClientCacheSize matches the app's other LRUs (e.g. ghinstall,
+// octosts); entries are tiny and least-recently-used installations evict first.
+const installationClientCacheSize = 200
+
+func isBotSender(sender *github.User) bool {
+	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
+}
+
+func isGitHubRateLimited(err error) bool {
+	var rateLimitErr *github.RateLimitError
+	var abuseRateLimitErr *github.AbuseRateLimitError
+	return errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr)
 }
 
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +109,18 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case *github.PushEvent:
 		cr, err = e.handlePush(ctx, event)
 	case *github.CheckSuiteEvent:
+		if isBotSender(event.GetSender()) {
+			log.Infof("skipping bot-triggered check_suite from %s", event.GetSender().GetLogin())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		cr, err = e.handleCheckSuite(ctx, event)
 	case *github.CheckRunEvent:
+		if isBotSender(event.GetSender()) {
+			log.Infof("skipping bot-triggered check_run from %s", event.GetSender().GetLogin())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		cr, err = e.handleCheckSuite(ctx, &fauxCheckSuite{event})
 	// TODO: CheckRun retry
 	default:
@@ -125,6 +166,37 @@ func (e *Validator) validatePayload(r *http.Request) ([]byte, error) {
 	return nil, errors.New("no matching secrets")
 }
 
+// clientForInstallation returns a cached (or freshly built) client for the
+// installation, reusing its token instead of minting one per event.
+func (e *Validator) clientForInstallation(installationID int64) (*github.Client, error) {
+	e.clientsMu.Lock()
+	defer e.clientsMu.Unlock()
+
+	if e.clients == nil {
+		cache, err := lru.New[int64, *github.Client](installationClientCacheSize)
+		if err != nil {
+			return nil, err
+		}
+		e.clients = cache
+	}
+	if client, ok := e.clients.Get(installationID); ok {
+		return client, nil
+	}
+
+	opts := []github.ClientOptionsFunc{
+		github.WithTransport(ghinstallation.NewFromAppsTransport(e.Transport, installationID)),
+	}
+	if e.Transport.BaseURL != "" {
+		opts = append(opts, github.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL))
+	}
+	client, err := github.NewClient(opts...)
+	if err != nil {
+		return nil, err
+	}
+	e.clients.Add(installationID, client)
+	return client, nil
+}
+
 func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner, repo, sha string, files []string) (*github.CheckRun, error) {
 	log := clog.FromContext(ctx)
 
@@ -134,6 +206,11 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	}
 
 	err := validatePolicies(ctx, client, owner, repo, sha, files)
+	// If we were rate-limited, bail out immediately without creating a
+	// CheckRun — the API call would likely fail too.
+	if isGitHubRateLimited(err) {
+		return nil, err
+	}
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
 	// failure.
@@ -177,6 +254,10 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 		resp, _, _, err := client.Repositories.GetContents(ctx, owner, repo, f, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			log.Infof("failed to get content for: %v", err)
+			if isGitHubRateLimited(err) {
+				log.Warnf("rate-limited, aborting remaining policy validations")
+				return fmt.Errorf("%s: %w", f, err)
+			}
 			merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
 			continue
 		}
@@ -228,28 +309,27 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		return nil, nil
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
-	})
-	if e.Transport.BaseURL != "" {
-		var err error
-		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
-		if err != nil {
-			return nil, err
-		}
-	}
-
-	// Check diff
-	// TODO: Pagination?
-	resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
+	client, err := e.clientForInstallation(installationID)
 	if err != nil {
 		return nil, err
 	}
+
 	var files []string
-	for _, file := range resp.Files {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
-			if file.GetStatus() != "removed" {
-				files = append(files, file.GetFilename())
+
+	// GitHub push payloads include up to 20 commits. When not truncated,
+	// use the payload directly to avoid a Compare API call.
+	if len(event.Commits) < 20 {
+		files = e.filesFromPushEvent(event)
+	} else {
+		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
+		if err != nil {
+			return nil, err
+		}
+		for _, file := range resp.Files {
+			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+				if file.GetStatus() != "removed" {
+					files = append(files, file.GetFilename())
+				}
 			}
 		}
 	}
@@ -282,15 +362,17 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, nil
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
-	})
-	if e.Transport.BaseURL != "" {
-		var err error
-		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
-		if err != nil {
-			return nil, err
-		}
+	// Only actions that can change the PR's file diff can introduce or modify
+	// a trust policy. Skipping the rest avoids a ListFiles call (and its token
+	// mint) on the ~99% of PR events that can't affect policy.
+	if !prActionsThatChangeFiles.Has(pr.GetAction()) {
+		log.Infof("skipping pull_request action %q: cannot change file diff", pr.GetAction())
+		return nil, nil
+	}
+
+	client, err := e.clientForInstallation(installationID)
+	if err != nil {
+		return nil, err
 	}
 
 	// Check diff
@@ -344,19 +426,28 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		return nil, nil
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: ghinstallation.NewFromAppsTransport(e.Transport, installationID),
-	})
-	if e.Transport.BaseURL != "" {
-		var err error
-		client, err = client.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL)
-		if err != nil {
-			return nil, err
-		}
+	client, err := e.clientForInstallation(installationID)
+	if err != nil {
+		return nil, err
 	}
 
 	var files []string
 	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
+		// New non-default branch: skip if there are no associated PRs.
+		// A feature branch points at a commit already present in the
+		// repository and doesn't need a full directory scan. This
+		// avoids reading every policy file (O(N) API calls) on every
+		// new-branch event.
+		//
+		// We still process the default branch (initial commit) and
+		// any branch with associated PRs, since those may introduce
+		// new or modified policy files.
+		defaultBranch := cs.GetRepo().GetDefaultBranch()
+		headBranch := cs.GetCheckSuite().GetHeadBranch()
+		if headBranch != defaultBranch && len(cs.GetCheckSuite().PullRequests) == 0 {
+			log.Infof("skipping new non-default branch with no PRs")
+			return nil, nil
+		}
 		_, dirContents, _, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			return nil, err
@@ -418,4 +509,23 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 		}
 	}
 	return true
+}
+
+func (e *Validator) filterSTSFiles(files []string) []string {
+	var filtered []string
+	for _, file := range files {
+		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file); err == nil && ok {
+			filtered = append(filtered, file)
+		}
+	}
+	return filtered
+}
+
+func (e *Validator) filesFromPushEvent(event *github.PushEvent) []string {
+	var files []string //nolint:prealloc // size depends on file content, not commit count
+	for _, commit := range event.Commits {
+		files = append(files, e.filterSTSFiles(commit.Added)...)
+		files = append(files, e.filterSTSFiles(commit.Modified)...)
+	}
+	return files
 }

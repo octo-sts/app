@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v75/github"
+	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -47,8 +48,15 @@ type fakeInstallMgr struct {
 	atr *ghinstallation.AppsTransport
 }
 
-func (f *fakeInstallMgr) Get(_ context.Context, _ string) (*ghinstallation.AppsTransport, int64, error) {
+func (f *fakeInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
 	return f.atr, 1234, nil
+}
+
+func (f *fakeInstallMgr) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	if id == 1234 {
+		return f.atr, 1234, nil
+	}
+	return nil, 0, status.Errorf(codes.NotFound, "not found")
 }
 
 var _ ghinstall.Manager = (*fakeInstallMgr)(nil)
@@ -137,7 +145,8 @@ func TestExchange(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im: &fakeInstallMgr{atr: atr},
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
 	}
 	for _, tc := range []struct {
 		name string
@@ -223,7 +232,8 @@ func TestExchangeValidation(t *testing.T) {
 	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 	sts := &sts{
-		im: &fakeInstallMgr{atr: atr},
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
 	}
 
 	tests := []struct {
@@ -363,7 +373,8 @@ func TestExchangeRateLimit(t *testing.T) {
 			ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
 
 			s := &sts{
-				im: &fakeInstallMgr{atr: atr},
+				rrm:      &fakeInstallMgr{atr: atr},
+				appCount: 1,
 			}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
@@ -380,6 +391,356 @@ func TestExchangeRateLimit(t *testing.T) {
 				t.Errorf("expected code ResourceExhausted, got %v", st.Code())
 			}
 		})
+	}
+}
+
+// failInstallMgr is a Manager whose Get always returns an error.
+type failInstallMgr struct{}
+
+func (f *failInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	return nil, 0, fmt.Errorf("not installed")
+}
+
+func (f *failInstallMgr) GetByInstallation(_ context.Context, _ string, _ int64) (*ghinstallation.AppsTransport, int64, error) {
+	return nil, 0, fmt.Errorf("not installed")
+}
+
+var _ ghinstall.Manager = (*failInstallMgr)(nil)
+
+// sequentialInstallMgr returns transports in order on successive Get calls.
+// Used to test retry behaviour where the first app is rate-limited and the
+// second succeeds.
+type sequentialInstallMgr struct {
+	transports []*ghinstallation.AppsTransport
+	idx        atomic.Int32
+}
+
+func (s *sequentialInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	i := int(s.idx.Add(1) - 1)
+	if i >= len(s.transports) {
+		return nil, 0, fmt.Errorf("no more transports")
+	}
+	return s.transports[i], 1234, nil
+}
+
+func (s *sequentialInstallMgr) GetByInstallation(ctx context.Context, owner string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	return s.Get(ctx, owner, "", "")
+}
+
+var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
+
+// TestPolicyReadUsesRoundRobin verifies that trust policy reads use the rrm
+// transport. rrm points to a server with the policy file. Exchange succeeds
+// only if rrm was used for the read.
+func TestPolicyReadUsesRoundRobin(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	rrmAtr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		rrm:      &fakeInstallMgr{atr: rrmAtr},
+		appCount: 2,
+	}
+	// Trust policy lives on the rrm server.
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v — policy read did not use rrm transport", err)
+	}
+}
+
+// TestPolicyReadRetriesOnRateLimit verifies that when the first rrm app is
+// rate-limited, the retry loop picks the next app and the exchange succeeds.
+func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	workingAtr := newGitHubClient(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		rrm: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{rateLimitedAtr, workingAtr},
+		},
+		appCount: 2,
+	}
+	// First rrm.Get returns the rate-limited transport; retry picks the
+	// working transport. Exchange should succeed.
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err != nil {
+		t.Fatalf("Exchange failed: %v — rate-limit retry did not recover", err)
+	}
+}
+
+// TestPolicyReadAllRateLimitedReturnsError verifies that when every app is
+// rate-limited the error is surfaced to the caller (not retried indefinitely).
+func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	rl1 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	rl2 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusTooManyRequests))
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	s := &sts{
+		rrm: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{rl1, rl2},
+		},
+		appCount: 2,
+	}
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scope:    "org/repo",
+	})
+	if err == nil {
+		t.Fatal("expected error, got nil — all apps are rate-limited")
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		t.Fatalf("expected gRPC status error, got %T", err)
+	}
+	if st.Code() != codes.ResourceExhausted {
+		t.Errorf("expected code ResourceExhausted, got %v", st.Code())
+	}
+}
+
+// newFakeGitHubNotFoundCounter returns a fake GitHub server that returns 404
+// for content requests and counts how many times the endpoint was hit.
+func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
+	var counter atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      github.Ptr(int64(1234)),
+			Account: &github.User{Login: github.Ptr("org")},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		counter.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(github.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusNotFound},
+			Message:  "Not Found",
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}, &counter
+}
+
+func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "does-not-exist"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	gh, counter := newFakeGitHubNotFoundCounter()
+	atr := newGitHubClient(t, gh)
+
+	s := &sts{
+		rrm:      &fakeInstallMgr{atr: atr},
+		appCount: 1,
+	}
+
+	otp := &OrgTrustPolicy{}
+	otp.Repositories = []string{"repo"}
+
+	// First call: should hit GitHub and get a 404.
+	err := s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	if err == nil {
+		t.Fatal("expected NotFound error on first call, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Fatalf("expected 1 GitHub API call, got %d", got)
+	}
+
+	// Second call: should be served from negative cache, no GitHub API call.
+	err = s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	if err == nil {
+		t.Fatal("expected NotFound error on second call, got nil")
+	}
+	st, ok = status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound, got %v", err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Fatalf("expected still 1 GitHub API call after negative cache hit, got %d", got)
+	}
+}
+
+func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "cached-missing"}
+	trustPolicies.Add(key, negativeCacheConst)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	s := &sts{
+		rrm:      &failInstallMgr{},
+		appCount: 1,
+	}
+
+	_, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject")
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.NotFound {
+		t.Fatalf("expected gRPC NotFound from negative cache, got %v (managers should not have been called)", err)
+	}
+}
+
+func TestRateLimitServesStaleCache(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	workingGH := newFakeGitHub()
+	workingAtr := newGitHubClient(t, workingGH)
+
+	s := &sts{
+		rrm:      &fakeInstallMgr{atr: workingAtr},
+		appCount: 1,
+	}
+
+	// First call: populates both caches.
+	otp := &OrgTrustPolicy{}
+	otp.Repositories = []string{"repo"}
+	err := s.lookupTrustPolicy(ctx, workingAtr, 1234, key, &otp.TrustPolicy)
+	if err != nil {
+		t.Fatalf("first lookup failed: %v", err)
+	}
+
+	// Expire the primary cache to force a GitHub call on next lookup.
+	trustPolicies.Remove(key)
+
+	// Verify the stale cache was populated.
+	if _, ok := staleTrustPolicies.Get(key); !ok {
+		t.Fatal("stale cache should have been populated after successful fetch")
+	}
+
+	// Switch to a rate-limited GitHub backend.
+	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	s.rrm = &fakeInstallMgr{atr: rateLimitedAtr}
+
+	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
+	otp2 := &OrgTrustPolicy{}
+	otp2.Repositories = []string{"repo"}
+	err = s.lookupTrustPolicy(ctx, rateLimitedAtr, 1234, key, &otp2.TrustPolicy)
+	if err != nil {
+		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
 	}
 }
 
@@ -463,4 +824,34 @@ func generateTLS(tmpl *x509.Certificate) (*tls.Config, error) {
 		RootCAs:            pool,
 		InsecureSkipVerify: true,
 	}, nil
+}
+
+func TestExtractUserAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{{
+		name: "no metadata",
+		ctx:  context.Background(),
+		want: "",
+	}, {
+		name: "metadata without user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"other": []string{"value"}}),
+		want: "",
+	}, {
+		name: "single user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0"}}),
+		want: "octo-sts/1.0",
+	}, {
+		name: "multiple user-agent values joined",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0", "grpc-go/1.0"}}),
+		want: "octo-sts/1.0 grpc-go/1.0",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractUserAgent(tc.ctx); got != tc.want {
+				t.Errorf("extractUserAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

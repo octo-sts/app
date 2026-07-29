@@ -1,7 +1,7 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: terraform-lint-validate
+name: terraform-validate
 
 on:
   push:
@@ -29,22 +29,30 @@ jobs:
 
     steps:
       - name: Harden Runner
-        uses: step-security/harden-runner@fa2e9d605c4eeb9fcad4c99c224cee0c6c7f3594 # v2.16.0
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
-          egress-policy: audit
+          egress-policy: block
+          allowed-endpoints: >
+            *.blob.core.windows.net:443
+            *.githubapp.com:443
+            checkpoint-api.hashicorp.com:443
+            github.com:443
+            registry.terraform.io:443
+            release-assets.githubusercontent.com:443
+            releases.hashicorp.com:443
 
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: chainguard-dev/actions/setup-terraform@7440e20e3e0bb180a2f6e330bcd53504e2ac8980 # v1.6.8
+      - uses: chainguard-dev/actions/setup-terraform@fabe4ed3f66ceb5f8ec86ed7ae6d0c945ca362fb # v1.6.28
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
 
-      - run: terraform fmt -check -recursive
-
-      - run: cp "$GITHUB_WORKSPACE/.github/testdata/backend_override.tf" "$GITHUB_WORKSPACE/${{ matrix.terraform-dir }}"
+      - env:
+          TERRAFORM_DIR: ${{ matrix.terraform-dir }}
+        run: cp "$GITHUB_WORKSPACE/.github/testdata/backend_override.tf" "$GITHUB_WORKSPACE/${TERRAFORM_DIR}"
       - working-directory: ${{ matrix.terraform-dir }}
         run: |
           terraform init

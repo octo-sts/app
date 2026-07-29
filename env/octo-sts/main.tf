@@ -11,7 +11,7 @@ import {
 // Create a network with several regional subnets
 module "networking" {
   source  = "chainguard-dev/common/infra//modules/networking"
-  version = "1.0.1"
+  version = "1.0.2"
 
   team = "developer-platform"
 
@@ -72,6 +72,8 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_apps           = var.github_apps
-  notification_channels = local.notification_channels
+  github_apps                = var.github_apps
+  notification_channels      = local.notification_channels
+  sticky_store               = "firestore"
+  sticky_store_firestore_ttl = "1h"
 }
