@@ -18,5 +18,8 @@ func GetSecret(ctx context.Context, secretmanager *secretmanager.Client, keyID s
 	if err != nil {
 		return nil, fmt.Errorf("error fetching secret %s: %w", keyID, err)
 	}
-	return resp.Payload.Data, nil
+	if resp.GetPayload() == nil {
+		return nil, fmt.Errorf("secret %s has no payload", keyID)
+	}
+	return resp.GetPayload().GetData(), nil
 }

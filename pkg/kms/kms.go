@@ -6,6 +6,7 @@ package kms
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -18,8 +19,11 @@ const (
 	GCP = "gcp"
 )
 
+// KMS is a JWT signer backed by a cloud KMS. Callers should Close it at
+// shutdown to release any underlying client connections.
 type KMS interface {
 	ghinstallation.Signer
+	io.Closer
 }
 
 func NewKMS(ctx context.Context, provider, kmsKey string) (KMS, error) {

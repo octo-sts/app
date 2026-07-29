@@ -13,9 +13,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
-	smithy "github.com/aws/smithy-go"
 	"github.com/chainguard-dev/clog"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/octo-sts/app/pkg/internal/awserr"
 )
 
 type signingMethodAWS struct {
@@ -40,7 +40,7 @@ func (s *signingMethodAWS) Sign(signingString string, ikey interface{}) (string,
 	})
 	if err != nil {
 		clog.ErrorContextf(s.ctx, "kms Sign %s: %v", key, err)
-		return "", fmt.Errorf("KMS sign: %w", sanitizeAWSError(err))
+		return "", fmt.Errorf("KMS sign: %w", awserr.Sanitize(err))
 	}
 	return base64.RawURLEncoding.EncodeToString(resp.Signature), nil
 }
@@ -69,21 +69,16 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 	}, nil
 }
 
-// sanitizeAWSError replaces an AWS SDK error with one containing only the
-// error code, stripping the message which may contain resource ARNs and AWS
-// account identifiers.
-func sanitizeAWSError(err error) error {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
-		return fmt.Errorf("%s", apiErr.ErrorCode()) //nolint:err113
-	}
-	return err
-}
-
 func (p *Provider) Sign(claims jwt.Claims) (string, error) {
 	method := &signingMethodAWS{
 		ctx:    p.ctx,
 		client: p.client,
 	}
 	return jwt.NewWithClaims(method, claims).SignedString(p.key)
+}
+
+// Close implements the kms.KMS interface. The AWS KMS client uses pooled HTTP
+// connections that require no explicit cleanup, so this is a no-op.
+func (p *Provider) Close() error {
+	return nil
 }

@@ -11,7 +11,6 @@ import (
 
 	kms "cloud.google.com/go/kms/apiv1"
 	"cloud.google.com/go/kms/apiv1/kmspb"
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -68,17 +67,16 @@ func NewProviderWithClient(ctx context.Context, client *kms.KeyManagementClient,
 	}, nil
 }
 
-// New creates a new GCP KMS signer.
-//
-// Deprecated: Use NewProvider or NewProviderWithClient instead.
-func New(ctx context.Context, client *kms.KeyManagementClient, key string) (ghinstallation.Signer, error) {
-	return NewProviderWithClient(ctx, client, key)
-}
-
 func (p *Provider) Sign(claims jwt.Claims) (string, error) {
 	method := &signingMethodGCP{
 		ctx:    p.ctx,
 		client: p.client,
 	}
 	return jwt.NewWithClaims(method, claims).SignedString(p.key)
+}
+
+// Close releases the underlying KMS client's gRPC connection. It implements
+// the kms.KMS interface so callers can defer cleanup at shutdown.
+func (p *Provider) Close() error {
+	return p.client.Close()
 }

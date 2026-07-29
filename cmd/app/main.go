@@ -78,6 +78,7 @@ func main() {
 			if err != nil {
 				log.Panicf("could not create kms client for app %d: %v", appID, err)
 			}
+			defer kmsClient.Close() //nolint:errcheck // released at process shutdown
 		}
 		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, kmsClient, quotaStore)
 		if err != nil {

@@ -68,6 +68,14 @@ func TestFailsToFetchSecretWithInvalidKeyID(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestFailsWhenPayloadIsNil(t *testing.T) {
+	ctx := context.Background()
+	client := setupFakeSecretManagerClient(t)
+
+	_, err := GetSecret(ctx, client, "projects/foo/secrets/no-payload/versions/latest")
+	assert.ErrorContains(t, err, "has no payload")
+}
+
 // fakeSecretManager implements the SecretManagerServiceServer interface.
 // By embedding UnimplementedSecretManagerServiceServer, we only need to
 // implement the methods we actually use in tests.
@@ -76,12 +84,16 @@ type fakeSecretManager struct {
 }
 
 func (f fakeSecretManager) AccessSecretVersion(_ context.Context, request *secretmanagerpb.AccessSecretVersionRequest) (*secretmanagerpb.AccessSecretVersionResponse, error) {
-	if request.Name == "projects/foo/secrets/bar/versions/latest" {
+	switch request.Name {
+	case "projects/foo/secrets/bar/versions/latest":
 		return &secretmanagerpb.AccessSecretVersionResponse{
 			Payload: &secretmanagerpb.SecretPayload{
 				Data: []byte("fake-secret-data"),
 			},
 		}, nil
+	case "projects/foo/secrets/no-payload/versions/latest":
+		// Successful response with a nil payload.
+		return &secretmanagerpb.AccessSecretVersionResponse{}, nil
 	}
 	return nil, errors.New("not found")
 }
