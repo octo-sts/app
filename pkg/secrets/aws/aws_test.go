@@ -52,7 +52,39 @@ func TestGetSecret_SecretBinary(t *testing.T) {
 func TestGetSecret_BothFieldsNil_ReturnsError(t *testing.T) {
 	client := newTestSMClient(t, map[string]any{})
 
-	_, err := GetSecret(context.Background(), client, "arn:aws:secretsmanager:us-east-1:123:secret:my-key")
+	keyID := "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-key"
+	_, err := GetSecret(context.Background(), client, keyID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "has no value")
+	// ARN and account ID must not appear in the error string.
+	assert.NotContains(t, err.Error(), keyID)
+	assert.NotContains(t, err.Error(), "123456789012")
+}
+
+func TestGetSecret_APIError_DoesNotLeakARN(t *testing.T) {
+	// Server returns a 403 with an error body that includes an ARN in the message.
+	sensitiveARN := "arn:aws:iam::123456789012:role/my-role"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-amz-json-1.1")
+		w.Header().Set("X-Amzn-Errortype", "AccessDeniedException")
+		w.WriteHeader(http.StatusForbidden)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"__type":  "AccessDeniedException",
+			"message": "User: " + sensitiveARN + " is not authorized",
+		})
+	}))
+	defer srv.Close()
+
+	client := awsSM.NewFromConfig(aws.Config{
+		Region:      "us-east-1",
+		Credentials: aws.AnonymousCredentials{},
+	}, func(o *awsSM.Options) {
+		o.BaseEndpoint = aws.String(srv.URL)
+	})
+
+	_, err := GetSecret(context.Background(), client, sensitiveARN)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "AccessDeniedException")
+	assert.NotContains(t, err.Error(), sensitiveARN)
+	assert.NotContains(t, err.Error(), "123456789012")
 }

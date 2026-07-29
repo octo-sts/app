@@ -13,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	smithy "github.com/aws/smithy-go"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -37,7 +38,7 @@ func (s *signingMethodAWS) Sign(signingString string, ikey interface{}) (string,
 		SigningAlgorithm: types.SigningAlgorithmSpecRsassaPkcs1V15Sha256,
 	})
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("KMS sign: %w", sanitizeAWSError(err))
 	}
 	return base64.RawURLEncoding.EncodeToString(resp.Signature), nil
 }
@@ -64,6 +65,17 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 		client: client,
 		key:    kmsKey,
 	}, nil
+}
+
+// sanitizeAWSError replaces an AWS SDK error with one containing only the
+// error code, stripping the message which may contain resource ARNs and AWS
+// account identifiers.
+func sanitizeAWSError(err error) error {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return fmt.Errorf("%s", apiErr.ErrorCode()) //nolint:err113
+	}
+	return err
 }
 
 func (p *Provider) Sign(claims jwt.Claims) (string, error) {
