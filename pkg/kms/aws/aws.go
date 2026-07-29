@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
 	smithy "github.com/aws/smithy-go"
+	"github.com/chainguard-dev/clog"
 	"github.com/golang-jwt/jwt/v4"
 )
 
@@ -38,6 +39,7 @@ func (s *signingMethodAWS) Sign(signingString string, ikey interface{}) (string,
 		SigningAlgorithm: types.SigningAlgorithmSpecRsassaPkcs1V15Sha256,
 	})
 	if err != nil {
+		clog.ErrorContextf(s.ctx, "kms Sign %s: %v", key, err)
 		return "", fmt.Errorf("KMS sign: %w", sanitizeAWSError(err))
 	}
 	return base64.RawURLEncoding.EncodeToString(resp.Signature), nil

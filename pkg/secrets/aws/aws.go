@@ -11,12 +11,17 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsSM "github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/aws/smithy-go"
+	"github.com/chainguard-dev/clog"
 )
 
 func GetSecret(ctx context.Context, manager *awsSM.Client, keyID string) ([]byte, error) {
 	req := awsSM.GetSecretValueInput{SecretId: aws.String(keyID)}
 	resp, err := manager.GetSecretValue(ctx, &req)
 	if err != nil {
+		// Log the full AWS error (including resource ARN) to the structured
+		// logger, which goes to Cloud Logging and is IAM-protected.  The
+		// returned error is sanitized so ARNs never propagate to callers.
+		clog.ErrorContextf(ctx, "secretsmanager GetSecretValue %s: %v", keyID, err)
 		return nil, fmt.Errorf("error fetching secret: %w", sanitizeAWSError(err))
 	}
 
