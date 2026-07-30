@@ -742,6 +742,12 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
 	}
+
+	// The stale hit should have seeded the primary cache so further
+	// exchanges during the rate-limit window skip the GitHub round-trip.
+	if _, ok := trustPolicies.Get(key); !ok {
+		t.Error("primary cache should be seeded after serving stale on rate limit")
+	}
 }
 
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
@@ -824,4 +830,34 @@ func generateTLS(tmpl *x509.Certificate) (*tls.Config, error) {
 		RootCAs:            pool,
 		InsecureSkipVerify: true,
 	}, nil
+}
+
+func TestExtractUserAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{{
+		name: "no metadata",
+		ctx:  context.Background(),
+		want: "",
+	}, {
+		name: "metadata without user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"other": []string{"value"}}),
+		want: "",
+	}, {
+		name: "single user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0"}}),
+		want: "octo-sts/1.0",
+	}, {
+		name: "multiple user-agent values joined",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0", "grpc-go/1.0"}}),
+		want: "octo-sts/1.0 grpc-go/1.0",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractUserAgent(tc.ctx); got != tc.want {
+				t.Errorf("extractUserAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }

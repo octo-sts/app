@@ -98,9 +98,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	e := Event{
-		Scope:    requestScope,
-		Identity: request.GetIdentity(),
-		Time:     time.Now(),
+		Scope:     requestScope,
+		Identity:  request.GetIdentity(),
+		Time:      time.Now(),
+		UserAgent: extractUserAgent(ctx),
 	}
 
 	if s.metrics {
@@ -422,6 +423,9 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			case http.StatusForbidden, http.StatusTooManyRequests:
 				if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 					clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
+					// Seed the primary cache so further exchanges during the
+					// rate-limit window hit it instead of re-probing GitHub.
+					trustPolicies.Add(tpKey, stale)
 					return stale, nil
 				}
 				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (%d) for %q", ghErr.Response.StatusCode, tpKey.identity)
@@ -452,4 +456,13 @@ func (s *sts) ExchangeRefreshToken(ctx context.Context, request *pboidc.Exchange
 
 func ptr[T any](in T) *T {
 	return &in
+}
+
+func extractUserAgent(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	ua := md.Get("user-agent")
+	return strings.Join(ua, " ")
 }
