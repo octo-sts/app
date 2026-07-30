@@ -41,11 +41,11 @@ jobs:
             release-assets.githubusercontent.com:443
             releases.hashicorp.com:443
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: chainguard-dev/actions/setup-terraform@f0be69916b439d0fcced2451b23d0f27cd46d545 # v1.6.26
+      - uses: chainguard-dev/actions/setup-terraform@fabe4ed3f66ceb5f8ec86ed7ae6d0c945ca362fb # v1.6.28
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
