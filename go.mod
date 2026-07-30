@@ -10,7 +10,7 @@ require (
 	cloud.google.com/go/secretmanager v1.21.0
 	github.com/aws/aws-sdk-go-v2 v1.43.0
 	github.com/aws/aws-sdk-go-v2/config v1.32.31
-	github.com/aws/aws-sdk-go-v2/service/kms v1.48.2
+	github.com/aws/aws-sdk-go-v2/service/kms v1.55.0
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.44.0
 	github.com/aws/smithy-go v1.27.5
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
