@@ -206,10 +206,12 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	}
 
 	err := validatePolicies(ctx, client, owner, repo, sha, files)
-	// If we were rate-limited, bail out immediately without creating a
-	// CheckRun — the API call would likely fail too.
+	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
+	// Returning an error would surface as a 5xx, which GitHub treats as a
+	// failed delivery and redelivers — amplifying load on the rate-limited API.
 	if isGitHubRateLimited(err) {
-		return nil, err
+		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, repo, sha)
+		return nil, nil
 	}
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
