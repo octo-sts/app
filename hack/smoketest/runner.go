@@ -11,7 +11,7 @@ import (
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"golang.org/x/oauth2"
 
 	"github.com/octo-sts/app/pkg/octosts"
@@ -128,7 +128,11 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		}
 	}()
 
-	ghc1 := newGitHubClient(ctx, token1)
+	ghc1, err := newGitHubClient(ctx, token1)
+	if err != nil {
+		result.Error = fmt.Sprintf("creating GitHub client: %v", err)
+		return result
+	}
 
 	branch, _, err := ghc1.Repositories.GetBranch(ctx, owner, repo, "main", 0)
 	if err != nil {
@@ -172,7 +176,11 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 			return result
 		}
 
-		ghcN := newGitHubClient(ctx, tokenN)
+		ghcN, err := newGitHubClient(ctx, tokenN)
+		if err != nil {
+			result.Error = fmt.Sprintf("creating GitHub client: %v", err)
+			return result
+		}
 		_, _, updateErr := ghcN.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
 			Status:     github.Ptr("completed"),
@@ -217,12 +225,14 @@ func exchangeToken(ctx context.Context, domain, scope, identity string) (string,
 	return res.AccessToken, nil
 }
 
-func newGitHubClient(ctx context.Context, accessToken string) *github.Client {
+func newGitHubClient(ctx context.Context, accessToken string) (*github.Client, error) {
 	return github.NewClient(
-		oauth2.NewClient(ctx,
-			oauth2.StaticTokenSource(&oauth2.Token{
-				AccessToken: accessToken,
-			}),
+		github.WithHTTPClient(
+			oauth2.NewClient(ctx,
+				oauth2.StaticTokenSource(&oauth2.Token{
+					AccessToken: accessToken,
+				}),
+			),
 		),
 	)
 }
@@ -236,13 +246,10 @@ func parseScope(scope string) (owner, repo string) {
 }
 
 func runVerifications(ctx context.Context, accessToken string, v *Verify) error {
-	ghc := github.NewClient(
-		oauth2.NewClient(ctx,
-			oauth2.StaticTokenSource(&oauth2.Token{
-				AccessToken: accessToken,
-			}),
-		),
-	)
+	ghc, err := newGitHubClient(ctx, accessToken)
+	if err != nil {
+		return fmt.Errorf("creating GitHub client: %w", err)
+	}
 
 	if v.ContentsRead != nil {
 		cr := v.ContentsRead

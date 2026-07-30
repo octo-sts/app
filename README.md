@@ -35,6 +35,8 @@ Here is a simple example that allows the GitHub actions workflows in
 interact with issues:
 
 ```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
 issuer: https://token.actions.githubusercontent.com
 subject: repo:chainguard-dev/foo:ref:refs/heads/main
 
@@ -47,6 +49,8 @@ The Trust Policy can also match the issuer, subject, and even custom claims with
 regular expressions. For example:
 
 ```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
 issuer: https://accounts.google.com
 subject_pattern: "[0-9]+"
 claim_pattern:
@@ -68,13 +72,8 @@ Chainguard email address to federate and read the repo contents.
 
 ##### VSCode
 
-We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml?tab=readme-ov-file):
-
-```json
-"yaml.schemas": {
-    "https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json": "/.github/chainguard/*"
-}
-```
+We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml?tab=readme-ov-file).
+This will read the `# yaml-language-server: $schema=...` header and provide code completion.
 
 ### Federating a token
 

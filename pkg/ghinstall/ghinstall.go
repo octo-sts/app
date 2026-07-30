@@ -6,13 +6,12 @@ package ghinstall
 import (
 	"context"
 	"fmt"
-	"net/http"
 	"sync/atomic"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 	"google.golang.org/grpc/codes"
@@ -92,15 +91,13 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 		return m.atr, v, nil
 	}
 
-	client := github.NewClient(&http.Client{
-		Transport: m.atr,
-	})
+	opts := []github.ClientOptionsFunc{github.WithTransport(m.atr)}
 	if m.baseURL != "" {
-		var eerr error
-		client, eerr = client.WithEnterpriseURLs(m.baseURL, m.baseURL)
-		if eerr != nil {
-			return nil, 0, fmt.Errorf("configuring enterprise URLs: %w", eerr)
-		}
+		opts = append(opts, github.WithEnterpriseURLs(m.baseURL, m.baseURL))
+	}
+	client, err := github.NewClient(opts...)
+	if err != nil {
+		return nil, 0, status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}
 	// Walk through the pages of installations looking for an organization
 	// matching owner.
@@ -111,7 +108,7 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 			PerPage: 100,
 		})
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, status.Errorf(codes.Internal, "listing installations: %v", err)
 		}
 
 		for _, install := range installs {

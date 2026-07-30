@@ -9,11 +9,15 @@ on:
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - '.github/dependabot.yaml'
+      - '.github/zizmor.yml'
   push:
     branches: ['main']
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'
+      - '.github/dependabot.yaml'
+      - '.github/zizmor.yml'
 
 permissions: {}
 
@@ -26,7 +30,7 @@ jobs:
       contents: read # Clone the repository
       security-events: write # Upload SARIF results to Code Scanning
     steps:
-      - uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411 # v2.19.4
+      - uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
         with:
           egress-policy: block
           allowed-endpoints: >
@@ -36,9 +40,9 @@ jobs:
             ghcr.io
 
       - name: Check out code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Run zizmor
-        uses: zizmorcore/zizmor-action@5f14fd08f7cf1cb1609c1e344975f152c7ee938d # v0.5.6
+        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1

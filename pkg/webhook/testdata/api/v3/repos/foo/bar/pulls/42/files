@@ -1,0 +1,10 @@
+[
+  {
+    "sha": "abc123",
+    "filename": ".github/chainguard/test.sts.yaml",
+    "status": "added",
+    "additions": 10,
+    "deletions": 0,
+    "changes": 10
+  }
+]

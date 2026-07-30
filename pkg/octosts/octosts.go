@@ -19,7 +19,7 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"google.golang.org/grpc/codes"
@@ -60,6 +60,7 @@ func NewSecurityTokenServiceServer(rrm ghinstall.Manager, sticky stickystore.Sto
 }
 
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
+var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
 type sts struct {
 	pboidc.UnimplementedSecurityTokenServiceServer
@@ -99,9 +100,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	e := Event{
-		Scope:    requestScope,
-		Identity: request.GetIdentity(),
-		Time:     time.Now(),
+		Scope:     requestScope,
+		Identity:  request.GetIdentity(),
+		Time:      time.Now(),
+		UserAgent: extractUserAgent(ctx),
 	}
 
 	if s.metrics {
@@ -406,15 +408,14 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		}
 	}()
 
-	client := github.NewClient(&http.Client{Transport: atr})
+	opts := []github.ClientOptionsFunc{github.WithTransport(atr)}
 	if s.baseURL != "" {
-		var eerr error
-		client, eerr = client.WithEnterpriseURLs(s.baseURL, s.baseURL)
-		if eerr != nil {
-			return "", status.Errorf(codes.Internal, "configuring enterprise URLs: %v", eerr)
-		}
+		opts = append(opts, github.WithEnterpriseURLs(s.baseURL, s.baseURL))
 	}
-
+	client, err := github.NewClient(opts...)
+	if err != nil {
+		return "", status.Errorf(codes.Internal, "creating GitHub client: %v", err)
+	}
 	file, _, _, err := client.Repositories.GetContents(ctx,
 		tpKey.owner, tpKey.repo,
 		fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
@@ -425,10 +426,12 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil {
 			switch ghErr.Response.StatusCode {
-			case http.StatusForbidden:
-				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (403) for %q", tpKey.identity)
-			case http.StatusTooManyRequests:
-				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (429) for %q", tpKey.identity)
+			case http.StatusForbidden, http.StatusTooManyRequests:
+				if stale, ok := staleTrustPolicies.Get(tpKey); ok {
+					clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
+					return stale, nil
+				}
+				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (%d) for %q", ghErr.Response.StatusCode, tpKey.identity)
 			case http.StatusNotFound:
 				trustPolicies.Add(tpKey, negativeCacheConst)
 			}
@@ -445,6 +448,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	if evicted := trustPolicies.Add(tpKey, raw); evicted {
 		clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
 	}
+	staleTrustPolicies.Add(tpKey, raw)
 	return raw, nil
 }
 
@@ -455,4 +459,13 @@ func (s *sts) ExchangeRefreshToken(ctx context.Context, request *pboidc.Exchange
 
 func ptr[T any](in T) *T {
 	return &in
+}
+
+func extractUserAgent(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	ua := md.Get("user-agent")
+	return strings.Join(ua, " ")
 }

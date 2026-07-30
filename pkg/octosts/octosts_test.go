@@ -35,7 +35,7 @@ import (
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-github/v84/github"
+	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -435,7 +435,11 @@ var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
 func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rrmAtr := newGitHubClient(t, newFakeGitHub())
@@ -481,7 +485,11 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
@@ -531,7 +539,11 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
 
 	ctx := context.Background()
 	rl1 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
@@ -685,6 +697,53 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	}
 }
 
+func TestRateLimitServesStaleCache(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	ctx := context.Background()
+	workingGH := newFakeGitHub()
+	workingAtr := newGitHubClient(t, workingGH)
+
+	s := &sts{
+		rrm:      &fakeInstallMgr{atr: workingAtr},
+		appCount: 1,
+	}
+
+	// First call: populates both caches.
+	otp := &OrgTrustPolicy{}
+	otp.Repositories = []string{"repo"}
+	err := s.lookupTrustPolicy(ctx, workingAtr, 1234, key, &otp.TrustPolicy)
+	if err != nil {
+		t.Fatalf("first lookup failed: %v", err)
+	}
+
+	// Expire the primary cache to force a GitHub call on next lookup.
+	trustPolicies.Remove(key)
+
+	// Verify the stale cache was populated.
+	if _, ok := staleTrustPolicies.Get(key); !ok {
+		t.Fatal("stale cache should have been populated after successful fetch")
+	}
+
+	// Switch to a rate-limited GitHub backend.
+	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	s.rrm = &fakeInstallMgr{atr: rateLimitedAtr}
+
+	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
+	otp2 := &OrgTrustPolicy{}
+	otp2.Repositories = []string{"repo"}
+	err = s.lookupTrustPolicy(ctx, rateLimitedAtr, 1234, key, &otp2.TrustPolicy)
+	if err != nil {
+		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
+	}
+}
+
 func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 
@@ -765,4 +824,34 @@ func generateTLS(tmpl *x509.Certificate) (*tls.Config, error) {
 		RootCAs:            pool,
 		InsecureSkipVerify: true,
 	}, nil
+}
+
+func TestExtractUserAgent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		want string
+	}{{
+		name: "no metadata",
+		ctx:  context.Background(),
+		want: "",
+	}, {
+		name: "metadata without user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"other": []string{"value"}}),
+		want: "",
+	}, {
+		name: "single user-agent",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0"}}),
+		want: "octo-sts/1.0",
+	}, {
+		name: "multiple user-agent values joined",
+		ctx:  metadata.NewIncomingContext(context.Background(), metadata.MD{"user-agent": []string{"octo-sts/1.0", "grpc-go/1.0"}}),
+		want: "octo-sts/1.0 grpc-go/1.0",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := extractUserAgent(tc.ctx); got != tc.want {
+				t.Errorf("extractUserAgent() = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
