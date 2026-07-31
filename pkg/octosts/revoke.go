@@ -7,11 +7,18 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 )
 
 // Revoke revokes a security token.
-func Revoke(ctx context.Context, tok string) error {
-	req, err := http.NewRequest(http.MethodDelete, "https://api.github.com/installation/token", nil)
+// baseURL overrides the GitHub API base URL for GHES; when empty,
+// the default https://api.github.com is used.
+func Revoke(ctx context.Context, tok, baseURL string) error {
+	u := "https://api.github.com/installation/token"
+	if baseURL != "" {
+		u = strings.TrimRight(baseURL, "/") + "/installation/token"
+	}
+	req, err := http.NewRequest(http.MethodDelete, u, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

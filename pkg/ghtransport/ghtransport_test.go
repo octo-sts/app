@@ -12,16 +12,22 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
 
+	gkms "cloud.google.com/go/kms/apiv1"
 	"github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/kms"
+	"github.com/octo-sts/app/pkg/kms/gcp"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestQuotaTapPopulatesStore(t *testing.T) {
@@ -162,6 +168,67 @@ func TestCertFile(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
+}
+
+func TestGitHubBaseURLPropagated(t *testing.T) {
+	ctx := context.Background()
+
+	testConfig := &envconfig.EnvConfig{
+		Port:                       8080,
+		AppIDs:                     []int64{12345678},
+		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		GitHubBaseURL:              "https://github.example.com/api/v3",
+		Metrics:                    true,
+	}
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := New(ctx, testConfig.AppIDs[0], "", testConfig, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+	assert.Equal(t, "https://github.example.com/api/v3", transport.BaseURL)
+}
+
+func TestGitHubBaseURLEmptyKeepsDefault(t *testing.T) {
+	ctx := context.Background()
+
+	testConfig := &envconfig.EnvConfig{
+		Port:                       8080,
+		AppIDs:                     []int64{12345678},
+		AppSecretCertificateEnvVar: generateTestCertificateString(),
+		GitHubBaseURL:              "",
+		Metrics:                    true,
+	}
+
+	kmsClient := generateKMSClient(ctx, t)
+	transport, err := New(ctx, testConfig.AppIDs[0], "", testConfig, kmsClient, nil)
+	assert.NoError(t, err)
+	assert.NotNil(t, transport)
+	// Default ghinstallation base URL when not overridden.
+	assert.Equal(t, "https://api.github.com", transport.BaseURL)
+}
+
+func generateKMSClient(ctx context.Context, t *testing.T) kms.KMS {
+	l, err := net.Listen("tcp", "localhost:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeServerAddr := l.Addr().String()
+
+	client, err := gkms.NewKeyManagementClient(ctx,
+		option.WithEndpoint(fakeServerAddr),
+		option.WithoutAuthentication(),
+		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	provider, err := gcp.NewProviderWithClient(ctx, client, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return provider
 }
 
 func createGCPKMSCredsFile(t *testing.T) string {

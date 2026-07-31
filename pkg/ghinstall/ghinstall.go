@@ -38,24 +38,40 @@ const defaultNegativeTTL = 5 * time.Minute
 
 type manager struct {
 	atr           *ghinstallation.AppsTransport
+	baseURL       string
 	cache         *lru.TwoQueueCache[string, int64]
 	negativeCache *expirablelru.LRU[string, bool]
 }
 
 // New creates a Manager backed by the given AppsTransport.
 func New(atr *ghinstallation.AppsTransport) (Manager, error) {
-	return NewWithNegativeTTL(atr, defaultNegativeTTL)
+	return NewWithOptions(atr, defaultNegativeTTL, "")
+}
+
+// NewWithBaseURL creates a Manager with a custom GitHub API base URL
+// (for GitHub Enterprise Server). When baseURL is empty, the default
+// https://api.github.com is used.
+func NewWithBaseURL(atr *ghinstallation.AppsTransport, baseURL string) (Manager, error) {
+	return NewWithOptions(atr, defaultNegativeTTL, baseURL)
 }
 
 // NewWithNegativeTTL creates a Manager with a configurable TTL for
 // negative (not-installed) cache entries.
 func NewWithNegativeTTL(atr *ghinstallation.AppsTransport, negativeTTL time.Duration) (Manager, error) {
+	return NewWithOptions(atr, negativeTTL, "")
+}
+
+// NewWithOptions creates a Manager with configurable negative-cache TTL and
+// GitHub API base URL (for GitHub Enterprise Server). When baseURL is empty,
+// the default https://api.github.com is used.
+func NewWithOptions(atr *ghinstallation.AppsTransport, negativeTTL time.Duration, baseURL string) (Manager, error) {
 	cache, err := lru.New2Q[string, int64](200)
 	if err != nil {
 		return nil, err
 	}
 	return &manager{
 		atr:           atr,
+		baseURL:       baseURL,
 		cache:         cache,
 		negativeCache: expirablelru.NewLRU[string, bool](200, nil, negativeTTL),
 	}, nil
@@ -75,7 +91,11 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 		return m.atr, v, nil
 	}
 
-	client, err := github.NewClient(github.WithTransport(m.atr))
+	opts := []github.ClientOptionsFunc{github.WithTransport(m.atr)}
+	if m.baseURL != "" {
+		opts = append(opts, github.WithEnterpriseURLs(m.baseURL, m.baseURL))
+	}
+	client, err := github.NewClient(opts...)
 	if err != nil {
 		return nil, 0, status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}

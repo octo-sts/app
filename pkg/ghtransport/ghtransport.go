@@ -76,32 +76,35 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 		base = &quotaTap{inner: base, store: quota}
 	}
 
+	var atr *ghinstallation.AppsTransport
+	var err error
 	switch {
 	case env.AppSecretCertificateEnvVar != "":
-		atr, err := ghinstallation.NewAppsTransport(base, appID, []byte(env.AppSecretCertificateEnvVar))
-
+		atr, err = ghinstallation.NewAppsTransport(base, appID, []byte(env.AppSecretCertificateEnvVar))
 		if err != nil {
 			return nil, err
 		}
-		return atr, nil
 
 	case env.AppSecretCertificateFile != "":
-		atr, err := ghinstallation.NewAppsTransportKeyFromFile(base, appID, env.AppSecretCertificateFile)
-
+		atr, err = ghinstallation.NewAppsTransportKeyFromFile(base, appID, env.AppSecretCertificateFile)
 		if err != nil {
 			return nil, err
 		}
-		return atr, nil
+
 	default:
 		if kmsKey == "" {
 			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
 		}
 
-		atr, err := ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(kmsClient))
+		atr, err = ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(kmsClient))
 		if err != nil {
 			return nil, err
 		}
-
-		return atr, nil
 	}
+
+	if env.GitHubBaseURL != "" {
+		atr.BaseURL = env.GitHubBaseURL
+	}
+
+	return atr, nil
 }
