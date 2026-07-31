@@ -795,10 +795,12 @@ func TestRoundRobinGetAll(t *testing.T) {
 	})
 
 	t.Run("no App serves the owner", func(t *testing.T) {
-		// This is the literal allow-all trigger for a caller like the trusted-
-		// issuers allowlist reader: every manager reports NotFound (translated
-		// by manager.GetAll into an empty, error-free result), so the
-		// aggregate must be a clean "no installations", not an error.
+		// Aggregate-only check: when every sub-manager's GetAll already
+		// reports (nil, nil) — as stubManager's zero value does directly,
+		// with no translation involved — the aggregate must still be a clean
+		// "no installations", not an error. This does NOT exercise the real
+		// manager.Get-returns-NotFound-so-manager.GetAll-translates-it path;
+		// see TestRoundRobinGetAllWithRealManagers for that.
 		rr := NewRoundRobin([]Manager{
 			&stubManager{},
 			&stubManager{},
@@ -876,5 +878,18 @@ func TestRoundRobinGetAllWithRealManagers(t *testing.T) {
 		if in.Transport == nil {
 			t.Errorf("[%d] Transport = nil", i)
 		}
+	}
+
+	// The literal allow-all trigger, end to end: no App serves this owner, so
+	// every real manager.Get returns NotFound, every manager.GetAll translates
+	// that to an empty error-free result, and the aggregate must be a clean
+	// "no installations" rather than an error. A caller that treats an error
+	// as "no allowlist applies" would be disabling the control on a failure.
+	none, err := rr.GetAll(context.Background(), "nobody-serves-this-org")
+	if err != nil {
+		t.Fatalf("GetAll(unserved owner) = %v, want nil — an unserved owner is not an error", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("GetAll(unserved owner) returned %d installations, want 0", len(none))
 	}
 }

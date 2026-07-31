@@ -66,6 +66,9 @@ type Manager interface {
 	// currently exists. An App uninstalled from an org keeps appearing here
 	// indefinitely; a newly-installed App stays invisible until any negative
 	// cache entry for it expires.
+	//
+	// Callers must test len(), not nil-ness: implementations differ in whether
+	// an empty result is a nil or a zero-length slice.
 	GetAll(ctx context.Context, owner string) ([]Installation, error)
 }
 
@@ -332,7 +335,8 @@ func (rr *roundRobin) GetAll(ctx context.Context, owner string) ([]Installation,
 
 	if len(errs) > 0 {
 		err := status.Errorf(codes.Unavailable, "enumerating installations for %q: %v", owner, errors.Join(errs...))
-		clog.WarnContextf(ctx, "GetAll: enumeration incomplete, issuer allowlist evaluation may be unreliable: %v", err)
+		clog.WarnContextf(ctx, "ghinstall: GetAll enumeration incomplete for %q: %d of %d managers failed; "+
+			"callers requiring exhaustiveness must treat this as unknown: %v", owner, len(errs), len(rr.managers), err)
 		return out, err
 	}
 	return out, nil
