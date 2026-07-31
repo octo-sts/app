@@ -9,8 +9,8 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/json"
 	"encoding/pem"
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -19,9 +19,11 @@ import (
 	"testing"
 	"time"
 
-	kms "cloud.google.com/go/kms/apiv1"
+	gkms "cloud.google.com/go/kms/apiv1"
 	"github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
+	"github.com/octo-sts/app/pkg/kms"
+	"github.com/octo-sts/app/pkg/kms/gcp"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/api/option"
 	"google.golang.org/grpc"
@@ -116,14 +118,18 @@ func TestGCPKMS(t *testing.T) {
 	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credsFile)
 
 	testConfig := &envconfig.EnvConfig{
-		Port:    8080,
-		AppIDs:  []int64{12345678, 87654321},
-		KMSKeys: []string{"test-kms-key-1", "test-kms-key-2"},
-		Metrics: true,
+		Port:        8080,
+		AppIDs:      []int64{12345678, 87654321},
+		KMSKeys:     []string{"test-kms-key-1", "test-kms-key-2"},
+		KMSProvider: "gcp",
+		Metrics:     true,
 	}
 
-	kmsClient := generateKMSClient(ctx, t)
 	for i, appID := range testConfig.AppIDs {
+		kmsClient, err := kms.NewKMS(ctx, testConfig.KMSProvider, testConfig.KMSKeys[i])
+		if err != nil {
+			t.Fatalf("Failed to create KMS: %s", err)
+		}
 		transport, err := New(ctx, appID, testConfig.KMSKeys[i], testConfig, kmsClient, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
@@ -140,9 +146,8 @@ func TestCertEnvVar(t *testing.T) {
 		Metrics:                    true,
 	}
 
-	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
+		transport, err := New(ctx, appID, "", testConfig, nil, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -158,9 +163,8 @@ func TestCertFile(t *testing.T) {
 		Metrics:                  true,
 	}
 
-	kmsClient := generateKMSClient(ctx, t)
 	for _, appID := range testConfig.AppIDs {
-		transport, err := New(ctx, appID, "", testConfig, kmsClient, nil)
+		transport, err := New(ctx, appID, "", testConfig, nil, nil)
 		assert.NoError(t, err)
 		assert.NotNil(t, transport)
 	}
@@ -203,14 +207,14 @@ func TestGitHubBaseURLEmptyKeepsDefault(t *testing.T) {
 	assert.Equal(t, "https://api.github.com", transport.BaseURL)
 }
 
-func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClient {
+func generateKMSClient(ctx context.Context, t *testing.T) kms.KMS {
 	l, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	fakeServerAddr := l.Addr().String()
 
-	client, err := kms.NewKeyManagementClient(ctx,
+	client, err := gkms.NewKeyManagementClient(ctx,
 		option.WithEndpoint(fakeServerAddr),
 		option.WithoutAuthentication(),
 		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
@@ -219,7 +223,12 @@ func generateKMSClient(ctx context.Context, t *testing.T) *kms.KeyManagementClie
 		t.Fatal(err)
 	}
 
-	return client
+	provider, err := gcp.NewProviderWithClient(ctx, client, "test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	return provider
 }
 
 func createGCPKMSCredsFile(t *testing.T) string {
@@ -228,12 +237,18 @@ func createGCPKMSCredsFile(t *testing.T) string {
 		t.Fatalf("Failed to create temporary file: %s", err)
 	}
 
-	jsonStr := fmt.Sprintf(`{
-        "type": "service_account",
-        "private_key": "%s"
-    }`, generateTestCertificateString())
+	// Create proper JSON with escaped private key
+	creds := map[string]interface{}{
+		"type":        "service_account",
+		"private_key": generateTestCertificateString(),
+	}
 
-	if _, err := tmpFile.Write([]byte(jsonStr)); err != nil {
+	jsonBytes, err := json.Marshal(creds)
+	if err != nil {
+		t.Fatalf("Failed to marshal JSON: %s", err)
+	}
+
+	if _, err := tmpFile.Write(jsonBytes); err != nil {
 		t.Fatalf("Failed to write to temporary file: %s", err)
 	}
 	if err := tmpFile.Close(); err != nil {

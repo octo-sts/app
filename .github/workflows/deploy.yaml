@@ -126,13 +126,13 @@ jobs:
           workload_identity_provider: "${{ steps.auth-config.outputs.workload_identity_provider }}"
           service_account: "${{ steps.auth-config.outputs.service_account }}"
 
-      - uses: "docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7" # v4.5.1
+      - uses: "docker/login-action@371161bbe7024a29a25c5e19bfcbc0804fe9ad2c" # v4.5.2
         with:
           username: "oauth2accesstoken"
           password: "${{ steps.auth.outputs.access_token }}"
           registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@fabe4ed3f66ceb5f8ec86ed7ae6d0c945ca362fb # v1.6.28
+      - uses: chainguard-dev/actions/setup-terraform@b2555de0cf9724fb9b49d050ff18bd1f49562ba7 # v1.6.29
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
