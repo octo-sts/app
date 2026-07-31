@@ -17,9 +17,12 @@ func TestNewErrorOnInvalidProvider(t *testing.T) {
 }
 
 func TestNewKMSWithValidProviders(t *testing.T) {
+	const akvKey = "https://vault-a.vault.azure.net/keys/signing-key"
+
 	testCases := []struct {
 		name     string
 		provider string
+		key      string
 		wantErr  bool
 	}{
 		{
@@ -43,6 +46,18 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			name:     "AKV provider",
+			provider: "akv",
+			key:      akvKey,
+			wantErr:  false,
+		},
+		{
+			name:     "AKV provider uppercase",
+			provider: "AKV",
+			key:      akvKey,
+			wantErr:  false,
+		},
+		{
 			name:     "Invalid provider",
 			provider: "invalid",
 			wantErr:  true,
@@ -51,7 +66,11 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			kms, err := NewKMS(context.Background(), tc.provider, "test-key")
+			key := tc.key
+			if key == "" {
+				key = "test-key"
+			}
+			kms, err := NewKMS(context.Background(), tc.provider, key)
 			if tc.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, kms)
@@ -62,6 +81,22 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, kms)
 			}
+		})
+	}
+}
+
+func TestNewKMSRejectsMalformedAKVKey(t *testing.T) {
+	// AKV parses the key identifier up front, so a bad value must surface as
+	// an error here rather than at first sign.
+	for _, key := range []string{
+		"signing-key",
+		"https://vault-a.vault.azure.net",
+		"arn:aws:kms:us-east-1:123:key/abcd",
+	} {
+		t.Run(key, func(t *testing.T) {
+			got, err := NewKMS(context.Background(), AKV, key)
+			assert.Error(t, err)
+			assert.Nil(t, got)
 		})
 	}
 }

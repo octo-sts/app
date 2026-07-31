@@ -1,7 +1,7 @@
-// Copyright 2024 Chainguard, Inc.
+// Copyright 2025 Chainguard, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-package azurekeyvault
+package akv
 
 import (
 	"context"
@@ -9,11 +9,14 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/url"
+	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys"
-	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/chainguard-dev/clog"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/octo-sts/app/pkg/internal/akverr"
 )
 
 const signatureAlg = azkeys.SignatureAlgorithmRS256
@@ -32,11 +35,8 @@ type keyRef struct {
 }
 
 type signingMethodAKV struct {
+	ctx    context.Context
 	client signerClient
-	// Storing a context on a struct is discouraged by Go, but the jwt
-	// SigningMethod interface has no parameter to pass one, so we carry it
-	// here to propagate shutdown cancellation to the sign call.
-	ctx context.Context
 }
 
 func (s *signingMethodAKV) Verify(string, string, interface{}) error {
@@ -60,7 +60,11 @@ func (s *signingMethodAKV) Sign(signingString string, ikey interface{}) (string,
 	}, nil)
 
 	if err != nil {
-		return "", err
+		// Log the full Azure error (which embeds the vault host, key name and
+		// response body) to the structured logger, which is IAM-protected. The
+		// returned error is sanitized so those identifiers never reach callers.
+		clog.ErrorContextf(s.ctx, "keyvault Sign %s: %v", ref.name, err)
+		return "", fmt.Errorf("keyvault sign: %w", akverr.Sanitize(err))
 	}
 
 	return base64.RawURLEncoding.EncodeToString(resp.Result), nil
@@ -68,21 +72,26 @@ func (s *signingMethodAKV) Sign(signingString string, ikey interface{}) (string,
 
 func (s *signingMethodAKV) Alg() string { return string(signatureAlg) }
 
-type akvSigner struct {
+type Provider struct {
+	ctx    context.Context
 	client signerClient
 	key    keyRef
-	// Storing a context on a struct is discouraged by Go, but the jwt
-	// SigningMethod interface has no parameter to pass one, so we carry it
-	// here to propagate shutdown cancellation to the sign call.
-	ctx context.Context
 }
 
-func (s *akvSigner) Sign(claims jwt.Claims) (string, error) {
-	method := &signingMethodAKV{client: s.client, ctx: s.ctx}
-	return jwt.NewWithClaims(method, claims).SignedString(s.key)
-}
+func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
+	u, err := url.Parse(kmsKey)
+	if err != nil || u.Scheme != "https" || u.Host == "" ||
+		!strings.HasPrefix(strings.ToLower(u.Path), "/keys/") {
+		return nil, fmt.Errorf("invalid Key Vault key identifier %q: want https://<vault>/keys/<name>[/<version>]", kmsKey)
+	}
 
-func New(ctx context.Context, vaultURL, keyName, keyVersion string) (ghinstallation.Signer, error) {
+	id := azkeys.ID(kmsKey)
+	if id.Name() == "" {
+		return nil, fmt.Errorf("invalid Key Vault key identifier %q: missing key name", kmsKey)
+	}
+
+	vaultURL := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 
 	if err != nil {
@@ -95,9 +104,16 @@ func New(ctx context.Context, vaultURL, keyName, keyVersion string) (ghinstallat
 		return nil, fmt.Errorf("could not create client: %w", err)
 	}
 
-	return &akvSigner{
+	return &Provider{
 		client: client,
-		key:    keyRef{name: keyName, version: keyVersion},
-		ctx:    ctx,
+		key:    keyRef{name: id.Name(), version: id.Version()},
+		ctx:    context.WithoutCancel(ctx),
 	}, nil
 }
+
+func (p *Provider) Sign(claims jwt.Claims) (string, error) {
+	method := &signingMethodAKV{client: p.client, ctx: p.ctx}
+	return jwt.NewWithClaims(method, claims).SignedString(p.key)
+}
+
+func (p *Provider) Close() error { return nil }

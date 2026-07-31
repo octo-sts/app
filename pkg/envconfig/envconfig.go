@@ -18,9 +18,6 @@ type EnvConfig struct {
 	AppIDs                     []int64  `envconfig:"GITHUB_APP_IDS" required:"true"`
 	AppSecretCertificateFile   string   `envconfig:"APP_SECRET_CERTIFICATE_FILE" required:"false"`
 	AppSecretCertificateEnvVar string   `envconfig:"APP_SECRET_CERTIFICATE_ENV_VAR" required:"false"`
-	AKVUrls                    []string `envconfig:"AKV_URLS" required:"false"`
-	AKVKeys                    []string `envconfig:"AKV_KEY_NAMES" required:"false"`
-	AKVKeyVersions             []string `envconfig:"AKV_KEY_VERSIONS" required:"false"`
 	Metrics                    bool     `envconfig:"METRICS" required:"false" default:"true"`
 	// QuotaFloorHard / QuotaFloorSoft tune the three-tier capacity-aware
 	// picker in pkg/ghinstall. Defaults target GitHub's default 15,000/hr
@@ -91,28 +88,12 @@ func BaseConfig() (*EnvConfig, error) {
 		sources++
 	}
 
-	if len(cfg.AKVKeys) > 0 {
-		sources++
-	}
-
 	if sources > 1 {
-		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR, AKV_KEY_NAMES may be set")
+		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
 	}
 
 	if len(cfg.KMSKeys) > 0 && len(cfg.KMSKeys) != len(cfg.AppIDs) {
 		return nil, fmt.Errorf("KMS_KEYS length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.KMSKeys), len(cfg.AppIDs))
-	}
-
-	if len(cfg.AKVKeys) > 0 && len(cfg.AKVKeys) != len(cfg.AppIDs) {
-		return nil, fmt.Errorf("AKV_KEY_NAMES length (%d) must match GITHUB_APP_IDS length (%d)", len(cfg.AKVKeys), len(cfg.AppIDs))
-	}
-
-	if len(cfg.AKVKeys) > 0 && len(cfg.AKVUrls) == 0 {
-		return nil, errors.New("AKV_KEY_NAMES is set but AKV_URLS is empty")
-	}
-
-	if len(cfg.AKVUrls) > 1 && len(cfg.AKVUrls) != len(cfg.AppIDs) {
-		return nil, fmt.Errorf("AKVUrls length (%d) must match GITHUB_APP_IDS length (%d) or be a single vault", len(cfg.AKVUrls), len(cfg.AppIDs))
 	}
 
 	if cfg.QuotaFloorHard < 0 || cfg.QuotaFloorSoft < 0 {
