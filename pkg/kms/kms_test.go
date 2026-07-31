@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNewErrorOnInvalidProvider(t *testing.T) {
@@ -24,6 +25,10 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 		provider string
 		key      string
 		wantErr  bool
+		// offlineConstruct marks providers whose client is built without
+		// contacting the cloud, so construction has no environmental reason
+		// to fail and the assertion can be unconditional.
+		offlineConstruct bool
 	}{
 		{
 			name:     "AWS provider",
@@ -46,16 +51,18 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 			wantErr:  false,
 		},
 		{
-			name:     "AKV provider",
-			provider: "akv",
-			key:      akvKey,
-			wantErr:  false,
+			name:             "AKV provider",
+			provider:         "akv",
+			key:              akvKey,
+			wantErr:          false,
+			offlineConstruct: true,
 		},
 		{
-			name:     "AKV provider uppercase",
-			provider: "AKV",
-			key:      akvKey,
-			wantErr:  false,
+			name:             "AKV provider uppercase",
+			provider:         "AKV",
+			key:              akvKey,
+			wantErr:          false,
+			offlineConstruct: true,
 		},
 		{
 			name:     "Invalid provider",
@@ -74,13 +81,26 @@ func TestNewKMSWithValidProviders(t *testing.T) {
 			if tc.wantErr {
 				assert.Error(t, err)
 				assert.Nil(t, kms)
-			} else {
-				if err != nil {
-					t.Skipf("Skipping test due to missing credentials or connectivity: %v", err)
-				}
-				assert.NoError(t, err)
-				assert.NotNil(t, kms)
+				return
 			}
+
+			// A routing regression must never be mistaken for a missing
+			// credential: if the factory stopped dispatching this provider,
+			// fail loudly instead of skipping.
+			if err != nil {
+				require.NotContains(t, err.Error(), "unsupported kms provider",
+					"provider %q is supported but was not routed by NewKMS", tc.provider)
+			}
+
+			// Providers that build their client offline have no environmental
+			// excuse, so assert unconditionally. The rest may legitimately fail
+			// in a test environment without cloud credentials.
+			if !tc.offlineConstruct && err != nil {
+				t.Skipf("Skipping test due to missing credentials or connectivity: %v", err)
+			}
+
+			require.NoError(t, err)
+			assert.NotNil(t, kms)
 		})
 	}
 }

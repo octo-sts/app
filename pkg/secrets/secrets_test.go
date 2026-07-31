@@ -5,8 +5,11 @@ package secrets
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/octo-sts/app/pkg/secrets/akv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,11 +105,20 @@ func TestNewSecretProvider_AKVMultipleSecrets(t *testing.T) {
 	})
 
 	t.Run("tolerates whitespace between entries", func(t *testing.T) {
+		// Construction must agree with retrieval: cmd/webhook splits the same
+		// value and passes each entry to GetSecret, so accepting a padded entry
+		// here while rejecting it there would crash the webhook at startup.
 		t.Setenv("GITHUB_WEBHOOK_SECRET", vault+"/secrets/current, "+vault+"/secrets/previous")
 
 		sp, err := NewSecretProvider(ctx, "akv")
 		require.NoError(t, err)
 		assert.NotNil(t, sp)
+
+		// Retrieval must accept the identical padded entry.
+		for _, name := range strings.Split(os.Getenv("GITHUB_WEBHOOK_SECRET"), ",") {
+			_, err := akv.ParseSecretID(strings.TrimSpace(name))
+			assert.NoError(t, err, "entry %q rejected at retrieval but accepted at construction", name)
+		}
 	})
 
 	t.Run("rejects secrets spread across vaults", func(t *testing.T) {
@@ -119,6 +131,12 @@ func TestNewSecretProvider_AKVMultipleSecrets(t *testing.T) {
 		require.Error(t, err)
 		assert.Nil(t, sp)
 		assert.Contains(t, err.Error(), "same vault")
+
+		// This error is surfaced at startup, so it must not name the vaults —
+		// that is the leak akverr.Sanitize exists to prevent.
+		assert.NotContains(t, err.Error(), "vault.azure.net")
+		assert.NotContains(t, err.Error(), "vault-a")
+		assert.NotContains(t, err.Error(), "vault-b")
 	})
 
 	t.Run("rejects when any entry is malformed", func(t *testing.T) {

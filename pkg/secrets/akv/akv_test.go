@@ -36,9 +36,14 @@ func (fakeCred) GetToken(context.Context, policy.TokenRequestOptions) (azcore.Ac
 // newTestClient points a real azsecrets client at a local test server, so the
 // SDK's request/response handling is exercised without reaching Azure. The
 // server uses TLS because Key Vault refuses to send credentials over plain HTTP.
-func newTestClient(t *testing.T, status int, body any) *azsecrets.Client {
+// gotPath, if non-nil, receives the request path the SDK actually built, so
+// tests can assert which secret and version were requested.
+func newTestClient(t *testing.T, status int, body any, gotPath *string) *azsecrets.Client {
 	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gotPath != nil {
+			*gotPath = r.URL.Path
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
@@ -58,29 +63,55 @@ func newTestClient(t *testing.T, status int, body any) *azsecrets.Client {
 }
 
 func TestGetSecretReturnsValue(t *testing.T) {
+	var gotPath string
 	client := newTestClient(t, http.StatusOK, map[string]string{
 		"value": "s3cr3t-webhook-value",
 		"id":    secretID + "/abc123",
-	})
+	}, &gotPath)
 
 	got, err := GetSecret(context.Background(), client, secretID)
 	require.NoError(t, err)
 	assert.Equal(t, []byte("s3cr3t-webhook-value"), got)
+
+	// An identifier with no version must request the secret with an empty
+	// version segment, so Key Vault resolves it to the current version.
+	assert.Equal(t, "/secrets/"+secretName+"/", gotPath)
 }
 
 func TestGetSecretWithExplicitVersion(t *testing.T) {
+	var gotPath string
 	client := newTestClient(t, http.StatusOK, map[string]string{
 		"value": "pinned-version-value",
 		"id":    secretID + "/abc123",
-	})
+	}, &gotPath)
 
 	got, err := GetSecret(context.Background(), client, secretID+"/abc123")
 	require.NoError(t, err)
 	assert.Equal(t, []byte("pinned-version-value"), got)
+
+	// A pinned version must be forwarded, not silently dropped in favour of
+	// the current version.
+	assert.Equal(t, "/secrets/"+secretName+"/abc123", gotPath)
+}
+
+func TestGetSecretTrimsWhitespace(t *testing.T) {
+	// cmd/webhook splits a comma-separated GITHUB_WEBHOOK_SECRET, so entries
+	// can arrive padded. Retrieval must accept exactly what validation accepts.
+	var gotPath string
+	client := newTestClient(t, http.StatusOK, map[string]string{
+		"value": "s3cr3t-webhook-value",
+		"id":    secretID,
+	}, &gotPath)
+
+	got, err := GetSecret(context.Background(), client, "  "+secretID+"  ")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("s3cr3t-webhook-value"), got)
+	// Padding must not bleed into the request path.
+	assert.Equal(t, "/secrets/"+secretName+"/", gotPath)
 }
 
 func TestGetSecretRejectsMalformedIdentifier(t *testing.T) {
-	client := newTestClient(t, http.StatusOK, map[string]string{"value": "unused"})
+	client := newTestClient(t, http.StatusOK, map[string]string{"value": "unused"}, nil)
 
 	// Each must produce an error, never a panic.
 	for _, keyID := range []string{
@@ -110,7 +141,7 @@ func TestGetSecretEmptyValue(t *testing.T) {
 	client := newTestClient(t, http.StatusOK, map[string]string{
 		"value": "",
 		"id":    secretID,
-	})
+	}, nil)
 
 	got, err := GetSecret(context.Background(), client, secretID)
 	assert.Nil(t, got)
@@ -124,7 +155,7 @@ func TestGetSecretSanitizesAzureError(t *testing.T) {
 			"code":    "SecretNotFound",
 			"message": "A secret with (name/id) " + secretName + " was not found in this key vault.",
 		},
-	})
+	}, nil)
 
 	got, err := GetSecret(context.Background(), client, secretID)
 	assert.Nil(t, got)
@@ -142,7 +173,7 @@ func TestGetSecretSanitizesAzureError(t *testing.T) {
 
 func TestGetSecretSanitizesServerError(t *testing.T) {
 	// A response with no Azure error code falls back to the HTTP status.
-	client := newTestClient(t, http.StatusForbidden, map[string]string{})
+	client := newTestClient(t, http.StatusForbidden, map[string]string{}, nil)
 
 	_, err := GetSecret(context.Background(), client, secretID)
 	require.Error(t, err)

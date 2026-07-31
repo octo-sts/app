@@ -94,7 +94,7 @@ func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, er
 			if vaultURL == "" {
 				vaultURL = v
 			} else if !strings.EqualFold(vaultURL, v) {
-				return nil, fmt.Errorf("all GITHUB_WEBHOOK_SECRET entries must be in the same vault: found %s and %s", vaultURL, v)
+				return nil, errors.New("all GITHUB_WEBHOOK_SECRET entries must be in the same vault")
 			}
 		}
 

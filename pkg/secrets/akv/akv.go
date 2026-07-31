@@ -36,6 +36,7 @@ func ParseSecretID(secretID string) (string, error) {
 }
 
 func GetSecret(ctx context.Context, client *azsecrets.Client, keyID string) ([]byte, error) {
+	keyID = strings.TrimSpace(keyID)
 	if _, err := ParseSecretID(keyID); err != nil {
 		return nil, err
 	}

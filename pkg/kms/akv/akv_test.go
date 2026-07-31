@@ -121,17 +121,26 @@ func TestSigningMethodSignBadKeyType(t *testing.T) {
 	}
 }
 
-func TestSigningMethodSignPropagatesError(t *testing.T) {
-	wantErr := errors.New("key vault boom")
-	fake := &fakeKV{err: wantErr}
+func TestSigningMethodSignSurfacesSanitizedError(t *testing.T) {
+	// The failure must surface, but the original error is replaced rather than
+	// wrapped: akverr.Sanitize fails closed so an unrecognised SDK error cannot
+	// leak the vault host or key name. The raw error still reaches clog.
+	original := errors.New("key vault boom for key github-app-signing-key")
+	fake := &fakeKV{err: original}
 	method := &signingMethodAKV{client: fake, ctx: context.Background()}
 
 	_, err := method.Sign("a.b", keyRef{name: "my-key"})
 	if err == nil {
-		t.Fatal("expected error to propagate from client.Sign, got nil")
+		t.Fatal("expected an error when client.Sign fails, got nil")
 	}
-	if !errors.Is(err, wantErr) {
-		t.Errorf("error = %v, want it to wrap %v", err, wantErr)
+	if errors.Is(err, original) {
+		t.Error("original error was propagated verbatim; it must be sanitized")
+	}
+	if strings.Contains(err.Error(), "github-app-signing-key") {
+		t.Errorf("sanitized error leaked the key name: %s", err)
+	}
+	if !strings.Contains(err.Error(), "keyvault sign") {
+		t.Errorf("error = %q, want it to identify the failing operation", err)
 	}
 }
 

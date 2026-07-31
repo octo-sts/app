@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -126,17 +128,79 @@ func TestSanitizeUnwrapsWrappedAzureError(t *testing.T) {
 	assertNoLeak(t, got.Error())
 }
 
-func TestSanitizeLeavesNonAzureErrorsUnchanged(t *testing.T) {
-	// Local failures carry no Azure response data and stay useful verbatim.
-	want := errors.New("invalid key reference type: string")
+func TestSanitizeFailsClosedOnUnrecognisedErrors(t *testing.T) {
+	// Sanitize is an allowlist. Anything it does not recognise is replaced
+	// rather than passed through, so a new SDK error type cannot start
+	// leaking silently.
+	original := errors.New("dial tcp acme-prod-vault.vault.azure.net:443: boom")
 
-	got := Sanitize(want)
-	if !errors.Is(got, want) {
-		t.Errorf("Sanitize() = %v, want the original error unchanged", got)
+	got := Sanitize(original)
+	if errors.Is(got, original) {
+		t.Error("unrecognised error was passed through; Sanitize must fail closed")
+	}
+	assertNoLeak(t, got.Error())
+}
+
+func TestSanitizeTransportErrors(t *testing.T) {
+	// A url.Error names the vault in BOTH its URL field and the error it
+	// wraps, so neither may be echoed.
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{
+			name: "dns failure",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://" + vaultHost + "/keys/" + keyName + "/sign",
+				Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+					Err: "no such host", Name: vaultHost,
+				}},
+			},
+			want: "keyvault dns resolution failed",
+		},
+		{
+			name: "timeout",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://" + vaultHost + "/keys/" + keyName + "/sign",
+				Err: &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+					Err: "i/o timeout", Name: vaultHost, IsTimeout: true,
+				}},
+			},
+			want: "keyvault request timed out",
+		},
+		{
+			name: "connection refused",
+			err: &url.Error{
+				Op:  "Post",
+				URL: "https://" + vaultHost + "/keys/" + keyName + "/sign",
+				Err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+			},
+			want: "keyvault transport error",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Guard the premise: the raw error really does name the vault.
+			if !strings.Contains(tc.err.Error(), vaultHost) {
+				t.Fatalf("premise failed: raw error does not contain the vault host: %s", tc.err)
+			}
+
+			got := Sanitize(tc.err)
+			if got.Error() != tc.want {
+				t.Errorf("Sanitize() = %q, want %q", got.Error(), tc.want)
+			}
+			assertNoLeak(t, got.Error())
+		})
 	}
 }
 
 func TestSanitizeNil(t *testing.T) {
+	// Callers must be able to write `return Sanitize(err)` without turning a
+	// success into a failure.
 	if got := Sanitize(nil); got != nil {
 		t.Errorf("Sanitize(nil) = %v, want nil", got)
 	}
