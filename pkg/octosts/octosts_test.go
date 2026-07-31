@@ -308,6 +308,13 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 	})
 	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		// Real GitHub sends this on a primary rate limit, and it is what makes
+		// go-github return a *github.RateLimitError rather than a bare
+		// *github.ErrorResponse. Without it this fake cannot reproduce the
+		// production classification path at all.
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
 		w.WriteHeader(statusCode)
 		json.NewEncoder(w).Encode(github.ErrorResponse{
 			Response: &http.Response{StatusCode: statusCode},

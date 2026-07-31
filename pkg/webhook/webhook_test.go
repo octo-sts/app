@@ -27,6 +27,8 @@ import (
 	"github.com/chainguard-dev/clog/slogtest"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+
+	"github.com/octo-sts/app/pkg/octosts"
 )
 
 func TestValidatePolicy(t *testing.T) {
@@ -1450,8 +1452,8 @@ func TestIsGitHubRateLimited(t *testing.T) {
 		want: false,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isGitHubRateLimited(tc.err); got != tc.want {
-				t.Errorf("isGitHubRateLimited() = %v, want %v", got, tc.want)
+			if got := octosts.IsGitHubRateLimited(tc.err); got != tc.want {
+				t.Errorf("IsGitHubRateLimited() = %v, want %v", got, tc.want)
 			}
 		})
 	}
