@@ -93,6 +93,28 @@ func TestBaseConfig(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			// Azure key identifiers are self-describing and travel in
+			// KMS_KEYS, so they are validated by the generic KMS rules.
+			name: "AKV keys supplied via KMS_KEYS",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"KMS_PROVIDER":   "akv",
+				"KMS_KEYS":       "https://vault-a.vault.azure.net/keys/key-1,https://vault-b.vault.azure.net/keys/key-2/v2",
+			},
+			wantErr: false,
+		},
+		{
+			name: "AKV keys length mismatch with app count",
+			envVars: map[string]string{
+				"PORT":           "8080",
+				"GITHUB_APP_IDS": "12345678,87654321",
+				"KMS_PROVIDER":   "akv",
+				"KMS_KEYS":       "https://vault-a.vault.azure.net/keys/key-1",
+			},
+			wantErr: true,
+		},
+		{
 			name: "Quota floors valid",
 			envVars: map[string]string{
 				"PORT":                     "8080",

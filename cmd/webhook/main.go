@@ -84,6 +84,7 @@ func main() {
 			log.Panicf("could not create secret provider: %v", err)
 		}
 		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
+			name = strings.TrimSpace(name)
 			val, err := secretsProvider.GetSecret(ctx, name)
 			if err != nil {
 				log.Panicf("error fetching webhook secret %s: %v", name, err)

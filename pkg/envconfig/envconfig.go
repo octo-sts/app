@@ -93,6 +93,7 @@ func BaseConfig() (*EnvConfig, error) {
 	if cfg.AppSecretCertificateEnvVar != "" {
 		sources++
 	}
+
 	if sources > 1 {
 		return nil, errors.New("only one of KMS_KEYS, APP_SECRET_CERTIFICATE_FILE, APP_SECRET_CERTIFICATE_ENV_VAR may be set")
 	}

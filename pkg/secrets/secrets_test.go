@@ -5,8 +5,11 @@ package secrets
 
 import (
 	"context"
+	"os"
+	"strings"
 	"testing"
 
+	"github.com/octo-sts/app/pkg/secrets/akv"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,4 +53,100 @@ func TestNewSecretProvider_RejectsUnsupportedProvider(t *testing.T) {
 	_, err := NewSecretProvider(ctx, "unknown-provider")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported")
+}
+
+func TestNewSecretProvider_AKV(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("valid secret identifier", func(t *testing.T) {
+		// The AKV vault URL is derived from the webhook secret identifier.
+		t.Setenv("GITHUB_WEBHOOK_SECRET", "https://vault-a.vault.azure.net/secrets/webhook-secret")
+
+		sp, err := NewSecretProvider(ctx, "akv")
+		require.NoError(t, err)
+		assert.NotNil(t, sp)
+	})
+
+	t.Run("normalizes provider casing", func(t *testing.T) {
+		t.Setenv("GITHUB_WEBHOOK_SECRET", "https://vault-a.vault.azure.net/secrets/webhook-secret")
+
+		sp, err := NewSecretProvider(ctx, "AKV")
+		require.NoError(t, err)
+		assert.NotNil(t, sp)
+	})
+
+	t.Run("rejects malformed secret identifier", func(t *testing.T) {
+		for _, secret := range []string{
+			"webhook-secret",                             // bare name
+			"https://vault-a.vault.azure.net",            // no /secrets/ path
+			"http://vault-a.vault.azure.net/secrets/foo", // not https
+		} {
+			t.Run(secret, func(t *testing.T) {
+				t.Setenv("GITHUB_WEBHOOK_SECRET", secret)
+
+				sp, err := NewSecretProvider(ctx, "akv")
+				require.Error(t, err)
+				assert.Nil(t, sp)
+			})
+		}
+	})
+}
+
+func TestNewSecretProvider_AKVMultipleSecrets(t *testing.T) {
+	ctx := context.Background()
+	const vault = "https://vault-a.vault.azure.net"
+
+	t.Run("accepts several secrets in one vault", func(t *testing.T) {
+		t.Setenv("GITHUB_WEBHOOK_SECRET", vault+"/secrets/current,"+vault+"/secrets/previous")
+
+		sp, err := NewSecretProvider(ctx, "akv")
+		require.NoError(t, err)
+		assert.NotNil(t, sp)
+	})
+
+	t.Run("tolerates whitespace between entries", func(t *testing.T) {
+		// Construction must agree with retrieval: cmd/webhook splits the same
+		// value and passes each entry to GetSecret, so accepting a padded entry
+		// here while rejecting it there would crash the webhook at startup.
+		t.Setenv("GITHUB_WEBHOOK_SECRET", vault+"/secrets/current, "+vault+"/secrets/previous")
+
+		sp, err := NewSecretProvider(ctx, "akv")
+		require.NoError(t, err)
+		assert.NotNil(t, sp)
+
+		// Retrieval must accept the identical padded entry.
+		for _, name := range strings.Split(os.Getenv("GITHUB_WEBHOOK_SECRET"), ",") {
+			_, err := akv.ParseSecretID(strings.TrimSpace(name))
+			assert.NoError(t, err, "entry %q rejected at retrieval but accepted at construction", name)
+		}
+	})
+
+	t.Run("rejects secrets spread across vaults", func(t *testing.T) {
+		// One client is bound to one vault, so a mixed list must fail loudly
+		// rather than read every secret from the first vault.
+		t.Setenv("GITHUB_WEBHOOK_SECRET",
+			vault+"/secrets/current,https://vault-b.vault.azure.net/secrets/previous")
+
+		sp, err := NewSecretProvider(ctx, "akv")
+		require.Error(t, err)
+		assert.Nil(t, sp)
+		assert.Contains(t, err.Error(), "same vault")
+
+		// This error is surfaced at startup, so it must not name the vaults —
+		// that is the leak akverr.Sanitize exists to prevent.
+		assert.NotContains(t, err.Error(), "vault.azure.net")
+		assert.NotContains(t, err.Error(), "vault-a")
+		assert.NotContains(t, err.Error(), "vault-b")
+	})
+
+	t.Run("rejects when any entry is malformed", func(t *testing.T) {
+		// The second entry is a bare name, which would previously be hidden
+		// inside the first entry's URL path.
+		t.Setenv("GITHUB_WEBHOOK_SECRET", vault+"/secrets/current,previous")
+
+		sp, err := NewSecretProvider(ctx, "akv")
+		require.Error(t, err)
+		assert.Nil(t, sp)
+		assert.Contains(t, err.Error(), "secret identifier")
+	})
 }
