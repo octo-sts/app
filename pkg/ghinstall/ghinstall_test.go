@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -648,4 +649,140 @@ func generateTLS(tmpl *x509.Certificate) (*tls.Config, error) {
 		RootCAs:            pool,
 		InsecureSkipVerify: true,
 	}, nil
+}
+
+func TestManagerGetAll(t *testing.T) {
+	// A single-app manager returns exactly one installation for an owner it
+	// serves, and an empty slice (not an error) for one it does not.
+	const installID = int64(1234)
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			_ = json.NewEncoder(w).Encode([]github.Installation{{
+				ID:      github.Ptr(installID),
+				Account: &github.User{Login: github.Ptr("org")},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	got, err := m.GetAll(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAll(org) = %v, want nil", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("GetAll(org) returned %d installations, want 1", len(got))
+	}
+	if got[0].ID != installID {
+		t.Errorf("ID = %d, want %d", got[0].ID, installID)
+	}
+	if got[0].Transport == nil {
+		t.Error("Transport = nil, want the app transport")
+	}
+	if got[0].AppID != atr.AppID() {
+		t.Errorf("AppID = %d, want %d", got[0].AppID, atr.AppID())
+	}
+
+	// Not installed is an empty result, not an error: the caller distinguishes
+	// "no installations" from "could not enumerate".
+	none, err := m.GetAll(context.Background(), "other-org")
+	if err != nil {
+		t.Fatalf("GetAll(other-org) = %v, want nil", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("GetAll(other-org) returned %d installations, want 0", len(none))
+	}
+}
+
+// stubManager is a Manager returning fixed results, for roundRobin tests.
+type stubManager struct {
+	installs []Install
+	err      error
+}
+
+func (s *stubManager) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	if len(s.installs) == 0 {
+		return nil, 0, status.Error(codes.NotFound, "not installed")
+	}
+	return s.installs[0].Transport, s.installs[0].ID, nil
+}
+
+func (s *stubManager) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	for _, in := range s.installs {
+		if in.ID == id {
+			return in.Transport, in.ID, nil
+		}
+	}
+	return nil, 0, status.Error(codes.NotFound, "not found")
+}
+
+func (s *stubManager) GetAll(_ context.Context, _ string) ([]Install, error) {
+	return s.installs, s.err
+}
+
+var _ Manager = (*stubManager)(nil)
+
+func TestRoundRobinGetAll(t *testing.T) {
+	t.Run("concatenates and dedups", func(t *testing.T) {
+		rr := NewRoundRobin([]Manager{
+			&stubManager{installs: []Install{{ID: 1, AppID: 10}}},
+			&stubManager{installs: []Install{{ID: 2, AppID: 20}}},
+			// A duplicate installation ID must appear once.
+			&stubManager{installs: []Install{{ID: 1, AppID: 10}}},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err != nil {
+			t.Fatalf("GetAll() = %v, want nil", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("GetAll() returned %d installations, want 2 (deduped)", len(got))
+		}
+		if got[0].ID != 1 || got[1].ID != 2 {
+			t.Errorf("GetAll() = %v, want stable order [1 2]", []int64{got[0].ID, got[1].ID})
+		}
+	})
+
+	t.Run("partial enumeration reports an error", func(t *testing.T) {
+		// A caller that must reason about ALL installations cannot treat a
+		// partial list as exhaustive, so the error is surfaced alongside it.
+		rr := NewRoundRobin([]Manager{
+			&stubManager{installs: []Install{{ID: 1, AppID: 10}}},
+			&stubManager{err: errors.New("api down")},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err == nil {
+			t.Fatal("GetAll() = nil error, want an error for a partial enumeration")
+		}
+		if len(got) != 1 {
+			t.Errorf("GetAll() returned %d installations, want the 1 that succeeded", len(got))
+		}
+	})
+}
+
+// TestRoundRobinGetAllWithRealManagers is the one that matters: it uses real
+// managers, not stubs, so it exercises the actual enumeration path a
+// multi-app deployment takes.
+func TestRoundRobinGetAllWithRealManagers(t *testing.T) {
+	managers, installIDs := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
+	rr := NewRoundRobin(managers)
+
+	got, err := rr.GetAll(context.Background(), testOwner)
+	if err != nil {
+		t.Fatalf("GetAll() = %v, want nil", err)
+	}
+	if len(got) != len(installIDs) {
+		t.Fatalf("GetAll() returned %d installations, want %d", len(got), len(installIDs))
+	}
+	for i, in := range got {
+		if in.ID != installIDs[i] {
+			t.Errorf("[%d] ID = %d, want %d", i, in.ID, installIDs[i])
+		}
+		if in.Transport == nil {
+			t.Errorf("[%d] Transport = nil", i)
+		}
+	}
 }

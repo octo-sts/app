@@ -5,6 +5,7 @@ package ghinstall
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"time"
@@ -17,6 +18,13 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// Install is one GitHub App installation for an owner.
+type Install struct {
+	Transport *ghinstallation.AppsTransport
+	ID        int64 // installation ID
+	AppID     int64 // owning App ID, for logging and dedup
+}
 
 // Manager looks up GitHub App installations by owner.
 // scope and identity are used by multi-app implementations for routing;
@@ -32,6 +40,20 @@ type Manager interface {
 	// if it belongs to the given owner. Used by the sticky store to retrieve
 	// a previously-persisted installation.
 	GetByInstallation(ctx context.Context, owner string, installationID int64) (*ghinstallation.AppsTransport, int64, error)
+
+	// GetAll returns every installation for owner across all configured Apps,
+	// in a stable order. It returns an empty slice and a nil error when the
+	// owner has no installations.
+	//
+	// Unlike Get, GetAll performs no routing or capacity selection. Callers
+	// that must reason about ALL installations — rather than pick one — use
+	// this. Get is a routing primitive and repeated calls may return the same
+	// installation, so it cannot be used to enumerate.
+	//
+	// A non-nil error means the enumeration is NOT exhaustive, even if the
+	// returned slice is non-empty. Callers that require exhaustiveness for
+	// correctness must treat that as unknown rather than as a complete answer.
+	GetAll(ctx context.Context, owner string) ([]Install, error)
 }
 
 const defaultNegativeTTL = 5 * time.Minute
@@ -139,6 +161,21 @@ func (m *manager) GetByInstallation(ctx context.Context, owner string, installat
 	return atr, id, nil
 }
 
+// GetAll returns this app's single installation for owner, if any. Delegates to
+// Get, so it shares the LRU and negative caches. A not-installed owner yields
+// an empty slice rather than an error, because "no installations" is a complete
+// answer whereas an error means the enumeration failed.
+func (m *manager) GetAll(ctx context.Context, owner string) ([]Install, error) {
+	atr, id, err := m.Get(ctx, owner, "", "")
+	if err != nil {
+		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return []Install{{Transport: atr, ID: id, AppID: m.atr.AppID()}}, nil
+}
+
 // QuotaConfig configures three-tier capacity-aware selection for the
 // roundRobin manager.
 type QuotaConfig struct {
@@ -234,6 +271,38 @@ func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, insta
 		}
 	}
 	return nil, 0, status.Errorf(codes.NotFound, "installation %d not found for %q", installationID, owner)
+}
+
+// GetAll concatenates every manager's installations for owner, in managers
+// order, deduplicated on installation ID.
+//
+// If any manager fails to enumerate, the successful results are returned
+// alongside an error: the list is real but incomplete, and a caller that needs
+// exhaustiveness must not treat it as the whole set.
+func (rr *roundRobin) GetAll(ctx context.Context, owner string) ([]Install, error) {
+	var out []Install
+	var errs []error
+	seen := make(map[int64]bool, len(rr.managers))
+
+	for _, m := range rr.managers {
+		installs, err := m.GetAll(ctx, owner)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		for _, in := range installs {
+			if seen[in.ID] {
+				continue
+			}
+			seen[in.ID] = true
+			out = append(out, in)
+		}
+	}
+
+	if len(errs) > 0 {
+		return out, fmt.Errorf("enumerating installations for %q: %w", owner, errors.Join(errs...))
+	}
+	return out, nil
 }
 
 // pickByQuota selects an installed manager using three-tier capacity-aware
