@@ -45,14 +45,14 @@ func (f *fakePickerManager) GetByInstallation(_ context.Context, _ string, id in
 // not GetAll/enumeration) but is required to satisfy Manager. It mirrors
 // Get's not-installed/error semantics: no installation is an empty slice, not
 // an error; getErr, if set, propagates as a real enumeration failure.
-func (f *fakePickerManager) GetAll(_ context.Context, _ string) ([]Install, error) {
+func (f *fakePickerManager) GetAll(_ context.Context, _ string) ([]Installation, error) {
 	if f.getErr != nil {
 		return nil, f.getErr
 	}
 	if !f.installed {
 		return nil, nil
 	}
-	return []Install{{ID: f.installID}}, nil
+	return []Installation{{ID: f.installID}}, nil
 }
 
 func newFakePickerManagers(installIDs ...int64) []Manager {
