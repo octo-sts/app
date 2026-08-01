@@ -466,8 +466,15 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if err != nil {
 			return nil, err
 		}
+		// This branch lists the policy directory rather than diffing it, so the
+		// entries are everything the directory holds — not just trust policies.
+		// Filter here as every diff-based path already does, otherwise unrelated
+		// files (a README, a .gitkeep) get fetched and parsed as trust policies
+		// and fail the check run.
 		for _, file := range dirContents {
-			files = append(files, file.GetPath())
+			if isValidatedPath(file.GetPath()) {
+				files = append(files, file.GetPath())
+			}
 		}
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})

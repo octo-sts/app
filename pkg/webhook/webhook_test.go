@@ -19,6 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1140,6 +1142,145 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 	}
 	if *got[0].Conclusion != "success" {
 		t.Fatalf("expected success, got %s", *got[0].Conclusion)
+	}
+}
+
+// TestCheckSuiteDefaultBranchSkipsNonPolicyFiles exercises the zeroHash /
+// initial-commit branch of handleCheckSuite, which lists the policy directory
+// instead of diffing it. The listing contains a README.md alongside the trust
+// policy; only the policy may be fetched and validated.
+func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	dirScanHit := false
+	var fetchedMu sync.Mutex
+	var fetched []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		dirScanHit = true
+		// A real policy directory can hold non-policy files too.
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
+			{
+				Type: github.Ptr("file"),
+				Name: github.Ptr("test.sts.yaml"),
+				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+			},
+			{
+				Type: github.Ptr("file"),
+				Name: github.Ptr("README.md"),
+				Path: github.Ptr(".github/chainguard/README.md"),
+			},
+		}); err != nil {
+			t.Error(err)
+		}
+	})
+	// Record every individual content fetch under the policy directory.
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard/", func(w http.ResponseWriter, r *http.Request) {
+		fetchedMu.Lock()
+		fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"))
+		fetchedMu.Unlock()
+
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if !dirScanHit {
+		t.Fatal("directory scan API was not called but should have been for default branch initial commit")
+	}
+
+	fetchedMu.Lock()
+	defer fetchedMu.Unlock()
+	want := []string{".github/chainguard/test.sts.yaml"}
+	if !slices.Equal(want, fetched) {
+		t.Errorf("fetched content paths = %v, want %v", fetched, want)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Fatalf("expected success, got %s (summary: %s)", *got[0].Conclusion, got[0].Output.GetSummary())
 	}
 }
 
