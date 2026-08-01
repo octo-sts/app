@@ -18,6 +18,7 @@ import (
 	"net/http/httputil"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -246,17 +247,64 @@ func TestWebhookOK(t *testing.T) {
 	}
 }
 
-func TestFilterSTSFiles(t *testing.T) {
-	v := &Validator{}
+func TestIsValidatedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+		want bool
+	}{
+		{
+			name: "trust policy",
+			path: ".github/chainguard/test.sts.yaml",
+			want: true,
+		},
+		{
+			name: "workflow not validated",
+			path: ".github/workflows/ci.yaml",
+			want: false,
+		},
+		{
+			name: "nested policy not validated: * does not cross a separator",
+			path: ".github/chainguard/sub/foo.sts.yaml",
+			want: false,
+		},
+		{
+			name: "top-level readme not validated",
+			path: "README.md",
+			want: false,
+		},
+		{
+			name: "readme inside the policy directory not validated",
+			path: ".github/chainguard/README.md",
+			want: false,
+		},
+		{
+			// Pins the ".sts." infix: a README does not match a looser
+			// ".github/chainguard/*.yaml" glob either, so it cannot tell the two
+			// apart on its own.
+			name: "non-policy yaml inside the policy directory not validated",
+			path: ".github/chainguard/config.yaml",
+			want: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidatedPath(tc.path); got != tc.want {
+				t.Errorf("isValidatedPath(%q) = %v, want %v", tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFilterValidatedFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		input []string
 		want  []string
 	}{
 		{
-			name:  "matches sts.yaml files",
-			input: []string{".github/chainguard/test.sts.yaml", "README.md", ".github/chainguard/other.sts.yaml"},
-			want:  []string{".github/chainguard/test.sts.yaml", ".github/chainguard/other.sts.yaml"},
+			name:  "mixed list keeps only the policy",
+			input: []string{"README.md", ".github/chainguard/test.sts.yaml", ".github/chainguard/README.md", ".github/chainguard/config.yaml", "go.mod"},
+			want:  []string{".github/chainguard/test.sts.yaml"},
 		},
 		{
 			name:  "no matches",
@@ -273,11 +321,16 @@ func TestFilterSTSFiles(t *testing.T) {
 			input: []string{".github/chainguard/subdir/test.sts.yaml"},
 			want:  nil,
 		},
+		{
+			name:  "order preserved",
+			input: []string{".github/chainguard/test.sts.yaml", "README.md", ".github/chainguard/other.sts.yaml"},
+			want:  []string{".github/chainguard/test.sts.yaml", ".github/chainguard/other.sts.yaml"},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := v.filterSTSFiles(tc.input)
-			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("filterSTSFiles() mismatch (-want +got):\n%s", diff)
+			got := filterValidatedFiles(tc.input)
+			if !slices.Equal(tc.want, got) {
+				t.Errorf("filterValidatedFiles(%v) = %v, want %v", tc.input, got, tc.want)
 			}
 		})
 	}
