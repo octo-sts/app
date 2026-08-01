@@ -408,11 +408,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		}
 	}()
 
-	opts := []github.ClientOptionsFunc{github.WithTransport(atr)}
-	if s.baseURL != "" {
-		opts = append(opts, github.WithEnterpriseURLs(s.baseURL, s.baseURL))
-	}
-	client, err := github.NewClient(opts...)
+	client, err := newGitHubClient(atr, s.baseURL)
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}
