@@ -32,7 +32,7 @@ require (
 	github.com/kelseyhightower/envconfig v1.4.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.290.0
-	google.golang.org/grpc v1.82.1
+	google.golang.org/grpc v1.83.0
 	k8s.io/apimachinery v0.36.3
 	sigs.k8s.io/yaml v1.6.0
 )
