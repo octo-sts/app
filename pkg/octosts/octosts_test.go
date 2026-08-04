@@ -59,6 +59,10 @@ func (f *fakeInstallMgr) GetByInstallation(_ context.Context, _ string, id int64
 	return nil, 0, status.Errorf(codes.NotFound, "not found")
 }
 
+func (f *fakeInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation, error) {
+	return []ghinstall.Installation{{Transport: f.atr, ID: 1234, AppID: f.atr.AppID()}}, nil
+}
+
 var _ ghinstall.Manager = (*fakeInstallMgr)(nil)
 
 type fakeGitHub struct {
@@ -405,6 +409,10 @@ func (f *failInstallMgr) GetByInstallation(_ context.Context, _ string, _ int64)
 	return nil, 0, fmt.Errorf("not installed")
 }
 
+func (f *failInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation, error) {
+	return nil, fmt.Errorf("kms unavailable")
+}
+
 var _ ghinstall.Manager = (*failInstallMgr)(nil)
 
 // sequentialInstallMgr returns transports in order on successive Get calls.
@@ -425,6 +433,17 @@ func (s *sequentialInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstal
 
 func (s *sequentialInstallMgr) GetByInstallation(ctx context.Context, owner string, id int64) (*ghinstallation.AppsTransport, int64, error) {
 	return s.Get(ctx, owner, "", "")
+}
+
+// GetAll returns every configured transport, which is what a real multi-app
+// manager does. Note this fake's Get advances an index on each call — real
+// roundRobin.Get does not, which is exactly why enumeration needs GetAll.
+func (s *sequentialInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation, error) {
+	out := make([]ghinstall.Installation, 0, len(s.transports))
+	for i, atr := range s.transports {
+		out = append(out, ghinstall.Installation{Transport: atr, ID: int64(1234 + i), AppID: atr.AppID()})
+	}
+	return out, nil
 }
 
 var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)

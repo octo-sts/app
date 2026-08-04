@@ -13,6 +13,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"net"
@@ -648,4 +649,247 @@ func generateTLS(tmpl *x509.Certificate) (*tls.Config, error) {
 		RootCAs:            pool,
 		InsecureSkipVerify: true,
 	}, nil
+}
+
+func TestManagerGetAll(t *testing.T) {
+	// A single-app manager returns exactly one installation for an owner it
+	// serves, and an empty slice (not an error) for one it does not.
+	const installID = int64(1234)
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			_ = json.NewEncoder(w).Encode([]github.Installation{{
+				ID:      github.Ptr(installID),
+				Account: &github.User{Login: github.Ptr("org")},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	got, err := m.GetAll(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAll(org) = %v, want nil", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("GetAll(org) returned %d installations, want 1", len(got))
+	}
+	if got[0].ID != installID {
+		t.Errorf("ID = %d, want %d", got[0].ID, installID)
+	}
+	if got[0].Transport == nil {
+		t.Error("Transport = nil, want the app transport")
+	}
+	if got[0].AppID != atr.AppID() {
+		t.Errorf("AppID = %d, want %d", got[0].AppID, atr.AppID())
+	}
+
+	// Not installed is an empty result, not an error: the caller distinguishes
+	// "no installations" from "could not enumerate".
+	none, err := m.GetAll(context.Background(), "other-org")
+	if err != nil {
+		t.Fatalf("GetAll(other-org) = %v, want nil", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("GetAll(other-org) returned %d installations, want 0", len(none))
+	}
+}
+
+// TestManagerGetAllPropagatesFailure is the half of the not-installed-vs-
+// enumeration-failed distinction that TestManagerGetAll's "other-org" case
+// does not cover: when the API call itself fails (as opposed to cleanly
+// reporting no matching installation), GetAll must surface that as an error,
+// not silently collapse it to the same empty-slice-no-error result as
+// not-installed. A refactor that lost this distinction would still pass
+// every other GetAll test in this file.
+func TestManagerGetAllPropagatesFailure(t *testing.T) {
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	got, err := m.GetAll(context.Background(), "org")
+	if err == nil {
+		t.Fatal("GetAll() = nil error, want an error when the API call fails")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() == codes.NotFound {
+		t.Errorf("GetAll() code = %v, want anything but NotFound (that would be indistinguishable from not-installed)", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("GetAll() returned %d installations, want 0", len(got))
+	}
+}
+
+// stubManager is a Manager returning fixed results, for roundRobin tests.
+type stubManager struct {
+	installs []Installation
+	err      error
+}
+
+func (s *stubManager) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	if len(s.installs) == 0 {
+		return nil, 0, status.Error(codes.NotFound, "not installed")
+	}
+	return s.installs[0].Transport, s.installs[0].ID, nil
+}
+
+func (s *stubManager) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
+	for _, in := range s.installs {
+		if in.ID == id {
+			return in.Transport, in.ID, nil
+		}
+	}
+	return nil, 0, status.Error(codes.NotFound, "not found")
+}
+
+func (s *stubManager) GetAll(_ context.Context, _ string) ([]Installation, error) {
+	return s.installs, s.err
+}
+
+var _ Manager = (*stubManager)(nil)
+
+func TestRoundRobinGetAll(t *testing.T) {
+	t.Run("concatenates and dedups", func(t *testing.T) {
+		rr := NewRoundRobin([]Manager{
+			&stubManager{installs: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{installs: []Installation{{ID: 2, AppID: 20}}},
+			// A duplicate installation ID must appear once.
+			&stubManager{installs: []Installation{{ID: 1, AppID: 10}}},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err != nil {
+			t.Fatalf("GetAll() = %v, want nil", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("GetAll() returned %d installations, want 2 (deduped)", len(got))
+		}
+		if got[0].ID != 1 || got[1].ID != 2 {
+			t.Errorf("GetAll() = %v, want stable order [1 2]", []int64{got[0].ID, got[1].ID})
+		}
+	})
+
+	t.Run("partial enumeration reports an error", func(t *testing.T) {
+		// A caller that must reason about ALL installations cannot treat a
+		// partial list as exhaustive, so the error is surfaced alongside it.
+		rr := NewRoundRobin([]Manager{
+			&stubManager{installs: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{err: errors.New("api down")},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err == nil {
+			t.Fatal("GetAll() = nil error, want an error for a partial enumeration")
+		}
+		if len(got) != 1 {
+			t.Errorf("GetAll() returned %d installations, want the 1 that succeeded", len(got))
+		}
+	})
+
+	t.Run("no App serves the owner", func(t *testing.T) {
+		// Aggregate-only check: when every sub-manager's GetAll already
+		// reports (nil, nil) — as stubManager's zero value does directly,
+		// with no translation involved — the aggregate must still be a clean
+		// "no installations", not an error. This does NOT exercise the real
+		// manager.Get-returns-NotFound-so-manager.GetAll-translates-it path;
+		// see TestRoundRobinGetAllWithRealManagers for that.
+		rr := NewRoundRobin([]Manager{
+			&stubManager{},
+			&stubManager{},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err != nil {
+			t.Fatalf("GetAll() = %v, want nil", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAll() returned %d installations, want 0", len(got))
+		}
+	})
+
+	t.Run("all managers fail", func(t *testing.T) {
+		// Companion to the case above: when every manager fails to enumerate
+		// (as opposed to cleanly reporting not-installed), the result must be
+		// empty AND carry a non-nil error, so the caller can tell "definitely
+		// no installations" apart from "enumeration itself failed".
+		rr := NewRoundRobin([]Manager{
+			&stubManager{err: errors.New("api down")},
+			&stubManager{err: errors.New("also api down")},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err == nil {
+			t.Fatal("GetAll() = nil error, want an error when every manager fails")
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAll() returned %d installations, want 0", len(got))
+		}
+	})
+
+	t.Run("a sub-manager returns installs and an error", func(t *testing.T) {
+		// Regression test for the bug where GetAll discarded a sub-manager's
+		// installations as soon as it also returned an error. Unreachable via
+		// manager today (it is strictly either/or), but the interface
+		// contract promises errors don't imply an empty slice, so a stub
+		// exercising a manager that returns both must still contribute its
+		// installs to the aggregate.
+		rr := NewRoundRobin([]Manager{
+			&stubManager{installs: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{installs: []Installation{{ID: 2, AppID: 20}}, err: errors.New("partial failure")},
+		})
+		got, err := rr.GetAll(context.Background(), "org")
+		if err == nil {
+			t.Fatal("GetAll() = nil error, want an error since one manager failed")
+		}
+		if len(got) != 2 {
+			t.Fatalf("GetAll() returned %d installations, want 2 (the failing manager's installs must still be collected)", len(got))
+		}
+		ids := map[int64]bool{got[0].ID: true, got[1].ID: true}
+		if !ids[1] || !ids[2] {
+			t.Errorf("GetAll() = %v, want installations [1 2]", got)
+		}
+	})
+}
+
+// TestRoundRobinGetAllWithRealManagers is the one that matters: it uses real
+// managers, not stubs, so it exercises the actual enumeration path a
+// multi-app deployment takes.
+func TestRoundRobinGetAllWithRealManagers(t *testing.T) {
+	managers, installIDs := makeManagersWithDistinctInstalls(t, []int64{111, 222, 333})
+	rr := NewRoundRobin(managers)
+
+	got, err := rr.GetAll(context.Background(), testOwner)
+	if err != nil {
+		t.Fatalf("GetAll() = %v, want nil", err)
+	}
+	if len(got) != len(installIDs) {
+		t.Fatalf("GetAll() returned %d installations, want %d", len(got), len(installIDs))
+	}
+	for i, in := range got {
+		if in.ID != installIDs[i] {
+			t.Errorf("[%d] ID = %d, want %d", i, in.ID, installIDs[i])
+		}
+		if in.Transport == nil {
+			t.Errorf("[%d] Transport = nil", i)
+		}
+	}
+
+	// The literal allow-all trigger, end to end: no App serves this owner, so
+	// every real manager.Get returns NotFound, every manager.GetAll translates
+	// that to an empty error-free result, and the aggregate must be a clean
+	// "no installations" rather than an error. A caller that treats an error
+	// as "no allowlist applies" would be disabling the control on a failure.
+	none, err := rr.GetAll(context.Background(), "nobody-serves-this-org")
+	if err != nil {
+		t.Fatalf("GetAll(unserved owner) = %v, want nil — an unserved owner is not an error", err)
+	}
+	if len(none) != 0 {
+		t.Errorf("GetAll(unserved owner) returned %d installations, want 0", len(none))
+	}
 }
