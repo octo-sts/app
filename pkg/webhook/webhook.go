@@ -322,7 +322,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+			if isValidatedPath(file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -378,7 +378,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 	for _, file := range resp {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+		if isValidatedPath(file.GetFilename()) {
 			if file.GetStatus() != "removed" {
 				files = append(files, file.GetFilename())
 			}
@@ -448,8 +448,15 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if err != nil {
 			return nil, err
 		}
+		// This branch lists the policy directory rather than diffing it, so the
+		// entries are everything the directory holds — not just trust policies.
+		// Filter here as every diff-based path already does, otherwise unrelated
+		// files (a README, a .gitkeep) get fetched and parsed as trust policies
+		// and fail the check run.
 		for _, file := range dirContents {
-			files = append(files, file.GetPath())
+			if isValidatedPath(file.GetPath()) {
+				files = append(files, file.GetPath())
+			}
 		}
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
@@ -457,7 +464,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+			if isValidatedPath(file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -471,7 +478,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp {
-			if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file.GetFilename()); err == nil && ok {
+			if isValidatedPath(file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -507,11 +514,18 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 	return true
 }
 
-func (e *Validator) filterSTSFiles(files []string) []string {
+// isValidatedPath reports whether octo-sts validates the given file.
+func isValidatedPath(path string) bool {
+	ok, err := filepath.Match(".github/chainguard/*.sts.yaml", path)
+	return err == nil && ok
+}
+
+// filterValidatedFiles returns the subset of files octo-sts validates.
+func filterValidatedFiles(files []string) []string {
 	var filtered []string
-	for _, file := range files {
-		if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", file); err == nil && ok {
-			filtered = append(filtered, file)
+	for _, f := range files {
+		if isValidatedPath(f) {
+			filtered = append(filtered, f)
 		}
 	}
 	return filtered
@@ -520,8 +534,8 @@ func (e *Validator) filterSTSFiles(files []string) []string {
 func (e *Validator) filesFromPushEvent(event *github.PushEvent) []string {
 	var files []string //nolint:prealloc // size depends on file content, not commit count
 	for _, commit := range event.Commits {
-		files = append(files, e.filterSTSFiles(commit.Added)...)
-		files = append(files, e.filterSTSFiles(commit.Modified)...)
+		files = append(files, filterValidatedFiles(commit.Added)...)
+		files = append(files, filterValidatedFiles(commit.Modified)...)
 	}
 	return files
 }
