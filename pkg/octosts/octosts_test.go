@@ -119,7 +119,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func TestExchange(t *testing.T) {
 	ctx := context.Background()
-	atr := newGitHubClient(t, newFakeGitHub())
+	atr := newAppsTransport(t, newFakeGitHub())
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestExchange(t *testing.T) {
 
 func TestExchangeValidation(t *testing.T) {
 	ctx := context.Background()
-	atr := newGitHubClient(t, newFakeGitHub())
+	atr := newAppsTransport(t, newFakeGitHub())
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -354,7 +354,7 @@ func TestExchangeRateLimit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			atr := newGitHubClient(t, newFakeGitHubRateLimit(tc.statusCode))
+			atr := newAppsTransport(t, newFakeGitHubRateLimit(tc.statusCode))
 
 			pk, err := rsa.GenerateKey(rand.Reader, 2048)
 			if err != nil {
@@ -468,7 +468,7 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	rrmAtr := newGitHubClient(t, newFakeGitHub())
+	rrmAtr := newAppsTransport(t, newFakeGitHub())
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -518,8 +518,8 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
-	workingAtr := newGitHubClient(t, newFakeGitHub())
+	rateLimitedAtr := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	workingAtr := newAppsTransport(t, newFakeGitHub())
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -572,8 +572,8 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	rl1 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
-	rl2 := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusTooManyRequests))
+	rl1 := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	rl2 := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusTooManyRequests))
 
 	pk, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -666,7 +666,7 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	t.Cleanup(func() { trustPolicies.Remove(key) })
 
 	gh, counter := newFakeGitHubNotFoundCounter()
-	atr := newGitHubClient(t, gh)
+	atr := newAppsTransport(t, gh)
 
 	s := &sts{
 		rrm:      &fakeInstallMgr{atr: atr},
@@ -734,7 +734,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 
 	ctx := context.Background()
 	workingGH := newFakeGitHub()
-	workingAtr := newGitHubClient(t, workingGH)
+	workingAtr := newAppsTransport(t, workingGH)
 
 	s := &sts{
 		rrm:      &fakeInstallMgr{atr: workingAtr},
@@ -758,7 +758,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	}
 
 	// Switch to a rate-limited GitHub backend.
-	rateLimitedAtr := newGitHubClient(t, newFakeGitHubRateLimit(http.StatusForbidden))
+	rateLimitedAtr := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusForbidden))
 	s.rrm = &fakeInstallMgr{atr: rateLimitedAtr}
 
 	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
@@ -776,7 +776,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	}
 }
 
-func newGitHubClient(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
+func newAppsTransport(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 
 	tlsConfig, err := generateTLS(&x509.Certificate{
