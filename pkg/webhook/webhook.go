@@ -72,24 +72,6 @@ func isBotSender(sender *github.User) bool {
 	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
 }
 
-func isGitHubRateLimited(err error) bool {
-	var rateLimitErr *github.RateLimitError
-	var abuseRateLimitErr *github.AbuseRateLimitError
-	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr) {
-		return true
-	}
-	// Fall back to the status code for rate-limit responses that lack the
-	// typed markers, mirroring pkg/octosts' generic 403/429 handling.
-	var errResp *github.ErrorResponse
-	if errors.As(err, &errResp) && errResp.Response != nil {
-		switch errResp.Response.StatusCode {
-		case http.StatusForbidden, http.StatusTooManyRequests:
-			return true
-		}
-	}
-	return false
-}
-
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := clog.FromContext(r.Context()).With(
 		HeaderDelivery, r.Header.Get(HeaderDelivery),
@@ -221,7 +203,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which GitHub treats as a
 	// failed delivery and redelivers — amplifying load on the rate-limited API.
-	if isGitHubRateLimited(err) {
+	if octosts.IsGitHubRateLimited(err) {
 		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, repo, sha)
 		return nil, nil
 	}
@@ -268,7 +250,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 		resp, _, _, err := client.Repositories.GetContents(ctx, owner, repo, f, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			log.Infof("failed to get content for: %v", err)
-			if isGitHubRateLimited(err) {
+			if octosts.IsGitHubRateLimited(err) {
 				log.Warnf("rate-limited, aborting remaining policy validations")
 				return fmt.Errorf("%s: %w", f, err)
 			}

@@ -351,6 +351,38 @@ func isRateLimit(err error) bool {
 	return ok && st.Code() == codes.ResourceExhausted
 }
 
+// IsGitHubRateLimited reports whether err looks like a GitHub rate-limit
+// response, primary or secondary.
+//
+// The typed errors must be checked first: go-github returns *RateLimitError for
+// a 403 carrying X-RateLimit-Remaining: 0 and *AbuseRateLimitError for a
+// secondary limit, and NEITHER unwraps to *ErrorResponse. A status-code-only
+// check therefore misses every genuine rate limit from real GitHub — which is
+// the bug this function exists to fix.
+//
+// This is deliberately LENIENT: a bare 403 with no rate-limit marker also
+// counts. That is correct for both current callers, where a false positive
+// costs a retry or a redelivery rather than granting access. Anything that
+// gates access needs a stricter test.
+func IsGitHubRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rateLimitErr *github.RateLimitError
+	var abuseRateLimitErr *github.AbuseRateLimitError
+	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr) {
+		return true
+	}
+	var errResp *github.ErrorResponse
+	if errors.As(err, &errResp) && errResp.Response != nil {
+		switch errResp.Response.StatusCode {
+		case http.StatusForbidden, http.StatusTooManyRequests:
+			return true
+		}
+	}
+	return false
+}
+
 type trustPolicy interface {
 	Compile() error
 }
@@ -423,21 +455,19 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	)
 	if err != nil {
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
-		var ghErr *github.ErrorResponse
-		if errors.As(err, &ghErr) && ghErr.Response != nil {
-			switch ghErr.Response.StatusCode {
-			case http.StatusForbidden, http.StatusTooManyRequests:
-				if stale, ok := staleTrustPolicies.Get(tpKey); ok {
-					clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
-					// Seed the primary cache so further exchanges during the
-					// rate-limit window hit it instead of re-probing GitHub.
-					trustPolicies.Add(tpKey, stale)
-					return stale, nil
-				}
-				return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded (%d) for %q", ghErr.Response.StatusCode, tpKey.identity)
-			case http.StatusNotFound:
-				trustPolicies.Add(tpKey, negativeCacheConst)
+		if IsGitHubRateLimited(err) {
+			if stale, ok := staleTrustPolicies.Get(tpKey); ok {
+				clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
+				// Seed the primary cache so further exchanges during the
+				// rate-limit window hit it instead of re-probing GitHub.
+				trustPolicies.Add(tpKey, stale)
+				return stale, nil
 			}
+			return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded for %q", tpKey.identity)
+		}
+		var ghErr *github.ErrorResponse
+		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+			trustPolicies.Add(tpKey, negativeCacheConst)
 		}
 		return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
