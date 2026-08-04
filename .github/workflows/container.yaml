@@ -1,0 +1,98 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: Container Images
+
+on:
+  pull_request:
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        component:
+          - app
+          - webhook
+
+    permissions:
+      contents: read # clone the repository contents
+      id-token: write # keyless image signing with cosign
+      packages: write # push images and signatures to GHCR
+
+    steps:
+      # TODO: tighten to `egress-policy: block` with an explicit whitelist
+      - name: Harden Runner
+        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920 # v2.20.0
+        with:
+          egress-policy: audit
+
+      - name: Check out code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: "${{ github.workspace }}/.go-version"
+          check-latest: true
+          cache: "false"
+
+      - name: Setup ko
+        uses: ko-build/setup-ko@d006021bd0c28d1ce33a07e7943d48b079944c8d # v0.9
+
+      - name: Setup cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Determine tag
+        id: tag
+        if: github.event_name == 'push'
+        run: |
+          echo "tags=${GITHUB_REF_NAME#v},latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push ${{ matrix.component }} image
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ matrix.component }}
+          KO_DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}
+          TAGS: ${{ steps.tag.outputs.tags }}
+        run: |
+          ko build --bare --tags="$TAGS" --image-refs="${COMPONENT}.refs" "./cmd/${COMPONENT}"
+
+      - name: Build ${{ matrix.component }} image (PR)
+        if: github.event_name == 'pull_request'
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          ko build --local "./cmd/${COMPONENT}"
+
+      - name: Display image ref
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: cat "${COMPONENT}.refs"
+
+      - name: Sign ${{ matrix.component }} image
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          cosign sign --yes "$(cat "${COMPONENT}.refs")"
+
+      - name: Verify ${{ matrix.component }} image signature
+        if: github.event_name == 'push'
+        env:
+          COMPONENT: ${{ matrix.component }}
+          IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/container.yaml@${{ github.ref }}
+        run: |
+          cosign verify \
+            --certificate-identity "${IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$(cat "${COMPONENT}.refs")"

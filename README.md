@@ -97,6 +97,23 @@ policy.
 Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
 we will might make a new release.
 
+### Container images
+
+For self-hosting, container images are published to
+`ghcr.io/octo-sts/app` and `ghcr.io/octo-sts/webhook`. A release tagged `vX.Y.Z`
+is pushed as `X.Y.Z` and `latest`.
+
+Images are signed keylessly with [cosign](https://github.com/sigstore/cosign),
+using the GitHub Actions workflow that built them as the signing identity. Verify
+one before use:
+
+```shell
+cosign verify \
+  --certificate-identity-regexp '^https://github\.com/octo-sts/app/\.github/workflows/container\.yaml@refs/tags/v.*$' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/octo-sts/app:latest
+```
+
 ### Multi-App Routing
 
 When multiple GitHub Apps are configured (`GITHUB_APP_IDS` has more than one
