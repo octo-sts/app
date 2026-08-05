@@ -265,8 +265,21 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 			continue
 		}
 
-		switch repo {
-		case ".github":
+		switch {
+		case strings.EqualFold(repo, ".github") && f == octosts.OrgTrustedIssuersPath:
+			// Parse AND compile: only compiling catches uncompilable patterns,
+			// invalid issuer URLs, and an empty allowlist. The exchange path calls
+			// this same function, so the two verdicts cannot diverge.
+			if _, err := octosts.ParseOrgTrustedIssuers([]byte(raw)); err != nil {
+				log.Infof("failed to validate org trusted issuers: %v", err)
+				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+			}
+
+		// EqualFold, matching the arm above: GitHub preserves repository-name case,
+		// so an org whose repo is literally ".GitHub" would otherwise fall through
+		// to the default arm and have its org policy strict-unmarshalled as a
+		// repo-level TrustPolicy — a bogus check-run failure on a valid file.
+		case strings.EqualFold(repo, ".github"):
 			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.OrgTrustPolicy{}); err != nil {
 				log.Infof("failed to parse org trust policy: %v", err)
 				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
@@ -315,14 +328,14 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	// GitHub push payloads include up to 20 commits. When not truncated,
 	// use the payload directly to avoid a Compare API call.
 	if len(event.Commits) < 20 {
-		files = e.filesFromPushEvent(event)
+		files = e.filesFromPushEvent(repo, event)
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if isValidatedPath(file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -378,7 +391,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 	for _, file := range resp {
-		if isValidatedPath(file.GetFilename()) {
+		if isValidatedPath(repo, file.GetFilename()) {
 			if file.GetStatus() != "removed" {
 				files = append(files, file.GetFilename())
 			}
@@ -451,10 +464,10 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		// This branch lists the policy directory rather than diffing it, so the
 		// entries are everything the directory holds — not just trust policies.
 		// Filter here as every diff-based path already does, otherwise unrelated
-		// files (a README, a .gitkeep) get fetched and parsed as trust policies
-		// and fail the check run.
+		// files (a README, a .gitkeep, the organization allowlist) get fetched
+		// and parsed as trust policies and fail the check run.
 		for _, file := range dirContents {
-			if isValidatedPath(file.GetPath()) {
+			if isValidatedPath(repo, file.GetPath()) {
 				files = append(files, file.GetPath())
 			}
 		}
@@ -464,7 +477,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if isValidatedPath(file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -478,7 +491,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp {
-			if isValidatedPath(file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -514,28 +527,41 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 	return true
 }
 
-// isValidatedPath reports whether octo-sts validates the given file.
-func isValidatedPath(path string) bool {
-	ok, err := filepath.Match(".github/chainguard/*.sts.yaml", path)
-	return err == nil && ok
+// isValidatedPath reports whether octo-sts validates the given file. Trust
+// policies are validated in every repository; the organization trusted-issuer
+// allowlist only in the organization's .github repository.
+//
+// The repository comparison folds case because GitHub repository names are
+// case-insensitive and the exchange path resolves .github through the API.
+func isValidatedPath(repo, path string) bool {
+	if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", path); err == nil && ok {
+		return true
+	}
+	return strings.EqualFold(repo, ".github") && path == octosts.OrgTrustedIssuersPath
 }
 
 // filterValidatedFiles returns the subset of files octo-sts validates.
-func filterValidatedFiles(files []string) []string {
+func filterValidatedFiles(repo string, files []string) []string {
 	var filtered []string
 	for _, f := range files {
-		if isValidatedPath(f) {
+		if isValidatedPath(repo, f) {
 			filtered = append(filtered, f)
 		}
 	}
 	return filtered
 }
 
-func (e *Validator) filesFromPushEvent(event *github.PushEvent) []string {
+// filesFromPushEvent returns the validated files touched by the push.
+//
+// Deletions are deliberately excluded: validation reads each file's content at
+// the head SHA, and a deleted path 404s there, so including removals would turn
+// every trust-policy deletion into a failing check run. The CompareCommits
+// branches skip "removed" for the same reason.
+func (e *Validator) filesFromPushEvent(repo string, event *github.PushEvent) []string {
 	var files []string //nolint:prealloc // size depends on file content, not commit count
 	for _, commit := range event.Commits {
-		files = append(files, filterValidatedFiles(commit.Added)...)
-		files = append(files, filterValidatedFiles(commit.Modified)...)
+		files = append(files, filterValidatedFiles(repo, commit.Added)...)
+		files = append(files, filterValidatedFiles(repo, commit.Modified)...)
 	}
 	return files
 }
