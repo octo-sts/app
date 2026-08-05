@@ -116,11 +116,13 @@ func main() {
 	)
 
 	var ceclient cloudevents.Client
-	if baseCfg.Metrics {
+	if baseCfg.Metrics && appConfig.EventingIngress != "" {
 		ceclient, err = mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, appConfig.EventingIngress)...)
 		if err != nil {
 			log.Panicf("failed to create cloudevents client: %v", err)
 		}
+	} else if baseCfg.Metrics {
+		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
 	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL))
