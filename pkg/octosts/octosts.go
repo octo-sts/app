@@ -106,7 +106,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		UserAgent: extractUserAgent(ctx),
 	}
 
-	if s.metrics {
+	if s.metrics && s.ceclient != nil {
 		defer func() {
 			event := cloudevents.NewEvent()
 			event.SetType("dev.octo-sts.exchange")
