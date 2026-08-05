@@ -32,7 +32,7 @@ const (
 )
 
 // OrgTrustedIssuers is an org-wide allowlist of OIDC issuers read from
-// OrgTrustedIssuersPath. When present, only issuers it permits may federate.
+// OrgTrustedIssuersPath; when present, only issuers it permits may federate.
 type OrgTrustedIssuers struct {
 	Mode Mode `json:"mode,omitempty" jsonschema:"enum=enforce,enum=audit"`
 
@@ -60,8 +60,8 @@ type IssuerAllowlist struct {
 	patterns []*regexp.Regexp
 }
 
-// Compile validates the configuration and prepares it for matching. It returns a
-// new value, unlike TrustPolicy.Compile, so a cached allowlist cannot be
+// Compile validates the configuration and prepares it for matching. Unlike
+// TrustPolicy.Compile it returns a NEW value, so a cached allowlist cannot be
 // invalidated by a concurrent recompile.
 func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 	mode := c.Mode
@@ -99,14 +99,13 @@ func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 		if len(p) > maxPatternLen {
 			return nil, fmt.Errorf("issuer_patterns[%d] too long: %d chars (max %d)", i, len(p), maxPatternLen)
 		}
-		// Before compiling: a loose-and-malformed pattern should report looseness.
+		// First, so a loose-and-malformed pattern reports its looseness.
 		if err := checkNoSlashMatchingAtom(i, p); err != nil {
 			return nil, err
 		}
 		// Compile p ALONE first: the group below hides an unbalanced ")", so
-		// "token\.example\.com)|(" wraps to "^(?:token\.example\.com)|()$", whose
-		// "()$" alternative matches everything — allow-all, reported Valid by the
-		// webhook. A legitimate top-level "a|b" still compiles alone.
+		// "token\.example\.com)|(" wraps to "^(?:token\.example\.com)|()$", whose "()$"
+		// alternative matches everything. A legitimate top-level "a|b" still compiles.
 		if _, err := regexp.Compile(p); err != nil {
 			return nil, fmt.Errorf("invalid issuer_pattern %q: %w", p, err)
 		}
@@ -128,9 +127,9 @@ func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 
 func (a *IssuerAllowlist) Mode() Mode { return a.mode }
 
-// Allows reports whether issuer is permitted. The two lists are a union,
-// deliberately unlike TrustPolicy where they are mutually exclusive. Patterns
-// honour inline flags such as (?i), so matching is only as strict as the pattern.
+// Allows reports whether issuer is permitted. The two lists are a union, deliberately
+// unlike TrustPolicy where they are mutually exclusive. Patterns honour inline flags
+// such as (?i), so matching is only as strict as the pattern.
 func (a *IssuerAllowlist) Allows(issuer string) bool {
 	if slices.Contains(a.issuers, issuer) {
 		return true
@@ -143,16 +142,20 @@ func (a *IssuerAllowlist) Allows(issuer string) bool {
 	return false
 }
 
-// checkNoSlashMatchingAtom rejects an issuer_pattern containing any
-// single-character atom that can match "/". BEST-EFFORT FOOTGUN GUARD, NOT A
-// SECURITY BOUNDARY — the author is the org owner. The accident it catches: an
-// atom matching "/" lets a pattern span past the host, so
-// "https://.*\.example\.com" also permits "https://totally-evil.com/x.example.com".
+// checkNoSlashMatchingAtom rejects any single-character atom that can match "/": such an
+// atom lets a pattern span past the host, so "https://.*\.example\.com" would also permit
+// "https://totally-evil.com/x.example.com". BEST-EFFORT FOOTGUN GUARD, NOT A SECURITY
+// BOUNDARY — the author is the org owner.
 //
-// The test is EMPIRICAL — each atom compiled alone as "^atom$", asked whether it
-// matches "/" — because banned spellings cannot be enumerated: "\S", "[^\n]" and
-// "[[:ascii:]]" match "/" without containing ".", and "[.-9]" holds "/" by range.
-// A LITERAL "/" stays allowed. Unterminated brackets are left to regexp.Compile.
+// The test is EMPIRICAL — each atom compiled alone as "^atom$" and asked whether it matches
+// "/" — because banned spellings cannot be enumerated: "\S", "[^\n]" and "[[:ascii:]]" match
+// "/" without containing ".", and "[.-9]" holds "/" by range. A LITERAL "/" stays allowed;
+// unterminated brackets are left to regexp.Compile.
+//
+// KNOWN LIMITATION, structural rather than a missing case: being per-ATOM, a literal "/"
+// inside a QUANTIFIED group escapes it, so "https://([a-z0-9.-]+/)*trusted\.example\.com"
+// validates yet matches "https://evil.com/x/trusted.example.com". Catching it needs AST
+// analysis; TestCompileKnownLimitationQuantifiedGroupSpansSeparators pins the gap.
 func checkNoSlashMatchingAtom(i int, p string) error {
 	for j := 0; j < len(p); j++ {
 		var atom string
@@ -183,8 +186,8 @@ func checkNoSlashMatchingAtom(i int, p string) error {
 
 		re, err := regexp.Compile("^" + atom + "$")
 		if err != nil {
-			// Fail CLOSED: an atom we cannot analyze is not an atom we know is safe.
-			// Skipping it would turn every scanner mis-parse into a silent bypass.
+			// Fail CLOSED: an atom we cannot analyze is not one we know is safe, and
+			// skipping it would turn every scanner mis-parse into a silent bypass.
 			return fmt.Errorf(`issuer_patterns[%d]: cannot verify that %q cannot `+
 				`match "/" (%v), so the pattern is rejected rather than assumed `+
 				`safe — rewrite it with a plain class such as [a-z0-9-]`, i, atom, err)
@@ -206,9 +209,9 @@ func checkNoSlashMatchingAtom(i int, p string) error {
 	return nil
 }
 
-// endOfEscape returns the index just past the character-class escape starting at
-// the backslash at p[j], or -1 when there is no atom to test (an escaped literal
-// or trailing backslash), meaning the caller should skip two bytes.
+// endOfEscape returns the index just past the character-class escape starting at the
+// backslash at p[j], or -1 when there is no atom to test (an escaped literal or
+// trailing backslash) and the caller should skip two bytes.
 func endOfEscape(p string, j int) int {
 	if j+1 >= len(p) {
 		return -1
@@ -217,9 +220,8 @@ func endOfEscape(p string, j int) int {
 	case 'd', 'D', 's', 'S', 'w', 'W':
 		return j + 2
 
-	// Numeric escapes SPELL characters rather than naming classes: "\x2F",
-	// "\x{2F}" and "\057" are all "/". Treated as escaped literals they would be
-	// skipped and the slash they encode would never be tested.
+	// Numeric escapes SPELL characters rather than naming classes ("\x2F", "\x{2F}" and
+	// "\057" are all "/"); as escaped literals they would be skipped and never tested.
 	case 'x':
 		if j+2 >= len(p) {
 			return -1
@@ -261,17 +263,17 @@ func isHexDigit(b byte) bool {
 	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
 }
 
-// endOfBracketExpression returns the index just past the bracket expression
-// opening at p[j], or -1 if unterminated. More than a search for "]": a
-// backslash escapes the next byte ("[a-z\]]"), a POSIX class carries its own "]"
-// ("[[:alpha:]]"), and a leading "]" is a literal member ("[^]]").
+// endOfBracketExpression returns the index just past the bracket expression opening at
+// p[j], or -1 if unterminated. More than a search for "]": a backslash escapes the next
+// byte ("[a-z\]]"), a POSIX class carries its own "]" ("[[:alpha:]]"), and a leading "]"
+// is a literal member ("[^]]").
 func endOfBracketExpression(p string, j int) int {
 	k := j + 1
 	if k < len(p) && p[k] == '^' {
 		k++
 	}
-	// RE2 reads a first-position "]" as a literal. Stopping on it would extract
-	// the uncompilable "[^]" and leave the real class untested.
+	// RE2 reads a first-position "]" as a literal; stopping there would extract the
+	// uncompilable "[^]" and leave the real class untested.
 	if k < len(p) && p[k] == ']' {
 		k++
 	}
@@ -280,10 +282,9 @@ func endOfBracketExpression(p string, j int) int {
 		case '\\':
 			k++
 		case '[':
-			// "[:name:]" is a POSIX class only when a ":]" actually follows;
-			// otherwise RE2 reads this "[" as an ordinary member and the real "]"
-			// is still ahead, so keep scanning rather than bailing out — bailing
-			// let "[[:/-~]", a class holding "/", pass untested.
+			// "[:name:]" is a POSIX class only when a ":]" actually follows; otherwise
+			// RE2 reads this "[" as an ordinary member and the real "]" is still ahead,
+			// so keep scanning: bailing out let "[[:/-~]", holding "/", pass untested.
 			if strings.HasPrefix(p[k:], "[:") {
 				if end := strings.Index(p[k:], ":]"); end >= 0 {
 					k += end + 1
@@ -296,11 +297,10 @@ func endOfBracketExpression(p string, j int) int {
 	return -1
 }
 
-// checkLowercaseSchemeAndHost rejects uppercase in an issuer's scheme or host:
-// matching is byte-exact, so those would never match a real "iss" claim — a
-// silent org-wide outage in enforce mode. It inspects the RAW string because
-// url.Parse lowercases the scheme, hiding the problem. Paths are legitimately
-// mixed-case (e.g. AWS EKS /id/ABCDEF123456) and excluded.
+// checkLowercaseSchemeAndHost rejects uppercase in an issuer's scheme or host: matching
+// is byte-exact, so those never match a real "iss" claim — a silent org-wide outage in
+// enforce mode. It inspects the RAW string because url.Parse lowercases the scheme.
+// Paths are legitimately mixed-case (e.g. AWS EKS /id/ABCDEF123456) and excluded.
 func checkLowercaseSchemeAndHost(iss string) error {
 	schemeAndHost := iss
 	if i := strings.Index(iss, "://"); i >= 0 {

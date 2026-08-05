@@ -258,6 +258,16 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 			continue
 		}
 
+		// GetContents returns a nil file and a populated slice when the path is a
+		// DIRECTORY, and RepositoryContent.GetContent dereferences its receiver
+		// without a nil check — so a directory named like a policy or the allowlist
+		// would panic the handler rather than fail the check run.
+		if resp == nil {
+			log.Infof("%s is not a file, skipping", f)
+			merr = multierror.Append(merr, fmt.Errorf("%s: not a file", f))
+			continue
+		}
+
 		raw, err := resp.GetContent()
 		if err != nil {
 			log.Infof("failed to read content: %v", err)
@@ -467,7 +477,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		// files (a README, a .gitkeep, the organization allowlist) get fetched
 		// and parsed as trust policies and fail the check run.
 		for _, file := range dirContents {
-			if isValidatedPath(repo, file.GetPath()) {
+			// Type matters as well as path: a directory can be named to match, and
+			// listing it as a candidate would send a non-file down the read path.
+			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath()) {
 				files = append(files, file.GetPath())
 			}
 		}

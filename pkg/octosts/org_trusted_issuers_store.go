@@ -22,10 +22,9 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 )
 
-// OrgTrustedIssuersPath locates the org allowlist inside the org's .github
-// repository. Exported because pkg/webhook's check run reads it too and both
-// paths must agree. The name avoids the substring "token": gosec's G101 matches
-// identifier names and would flag it as a hardcoded credential.
+// OrgTrustedIssuersPath locates the org allowlist. Exported because pkg/webhook's
+// check run reads it too and both paths must agree. The name avoids the substring
+// "token": gosec's G101 matches identifier names and would flag it as a credential.
 const OrgTrustedIssuersPath = ".github/chainguard/trusted-token-issuers.yaml"
 
 // orgIssuerState is the cached knowledge about one org's allowlist. The zero
@@ -60,8 +59,8 @@ type orgIssuerEntry struct {
 	err   error            // set iff state == orgIssuerInvalid
 }
 
-// These constructors keep the payload invariant (allow only for Present, err only
-// for Invalid) in one place. None for Unknown: the zero value is the only source.
+// These hold the payload invariant (allow only for Present, err only for Invalid) in
+// one place. None for Unknown: the zero value is its only source.
 
 func absentOrgIssuerEntry() orgIssuerEntry {
 	return orgIssuerEntry{state: orgIssuerAbsent}
@@ -81,7 +80,7 @@ var orgIssuers = expirablelru.NewLRU[string, orgIssuerEntry](200, nil, time.Minu
 // staleOrgIssuers holds Absent and Present only: Invalid is never "last known good".
 var staleOrgIssuers = expirablelru.NewLRU[string, orgIssuerEntry](200, nil, time.Hour)
 
-// cacheOrgIssuerEntry routes durable knowledge to the stale cache and logs the
+// cacheOrgIssuerEntry routes durable knowledge to the stale cache, logging the
 // otherwise-invisible enforcing-to-not-enforcing shift.
 func cacheOrgIssuerEntry(ctx context.Context, owner string, e orgIssuerEntry) {
 	if prev, ok := staleOrgIssuers.Get(owner); ok &&
@@ -95,14 +94,14 @@ func cacheOrgIssuerEntry(ctx context.Context, owner string, e orgIssuerEntry) {
 	}
 }
 
-// fetchKind is one installation's answer about an org's allowlist. Retryability
-// is a property of the kind, not something inferred from a gRPC code: inferring
-// it let a rate-limited token mint skip the retry across other installations.
+// fetchKind is one installation's answer about an org's allowlist. Retryability is
+// a property of the kind, never inferred from a gRPC code: inferring it let a
+// rate-limited token mint skip the retry across other installations.
 type fetchKind int
 
 const (
-	// fetchOK means the file was read; entry is Present or Invalid. Invalid rides
-	// fetchOK: "the config is broken" is an answer, not a failure to enumerate.
+	// fetchOK: file read; entry is Present or Invalid. Invalid rides fetchOK because
+	// "the config is broken" is an answer, not a failure to enumerate.
 	fetchOK          fetchKind = iota
 	fetchAbsent                // no allowlist applies; definitive
 	fetchNoAccess              // this installation cannot see .github; try the next
@@ -134,8 +133,8 @@ type fetchResult struct {
 	err   error          // terminal status for fetchRateLimited / fetchFailed
 }
 
-// The kind-to-payload pairing IS the security contract — retryable kinds carry a
-// terminal status, fetchAbsent/fetchNoAccess carry none — so it lives in one place.
+// The kind-to-payload pairing IS the security contract (retryable kinds carry a
+// terminal status, fetchAbsent/fetchNoAccess none), so it lives in one place.
 
 func absentFetch() fetchResult   { return fetchResult{kind: fetchAbsent} }
 func noAccessFetch() fetchResult { return fetchResult{kind: fetchNoAccess} }
@@ -150,9 +149,8 @@ func failedFetch() fetchResult {
 
 func okFetch(e orgIssuerEntry) fetchResult { return fetchResult{kind: fetchOK, entry: e} }
 
-// Fixed messages returned to callers. Org, issuer, mode and the underlying error
-// go to logs and the Event only: echoing them would let any holder of a verified
-// token enumerate an org's identity providers.
+// Fixed messages returned to callers. Org, issuer, mode and cause go to logs and the
+// Event only: echoing them would let any verified-token holder enumerate an org's IdPs.
 const (
 	msgIssuerNotPermitted  = "issuer not permitted by organization policy"
 	msgIssuerConfigInvalid = "organization trusted-issuer configuration is invalid"
@@ -160,11 +158,10 @@ const (
 	msgIssuerRateLimited   = "organization trusted-issuer lookup rate limited"
 )
 
-// isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. Stricter
-// than IsGitHubRateLimited: a bare *ErrorResponse 403 is a permanent permission,
-// SAML/IP-allowlist or suspended-installation failure, and calling it a rate limit
-// would deny every exchange in the org indefinitely. Real limits are typed
-// *RateLimitError or *AbuseRateLimitError.
+// isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. Stricter than
+// IsGitHubRateLimited: a bare *ErrorResponse 403 is a permanent permission,
+// SAML/IP-allowlist or suspension failure, and calling it a rate limit would deny every
+// exchange in the org indefinitely.
 func isOrgIssuerRateLimit(err error) bool {
 	if err == nil {
 		return false
@@ -180,9 +177,8 @@ func isOrgIssuerRateLimit(err error) bool {
 }
 
 // isMintRateLimit reports whether a mint failure response is a rate limit. Below
-// go-github's CheckResponse there is no typed *RateLimitError: 429 and 403 with
-// X-RateLimit-Remaining: 0 are primary limits; Retry-After catches secondary
-// limits, where Remaining is typically NONZERO.
+// go-github's CheckResponse there is no typed *RateLimitError: X-RateLimit-Remaining
+// 0 is a primary limit, Retry-After a secondary one (Remaining typically NONZERO).
 func isMintRateLimit(resp *http.Response) bool {
 	if resp == nil {
 		return false
@@ -190,20 +186,19 @@ func isMintRateLimit(resp *http.Response) bool {
 	if resp.StatusCode == http.StatusTooManyRequests {
 		return true
 	}
-	if resp.StatusCode != http.StatusForbidden {
-		return false
-	}
+	// Header-driven regardless of status, not just 403: GitHub answers an over-used
+	// installation-token endpoint with 422 too, and the headers are the only way to
+	// tell that from a real validation failure.
 	return resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""
 }
 
 // classifyMintError maps an installation-token mint failure. These are
-// *ghinstallation.HTTPError, not *github.ErrorResponse: RoundTrip returns
-// (nil, err), so CheckResponse never runs. Closes err's response body.
+// *ghinstallation.HTTPError, not *github.ErrorResponse, because RoundTrip returns
+// (nil, err) so CheckResponse never runs. Closes err's response body.
 func classifyMintError(ctx context.Context, owner string, err error) fetchResult {
 	var herr *ghinstallation.HTTPError
 	if errors.As(err, &herr) && herr.Response != nil {
-		// ghinstallation deliberately leaves the body open for inspection, so
-		// closing it is our job.
+		// ghinstallation leaves the body open for inspection, so closing it is ours.
 		if herr.Response.Body != nil {
 			defer herr.Response.Body.Close()
 		}
@@ -213,13 +208,17 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 			}
 		}
 
+		// Rate limiting FIRST: 422 means both a real validation failure and "endpoint
+		// has been spammed", and 422 is the sole source of AGREEMENT that .github is
+		// unreadable — counting an anti-abuse 422 as agreement would let load flip an
+		// enforcing org to allow-all.
 		switch {
-		case herr.Response.StatusCode == http.StatusUnprocessableEntity:
-			return noAccessFetch()
-
 		case isMintRateLimit(herr.Response):
 			clog.WarnContextf(ctx, "org trusted issuers: mint rate limited for %s", owner)
 			return rateLimitedFetch()
+
+		case herr.Response.StatusCode == http.StatusUnprocessableEntity:
+			return noAccessFetch()
 		}
 	}
 
@@ -241,11 +240,10 @@ func classifyContentsError(ctx context.Context, owner string, err error) fetchRe
 			return absentFetch()
 
 		case http.StatusForbidden:
-			// Ignorance, NOT agreement, so fail CLOSED rather than return NoAccess:
-			// a read-time 403 is often org-wide (IP allowlist, SAML/SSO, ToS lock,
-			// contents-API incident) and would make every installation "agree" that
-			// no allowlist applies. Genuine per-installation blindness fails earlier,
-			// at the MINT with a 422 — the sole source of agreement.
+			// Ignorance, NOT agreement, so fail CLOSED rather than NoAccess: a read-time
+			// 403 is often org-wide (IP allowlist, SAML/SSO, ToS lock, API incident) and
+			// would make every installation "agree" no allowlist applies. Genuine
+			// per-installation blindness fails at the MINT with 422, the sole agreement.
 			clog.WarnContextf(ctx, "org trusted issuers: read forbidden for %s/.github (403, not a rate limit); treating as unknown", owner)
 			return failedFetch()
 		}
@@ -255,9 +253,8 @@ func classifyContentsError(ctx context.Context, owner string, err error) fetchRe
 	return failedFetch()
 }
 
-// fetchOrgIssuersOnce reads and compiles the org allowlist using one installation
-// and reports only what it could determine; deciding the org's actual allowlist is
-// the aggregating caller's job.
+// fetchOrgIssuersOnce reads and compiles the org allowlist through one installation,
+// reporting only what it could determine; the org's verdict is the caller's decision.
 func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.AppsTransport, install int64, owner string) fetchResult {
 	// Label rate-limit metrics with the installation consuming the quota.
 	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
@@ -270,9 +267,9 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 		},
 	}
 
-	// Mint explicitly, not lazily inside the revoke defer: only successful tokens
-	// are cached, so a deferred Token() would issue a SECOND failing mint on the
-	// 422 path, common for orgs installing the App on selected repositories.
+	// Mint explicitly, not lazily inside the revoke defer: only successful tokens are
+	// cached, so a deferred Token() would issue a SECOND failing mint on the 422 path,
+	// common for orgs installing the App on selected repositories.
 	tok, err := atr.Token(ctx)
 	if err != nil {
 		return classifyMintError(ctx, owner, err)
@@ -299,8 +296,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 		return classifyContentsError(ctx, owner, err)
 	}
 	if file == nil {
-		// A directory: GetContent() dereferences Encoding unguarded and would
-		// panic on the exchange path.
+		// A directory: GetContent() dereferences Encoding unguarded and would panic.
 		clog.ErrorContextf(ctx, "org trusted issuers: path is not a file for %s", owner)
 		return invalidConfigResult()
 	}
@@ -320,9 +316,8 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	return okFetch(presentOrgIssuerEntry(allow))
 }
 
-// invalidConfigResult is the outcome for a config present but unusable. The kind
-// is fetchOK because the installation DID answer; the cause is logged at the call
-// site and the caller-visible message stays fixed.
+// invalidConfigResult is the outcome for a config present but unusable. The kind is
+// fetchOK because the installation DID answer; the cause is logged at the call site.
 func invalidConfigResult() fetchResult {
 	return okFetch(invalidOrgIssuerEntry(status.Error(codes.FailedPrecondition, msgIssuerConfigInvalid)))
 }
@@ -334,20 +329,19 @@ type orgIssuerTally struct {
 	sawRateLimit bool
 }
 
-// exhaustiveNoAccess reports whether every installation considered so far ANSWERED,
-// and every answer was "I cannot see .github". total > 0 is a security guard: with no
-// installations it degenerates to 0 == 0, granting org-wide allow-all off no evidence;
-// an empty enumeration is ignorance and belongs on the stale / fail-closed path.
-// anyFailed is redundant today only because of scanInstalls' and record's counting
-// discipline — an edit that stops counting an unanswered installation in total would
-// silently turn ignorance into allow-all. Do not simplify it away.
+// exhaustiveNoAccess reports whether every installation so far ANSWERED "I cannot see
+// .github". total > 0 is a security guard: with no installations it degenerates to
+// 0 == 0, granting allow-all off no evidence, when an empty enumeration is ignorance
+// and belongs on the stale / fail-closed path. anyFailed is redundant only thanks to
+// scanInstalls' and record's counting discipline: an edit that stops counting an
+// unanswered installation would turn ignorance into allow-all. Do not simplify away.
 func (t *orgIssuerTally) exhaustiveNoAccess() bool {
 	return t.total > 0 && !t.anyFailed && t.noAccess == t.total
 }
 
-// record folds one non-definitive outcome into the tally, holding in one place the
-// invariant exhaustiveNoAccess relies on: every non-definitive answer counts as a
-// no-access agreement or a failure. total belongs to scanInstalls.
+// record folds one non-definitive outcome into the tally, holding the invariant
+// exhaustiveNoAccess relies on: every non-definitive answer counts either as a
+// no-access agreement or as a failure. total belongs to scanInstalls.
 func (t *orgIssuerTally) record(k fetchKind) {
 	switch k {
 	case fetchNoAccess:
@@ -362,10 +356,10 @@ func (t *orgIssuerTally) record(k fetchKind) {
 	}
 }
 
-// scanInstalls returns the first DEFINITIVE answer — fetchOK or fetchAbsent —
-// which ends the lookup; everything else is ignorance and folds into t via record.
-// On a definitive (true) return the tally is PARTIAL, so exhaustiveNoAccess must not
-// be consulted; only a false return leaves a tally worth reading.
+// scanInstalls returns the first DEFINITIVE answer (fetchOK or fetchAbsent), which
+// ends the lookup; everything else is ignorance and folds into t via record. On a
+// definitive return the tally is PARTIAL, so only a false return leaves a tally
+// exhaustiveNoAccess may be consulted on.
 func (s *sts) scanInstalls(ctx context.Context, owner string, installs []ghinstall.Installation, t *orgIssuerTally) (entry orgIssuerEntry, definitive bool) {
 	for _, in := range installs {
 		t.total++
@@ -385,8 +379,8 @@ func (s *sts) scanInstalls(ctx context.Context, owner string, installs []ghinsta
 }
 
 // installsNotIn returns the installations whose IDs are absent from alreadyScanned.
-// Matching is by ID, not transport pointer: GetAllFresh can return a fresh
-// *AppsTransport for an already-scanned installation. May return nil.
+// Matching is by ID, not transport pointer: GetAllFresh can return a fresh transport
+// for an already-scanned installation. May return nil.
 func installsNotIn(installs, alreadyScanned []ghinstall.Installation) []ghinstall.Installation {
 	seen := make(map[int64]struct{}, len(alreadyScanned))
 	for _, in := range alreadyScanned {
@@ -403,15 +397,14 @@ func installsNotIn(installs, alreadyScanned []ghinstall.Installation) []ghinstal
 
 // confirmNoAccess re-enumerates without the negative cache and returns the entry the
 // confirmation EARNED (Present or Invalid, not only Absent), or ok=false to leave the
-// caller on the stale / fail-closed path. GetAll can silently omit a just-installed
-// App (it maps a negative-cache NotFound to (nil, nil)), and allow-all is the one
-// conclusion a missing App flips: without this, installing an App to turn enforcement
-// ON would turn it off. It narrows OUR window, not GitHub's — GetAllFresh cannot
-// surface an installation GitHub has not yet replicated, and that residual is
-// accepted rather than fail closed for every single-App org that cannot read .github.
+// caller on the stale / fail-closed path. GetAll maps a negative-cache NotFound to
+// (nil, nil), silently omitting a just-installed App, and allow-all is the one
+// conclusion that flips: without this, installing an App to turn enforcement ON would
+// turn it off. It narrows only THIS service's window, not GitHub's replication lag,
+// whose residual is accepted rather than fail closed for every single-App org.
 func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghinstall.Installation, t *orgIssuerTally) (orgIssuerEntry, bool) {
-	// Bounded only on success: a confirm that earns nothing is deliberately not
-	// cached and repeats, which is how an org recovers once the API is healthy.
+	// A confirm that earns nothing is deliberately not cached and repeats, which is
+	// how an org recovers once the API is healthy.
 	fresh, err := s.rrm.GetAllFresh(ctx, owner)
 	if err != nil {
 		clog.WarnContextf(ctx, "confirming the installation set for %s failed: %v", owner, err)
@@ -422,8 +415,8 @@ func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghins
 		return entry, true
 	}
 
-	// Re-check rather than reuse the earlier verdict: the newly-found installations
-	// may have added a failure, which is fatal to the conclusion.
+	// Re-check rather than reuse the earlier verdict: the newly-found installations may
+	// have added a failure, which is fatal to the conclusion.
 	if t.exhaustiveNoAccess() {
 		clog.WarnContextf(ctx, "no installation can read %s/.github (re-enumerated without the installation cache); org issuer enforcement not applied", owner)
 		return absentOrgIssuerEntry(), true
@@ -432,13 +425,12 @@ func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghins
 	return orgIssuerEntry{}, false
 }
 
-// orgIssuerLookup returns the effective allowlist entry for owner, enumerating
-// EVERY installation and stopping at the first definitive answer. Not s.rrm.Get:
-// pickByQuota is argmax(remaining) with no rotation, so a Get-based loop could see
-// one blind installation forever and wrongly cache allow-all for the whole org.
-//
-// A non-nil error is a terminal gRPC status; a nil error with an Invalid entry
-// means the config is unusable and the caller surfaces entry.err.
+// orgIssuerLookup returns the effective allowlist entry for owner, enumerating EVERY
+// installation and stopping at the first definitive answer. Not s.rrm.Get: pickByQuota
+// is argmax(remaining) with no rotation, so a Get-based loop could see one blind
+// installation forever and wrongly cache allow-all for the whole org. A non-nil error
+// is a terminal gRPC status; a nil error with an Invalid entry means the config is
+// unusable and the caller surfaces entry.err.
 func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry, error) {
 	if e, ok := orgIssuers.Get(owner); ok {
 		return e, nil
@@ -459,11 +451,13 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 		}
 	}
 
-	// Not exhaustive, or something failed. Serving stale is inherently mode-aware:
-	// an audit-mode allowlist never denies.
+	// Not exhaustive, or something failed. Serving stale is mode-aware for free: an
+	// audit-mode allowlist never denies.
 	if stale, ok := staleOrgIssuers.Get(owner); ok {
+		// Served but NOT reseeded into the primary: a fresh 5-minute TTL on an entry
+		// already up to an hour old would let an Absent survive past its stale bound.
+		// Costs a re-enumeration per exchange for the duration of the outage.
 		clog.InfoContextf(ctx, "org issuer lookup incomplete for %s, serving stale entry", owner)
-		orgIssuers.Add(owner, stale)
 		return stale, nil
 	}
 
@@ -479,7 +473,7 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 }
 
 // settleOrgIssuerEntry caches a definitive entry, substituting the last known good
-// allowlist when the current file is unusable: a typo must not be an org-wide kill
+// allowlist when the current file is unusable so a typo is not an org-wide kill
 // switch. That list may be broader than intended, hence the Error log.
 func (s *sts) settleOrgIssuerEntry(ctx context.Context, owner string, entry orgIssuerEntry) orgIssuerEntry {
 	if entry.state == orgIssuerInvalid {
@@ -493,9 +487,9 @@ func (s *sts) settleOrgIssuerEntry(ctx context.Context, owner string, entry orgI
 	return entry
 }
 
-// checkOrgTrustedIssuers evaluates the org allowlist for owner, returning a
-// decision to record on the Event (nil when no allowlist applied or the issuer was
-// permitted) and a terminal error when the exchange must be denied.
+// checkOrgTrustedIssuers evaluates the org allowlist for owner, returning a decision
+// to record on the Event (nil when no allowlist applied or the issuer was permitted)
+// and a terminal error when the exchange must be denied.
 func (s *sts) checkOrgTrustedIssuers(ctx context.Context, owner, issuer string) (*IssuerDecision, error) {
 	entry, err := s.orgIssuerLookup(ctx, owner)
 	if err != nil {

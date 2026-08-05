@@ -975,8 +975,13 @@ func TestLookupServesStaleOnRateLimit(t *testing.T) {
 	if entry.state != orgIssuerPresent || entry.allow.Mode() != ModeAudit {
 		t.Fatalf("entry = %+v, want the stale audit-mode allowlist", entry)
 	}
-	if _, ok := orgIssuers.Get("orgallow"); !ok {
-		t.Error("primary cache should be reseeded after serving stale")
+	// Deliberately NOT reseeded. This assertion used to require the opposite, which
+	// encoded a real widening: a fresh 5-minute primary TTL on an entry already up
+	// to an hour old let an Absent admitted at t=0 be served past t=64:59, beyond
+	// the stale bound it is supposed to have. Not reseeding costs a re-enumeration
+	// per exchange for as long as the outage lasts.
+	if _, ok := orgIssuers.Get("orgallow"); ok {
+		t.Error("serving stale must not reseed the primary cache — that extends the window past the stale TTL")
 	}
 }
 
@@ -1832,5 +1837,94 @@ func TestInstallsNotInExcludesByID(t *testing.T) {
 
 	if got := installsNotIn(fresh, fresh); len(got) != 0 {
 		t.Errorf("installsNotIn(x, x) = %v, want empty", got)
+	}
+}
+
+// TestClassifyMintErrorRateLimitedBeforeNoAccess pins the ordering that keeps a
+// transient 422 from becoming AGREEMENT that .github is unreadable.
+//
+// GitHub documents 422 on the installation-token endpoint for both a genuine
+// validation failure and "endpoint has been spammed", and mint-422 is the sole
+// remaining source of agreement — so classifying an anti-abuse 422 as agreement
+// would let concurrent load flip an enforcing org to allow-all. Only a 422 with no
+// rate-limit signal counts.
+func TestClassifyMintErrorRateLimitedBeforeNoAccess(t *testing.T) {
+	mk := func(code int, hdr map[string]string) error {
+		h := http.Header{}
+		for k, v := range hdr {
+			h.Set(k, v)
+		}
+		return &ghinstallation.HTTPError{
+			Response: &http.Response{StatusCode: code, Header: h, Body: http.NoBody},
+		}
+	}
+	for _, tc := range []struct {
+		name     string
+		err      error
+		wantKind fetchKind
+	}{
+		{
+			// The regression: agreement is what falls the org open, so a 422 that
+			// carries a rate-limit signal must not supply it.
+			name:     "422 with Retry-After is a limit, not agreement",
+			err:      mk(http.StatusUnprocessableEntity, map[string]string{"Retry-After": "60"}),
+			wantKind: fetchRateLimited,
+		},
+		{
+			name:     "422 with exhausted quota is a limit, not agreement",
+			err:      mk(http.StatusUnprocessableEntity, map[string]string{"X-RateLimit-Remaining": "0"}),
+			wantKind: fetchRateLimited,
+		},
+		{
+			// Still agreement: a bare 422 is the genuine "no .github in this
+			// installation's repository selection" answer, and the org-wide
+			// fail-open depends on it.
+			name:     "bare 422 remains agreement",
+			err:      mk(http.StatusUnprocessableEntity, nil),
+			wantKind: fetchNoAccess,
+		},
+		{
+			name:     "bare 403 is neither a limit nor agreement",
+			err:      mk(http.StatusForbidden, nil),
+			wantKind: fetchFailed,
+		},
+		{
+			name:     "429 is a limit",
+			err:      mk(http.StatusTooManyRequests, nil),
+			wantKind: fetchRateLimited,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyMintError(t.Context(), "org", tc.err); got.kind != tc.wantKind {
+				t.Errorf("kind = %v, want %v", got.kind, tc.wantKind)
+			}
+		})
+	}
+}
+
+// TestStaleEntryIsNotReseededIntoPrimary pins that serving a stale entry does not
+// grant it a fresh primary TTL. Reseeding let an Absent admitted at t=0 be served
+// past t=64:59 — five minutes beyond the one-hour stale bound it is supposed to
+// have, silently widening a fail-open.
+func TestStaleEntryIsNotReseededIntoPrimary(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	// A durable Absent, then an enumeration that cannot conclude anything.
+	cacheOrgIssuerEntry(t.Context(), "orgallow", absentOrgIssuerEntry())
+	orgIssuers.Remove("orgallow")
+	if _, ok := staleOrgIssuers.Get("orgallow"); !ok {
+		t.Fatal("stale entry missing; this test needs one to serve")
+	}
+
+	s := &sts{rrm: &enumMgr{err: errors.New("enumeration failed")}, appCount: 1}
+	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	if err != nil {
+		t.Fatalf("orgIssuerLookup() = %v, want the stale entry served", err)
+	}
+	if entry.state != orgIssuerAbsent {
+		t.Fatalf("state = %v, want the stale orgIssuerAbsent", entry.state)
+	}
+	if _, ok := orgIssuers.Get("orgallow"); ok {
+		t.Error("stale entry was reseeded into the primary cache; that extends the fail-open past the stale TTL")
 	}
 }

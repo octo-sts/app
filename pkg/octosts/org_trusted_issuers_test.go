@@ -580,6 +580,37 @@ func TestCompileRejectsPatternsThatEscapeTheAnchoringGroup(t *testing.T) {
 	}
 }
 
+// TestCompileKnownLimitationQuantifiedGroupSpansSeparators documents a gap the
+// per-atom guard structurally cannot close, so that it stays a known limitation
+// rather than something readers assume is covered.
+//
+// The guard asks of each single-character atom "can this match /". A literal "/"
+// is deliberately allowed, so a quantified GROUP containing one spans separators
+// while every atom in it is innocent. Closing this needs AST analysis of
+// quantified subexpressions.
+//
+// If a future change starts rejecting this, that is an improvement — update this
+// test to assert the rejection rather than deleting it, so the reasoning survives.
+func TestCompileKnownLimitationQuantifiedGroupSpansSeparators(t *testing.T) {
+	const pat = `https://([a-z0-9.-]+/)*trusted\.example\.com`
+
+	al, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile()
+	if err != nil {
+		t.Fatalf("Compile() = %v; the guard now rejects this. That is an improvement — "+
+			"update this test to assert rejection instead of deleting it", err)
+	}
+
+	// The point of the limitation: an attacker-chosen host with the trusted name
+	// demoted to a path segment.
+	const spanning = "https://evil.com/x/trusted.example.com"
+	if !al.Allows(spanning) {
+		t.Fatalf("Allows(%q) = false; this test no longer demonstrates the limitation", spanning)
+	}
+	if !al.Allows("https://trusted.example.com") {
+		t.Error("the pattern should still match its intended issuer, which is why it looks correct to its author")
+	}
+}
+
 // TestCompileFailsClosedOnAnAtomItCannotAnalyze pins the posture, not a
 // particular syntax. Skipping an atom that does not compile turned every parsing
 // gap into a silent bypass ("[^]]", "\x2F"); the next gap must not be
