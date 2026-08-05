@@ -243,11 +243,9 @@ func classifyContentsError(ctx context.Context, owner string, err error) fetchRe
 		case http.StatusForbidden:
 			// Ignorance, NOT agreement, so fail CLOSED rather than return NoAccess:
 			// a read-time 403 is often org-wide (IP allowlist, SAML/SSO, ToS lock,
-			// contents-API incident), which would make every installation "agree"
-			// that no allowlist applies and fall the org open to allow-all during
-			// the incident. Genuine per-installation blindness does not arrive here
-			// — it fails at the MINT with a 422 — so reaching this means the mint
-			// already proved this installation can see .github.
+			// contents-API incident) and would make every installation "agree" that
+			// no allowlist applies. Genuine per-installation blindness fails earlier,
+			// at the MINT with a 422 — the sole source of agreement.
 			clog.WarnContextf(ctx, "org trusted issuers: read forbidden for %s/.github (403, not a rate limit); treating as unknown", owner)
 			return failedFetch()
 		}
@@ -336,17 +334,13 @@ type orgIssuerTally struct {
 	sawRateLimit bool
 }
 
-// exhaustiveNoAccess reports whether every installation considered so far
-// ANSWERED, and every answer was "I cannot see .github".
-//
-// total > 0 is a security guard: with no installations the comparison degenerates
-// to 0 == 0 and would grant org-wide allow-all off no evidence; an empty
-// enumeration is ignorance and belongs on the stale / fail-closed path.
-//
-// anyFailed is redundant today (only fetchNoAccess increments noAccess) but only
-// because of scanInstalls' and record's counting discipline; an edit that stops
-// counting an unanswered installation in total would silently turn ignorance into
-// allow-all. Do not simplify it away.
+// exhaustiveNoAccess reports whether every installation considered so far ANSWERED,
+// and every answer was "I cannot see .github". total > 0 is a security guard: with no
+// installations it degenerates to 0 == 0, granting org-wide allow-all off no evidence;
+// an empty enumeration is ignorance and belongs on the stale / fail-closed path.
+// anyFailed is redundant today only because of scanInstalls' and record's counting
+// discipline — an edit that stops counting an unanswered installation in total would
+// silently turn ignorance into allow-all. Do not simplify it away.
 func (t *orgIssuerTally) exhaustiveNoAccess() bool {
 	return t.total > 0 && !t.anyFailed && t.noAccess == t.total
 }
@@ -370,10 +364,8 @@ func (t *orgIssuerTally) record(k fetchKind) {
 
 // scanInstalls returns the first DEFINITIVE answer — fetchOK or fetchAbsent —
 // which ends the lookup; everything else is ignorance and folds into t via record.
-//
-// On a definitive (true) return the tally is PARTIAL — the answering installation
-// is counted in total but nowhere else — so exhaustiveNoAccess must not be
-// consulted. Only a false return leaves a tally worth reading.
+// On a definitive (true) return the tally is PARTIAL, so exhaustiveNoAccess must not
+// be consulted; only a false return leaves a tally worth reading.
 func (s *sts) scanInstalls(ctx context.Context, owner string, installs []ghinstall.Installation, t *orgIssuerTally) (entry orgIssuerEntry, definitive bool) {
 	for _, in := range installs {
 		t.total++
@@ -389,6 +381,54 @@ func (s *sts) scanInstalls(ctx context.Context, owner string, installs []ghinsta
 			t.record(res.kind)
 		}
 	}
+	return orgIssuerEntry{}, false
+}
+
+// installsNotIn returns the installations whose IDs are absent from alreadyScanned.
+// Matching is by ID, not transport pointer: GetAllFresh can return a fresh
+// *AppsTransport for an already-scanned installation. May return nil.
+func installsNotIn(installs, alreadyScanned []ghinstall.Installation) []ghinstall.Installation {
+	seen := make(map[int64]struct{}, len(alreadyScanned))
+	for _, in := range alreadyScanned {
+		seen[in.ID] = struct{}{}
+	}
+	var out []ghinstall.Installation
+	for _, in := range installs {
+		if _, ok := seen[in.ID]; !ok {
+			out = append(out, in)
+		}
+	}
+	return out
+}
+
+// confirmNoAccess re-enumerates without the negative cache and returns the entry the
+// confirmation EARNED (Present or Invalid, not only Absent), or ok=false to leave the
+// caller on the stale / fail-closed path. GetAll can silently omit a just-installed
+// App (it maps a negative-cache NotFound to (nil, nil)), and allow-all is the one
+// conclusion a missing App flips: without this, installing an App to turn enforcement
+// ON would turn it off. It narrows OUR window, not GitHub's — GetAllFresh cannot
+// surface an installation GitHub has not yet replicated, and that residual is
+// accepted rather than fail closed for every single-App org that cannot read .github.
+func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghinstall.Installation, t *orgIssuerTally) (orgIssuerEntry, bool) {
+	// Bounded only on success: a confirm that earns nothing is deliberately not
+	// cached and repeats, which is how an org recovers once the API is healthy.
+	fresh, err := s.rrm.GetAllFresh(ctx, owner)
+	if err != nil {
+		clog.WarnContextf(ctx, "confirming the installation set for %s failed: %v", owner, err)
+		return orgIssuerEntry{}, false
+	}
+
+	if entry, definitive := s.scanInstalls(ctx, owner, installsNotIn(fresh, scanned), t); definitive {
+		return entry, true
+	}
+
+	// Re-check rather than reuse the earlier verdict: the newly-found installations
+	// may have added a failure, which is fatal to the conclusion.
+	if t.exhaustiveNoAccess() {
+		clog.WarnContextf(ctx, "no installation can read %s/.github (re-enumerated without the installation cache); org issuer enforcement not applied", owner)
+		return absentOrgIssuerEntry(), true
+	}
+
 	return orgIssuerEntry{}, false
 }
 
@@ -414,10 +454,9 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 	// Absent requires POSITIVE knowledge: a failed or partial enumeration is not
 	// evidence of absence and is never cached. See exhaustiveNoAccess.
 	if enumErr == nil && t.exhaustiveNoAccess() {
-		clog.WarnContextf(ctx, "no installation can read %s/.github; org issuer enforcement not applied", owner)
-		absent := absentOrgIssuerEntry()
-		cacheOrgIssuerEntry(ctx, owner, absent)
-		return absent, nil
+		if entry, ok := s.confirmNoAccess(ctx, owner, installs, &t); ok {
+			return s.settleOrgIssuerEntry(ctx, owner, entry), nil
+		}
 	}
 
 	// Not exhaustive, or something failed. Serving stale is inherently mode-aware:

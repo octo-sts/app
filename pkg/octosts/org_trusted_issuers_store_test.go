@@ -774,6 +774,21 @@ type enumMgr struct {
 	installs []ghinstall.Installation
 	err      error
 	getCalls atomic.Int32
+
+	// freshInstalls / freshErr model what GetAllFresh sees. freshInstalls
+	// defaults to installs, so a fake that sets neither describes a manager
+	// whose caches were not hiding anything — and the confirm step agrees with
+	// the cheap enumeration. Set freshInstalls to a superset to model an App
+	// installed within the negative-cache TTL.
+	//
+	// Precedence is freshErr, then freshInstalls, then a fallback that mirrors
+	// GetAll exactly — installs AND err. So a fake that sets only err is a failed
+	// enumeration on BOTH paths rather than one that reports success on the
+	// confirm, while a fake that sets freshInstalls says "the confirm sees this,
+	// successfully" and err stays scoped to GetAll.
+	freshInstalls []ghinstall.Installation
+	freshErr      error
+	freshCalls    atomic.Int32
 }
 
 func (e *enumMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
@@ -797,9 +812,15 @@ func (e *enumMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation,
 	return e.installs, e.err
 }
 
-// GetAllFresh delegates: these tests do not distinguish the two enumerations.
-func (e *enumMgr) GetAllFresh(ctx context.Context, owner string) ([]ghinstall.Installation, error) {
-	return e.GetAll(ctx, owner)
+func (e *enumMgr) GetAllFresh(_ context.Context, _ string) ([]ghinstall.Installation, error) {
+	e.freshCalls.Add(1)
+	if e.freshErr != nil {
+		return nil, e.freshErr
+	}
+	if e.freshInstalls != nil {
+		return e.freshInstalls, nil
+	}
+	return e.installs, e.err
 }
 
 var _ ghinstall.Manager = (*enumMgr)(nil)
@@ -832,16 +853,24 @@ func TestLookupSurvivesOneBlindInstallation(t *testing.T) {
 	}
 }
 
+// TestLookupAllInstallationsBlindIsAbsent is the fail-open that must survive:
+// once CONFIRMED, a deployment that genuinely cannot read .github keeps working,
+// which describes most installations. This fake sets neither freshInstalls nor
+// freshErr, so the confirm agrees with the cheap enumeration.
+//
+// It also pins the confirm's cost: exactly one GetAllFresh call, bounded by the
+// orgIssuers entry it writes rather than paid per exchange.
 func TestLookupAllInstallationsBlindIsAbsent(t *testing.T) {
 	cleanupOrgIssuers(t, "orgallow")
 
 	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{
+	mgr := &enumMgr{installs: []ghinstall.Installation{
 		{Transport: a, ID: 1, AppID: 10},
 		{Transport: b, ID: 2, AppID: 20},
-	}}, appCount: 2}
+	}}
+	s := &sts{rrm: mgr, appCount: 2}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -853,6 +882,18 @@ func TestLookupAllInstallationsBlindIsAbsent(t *testing.T) {
 	if cached, ok := orgIssuers.Get("orgallow"); !ok || cached.state != orgIssuerAbsent {
 		t.Error("an exhaustive all-blind verdict should be cached as Absent")
 	}
+	if got := mgr.freshCalls.Load(); got != 1 {
+		t.Errorf("GetAllFresh called %d times, want exactly 1", got)
+	}
+
+	// The confirm is bounded by the cache it writes: a second lookup is served
+	// from orgIssuers and pays nothing.
+	if _, err := s.orgIssuerLookup(t.Context(), "orgallow"); err != nil {
+		t.Fatalf("second orgIssuerLookup() = %v, want nil", err)
+	}
+	if got := mgr.freshCalls.Load(); got != 1 {
+		t.Errorf("GetAllFresh called %d times across two lookups, want 1 — the confirm must be bounded by the orgIssuers TTL, not run per exchange", got)
+	}
 }
 
 // TestLookupPartialEnumerationNeverCachesAbsent: a failed enumeration is not
@@ -862,10 +903,21 @@ func TestLookupPartialEnumerationNeverCachesAbsent(t *testing.T) {
 
 	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 
-	s := &sts{rrm: &enumMgr{
+	// freshInstalls is deliberately set to a would-be-confirming superset. If the
+	// enumErr == nil guard were dropped, the confirm would run, find the extra
+	// installation blind too, and cache Absent off a GetAll that had already
+	// reported itself incomplete. Without this the guard is unpinned: with
+	// freshInstalls unset, GetAllFresh falls back to (installs, err) and the
+	// confirm would fail on its own, so the test would pass either way.
+	mgr := &enumMgr{
 		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
 		err:      errors.New("could not list installations for app 20"),
-	}, appCount: 2}
+		freshInstalls: []ghinstall.Installation{
+			{Transport: blind, ID: 1, AppID: 10},
+			{Transport: blind, ID: 2, AppID: 20},
+		},
+	}
+	s := &sts{rrm: mgr, appCount: 2}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -874,6 +926,9 @@ func TestLookupPartialEnumerationNeverCachesAbsent(t *testing.T) {
 	}
 	if _, ok := orgIssuers.Get("orgallow"); ok {
 		t.Error("nothing may be cached when the enumeration was not exhaustive")
+	}
+	if got := mgr.freshCalls.Load(); got != 0 {
+		t.Errorf("GetAllFresh called %d times, want 0 — a GetAll that reported itself incomplete is not a candidate for confirmation", got)
 	}
 }
 
@@ -1540,5 +1595,242 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 	}
 	if _, ok := orgIssuers.Get("orgallow"); ok {
 		t.Error("nothing may be cached for an owner the App is not installed on")
+	}
+}
+
+// TestLookupConfirmsBeforeGrantingAllowAll is the regression test for the
+// negative-cache window.
+//
+// An organization runs App A on selected repositories only, so A cannot read
+// .github. It installs App B to turn enforcement ON. For up to the
+// negative-cache TTL, GetAll cannot see B — and reports a NIL error while not
+// seeing it, because manager.GetAll maps NotFound to (nil, nil). Concluding from
+// the cheap enumeration alone would cache allow-all for the whole organization
+// at exactly the moment enforcement was meant to begin.
+func TestLookupConfirmsBeforeGrantingAllowAll(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	hidden := newAppsTransport(t, newFakeGitHub())
+
+	mgr := &enumMgr{
+		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
+		freshInstalls: []ghinstall.Installation{
+			{Transport: blind, ID: 1, AppID: 10},
+			{Transport: hidden, ID: 2, AppID: 20},
+		},
+	}
+	s := &sts{rrm: mgr, appCount: 2}
+
+	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	if err != nil {
+		t.Fatalf("orgIssuerLookup() = %v, want nil", err)
+	}
+	if entry.state != orgIssuerPresent {
+		t.Fatalf("state = %v, want orgIssuerPresent — an App hidden by the negative cache must not read as allow-all", entry.state)
+	}
+	if got := mgr.freshCalls.Load(); got != 1 {
+		t.Errorf("GetAllFresh called %d times, want exactly 1", got)
+	}
+	if cached, ok := orgIssuers.Get("orgallow"); !ok || cached.state != orgIssuerPresent {
+		t.Error("the confirmed allowlist should be cached")
+	}
+}
+
+// TestLookupFailedConfirmNeverCachesAbsent: if the confirmation cannot be made,
+// the conclusion has not been earned. That is ignorance, not absence.
+func TestLookupFailedConfirmNeverCachesAbsent(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+
+	s := &sts{rrm: &enumMgr{
+		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
+		freshErr: errors.New("could not list installations for app 20"),
+	}, appCount: 2}
+
+	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unavailable {
+		t.Fatalf("orgIssuerLookup() = %v, want Unavailable when the confirmation failed", err)
+	}
+	if _, ok := orgIssuers.Get("orgallow"); ok {
+		t.Error("nothing may be cached when the absence conclusion could not be confirmed")
+	}
+}
+
+// TestLookupNewlyFoundInstallationBlindIsAbsent: a confirmation that finds a new
+// App which ALSO cannot see .github earns the conclusion the cheap pass only
+// guessed at.
+func TestLookupNewlyFoundInstallationBlindIsAbsent(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+
+	s := &sts{rrm: &enumMgr{
+		installs: []ghinstall.Installation{{Transport: a, ID: 1, AppID: 10}},
+		freshInstalls: []ghinstall.Installation{
+			{Transport: a, ID: 1, AppID: 10},
+			{Transport: b, ID: 2, AppID: 20},
+		},
+	}, appCount: 2}
+
+	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	if err != nil {
+		t.Fatalf("orgIssuerLookup() = %v, want nil", err)
+	}
+	if entry.state != orgIssuerAbsent {
+		t.Fatalf("state = %v, want orgIssuerAbsent", entry.state)
+	}
+	if cached, ok := orgIssuers.Get("orgallow"); !ok || cached.state != orgIssuerAbsent {
+		t.Error("every installation, including the newly-found one, agreed — that verdict is cacheable")
+	}
+}
+
+// TestLookupNewlyFoundInstallationRateLimitedFailsClosed: a newly-found App that
+// cannot be READ leaves the conclusion unearned, so the exchange must fail
+// closed rather than fall back to allow-all.
+func TestLookupNewlyFoundInstallationRateLimitedFailsClosed(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	limited := newAppsTransport(t, newOrgFakeGitHub(withMintRateLimited()))
+
+	s := &sts{rrm: &enumMgr{
+		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
+		freshInstalls: []ghinstall.Installation{
+			{Transport: blind, ID: 1, AppID: 10},
+			{Transport: limited, ID: 2, AppID: 20},
+		},
+	}, appCount: 2}
+
+	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.ResourceExhausted {
+		t.Fatalf("orgIssuerLookup() = %v, want ResourceExhausted", err)
+	}
+	if _, ok := orgIssuers.Get("orgallow"); ok {
+		t.Error("nothing may be cached when a newly-found installation could not be read")
+	}
+}
+
+// TestLookupConfirmSubsetIsAbsent: a confirmation showing FEWER installations
+// (an App uninstalled since its positive cache entry was written) needs no
+// special handling. The extras already reported no-access, which does not weaken
+// "no installation can read .github".
+func TestLookupConfirmSubsetIsAbsent(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+
+	s := &sts{rrm: &enumMgr{
+		installs: []ghinstall.Installation{
+			{Transport: a, ID: 1, AppID: 10},
+			{Transport: b, ID: 2, AppID: 20},
+		},
+		freshInstalls: []ghinstall.Installation{{Transport: a, ID: 1, AppID: 10}},
+	}, appCount: 2}
+
+	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	if err != nil {
+		t.Fatalf("orgIssuerLookup() = %v, want nil", err)
+	}
+	if entry.state != orgIssuerAbsent {
+		t.Fatalf("state = %v, want orgIssuerAbsent", entry.state)
+	}
+}
+
+// TestTallyAccumulatesAcrossPasses pins the property the confirmation step is
+// built on: a second scanInstalls pass ADDS to the first pass's evidence.
+// Recomputing instead of accumulating would let a failure in the second pass go
+// unnoticed and turn ignorance into org-wide allow-all.
+func TestTallyAccumulatesAcrossPasses(t *testing.T) {
+	blindA := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	blindB := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	broken := newAppsTransport(t, newOrgFakeGitHub(withContentsServerError()))
+
+	s := &sts{appCount: 2}
+	first := []ghinstall.Installation{{Transport: blindA, ID: 1, AppID: 10}}
+
+	t.Run("a failure in the second pass destroys exhaustiveness", func(t *testing.T) {
+		var tally orgIssuerTally
+		if _, definitive := s.scanInstalls(t.Context(), "orgallow", first, &tally); definitive {
+			t.Fatal("scanInstalls() = definitive, want not definitive for an all-blind pass")
+		}
+		if !tally.exhaustiveNoAccess() {
+			t.Fatal("after pass 1 the evidence should be exhaustive no-access; this test is vacuous otherwise")
+		}
+		second := []ghinstall.Installation{{Transport: broken, ID: 2, AppID: 20}}
+		if _, definitive := s.scanInstalls(t.Context(), "orgallow", second, &tally); definitive {
+			t.Fatal("scanInstalls() = definitive, want not definitive for a failed read")
+		}
+		if tally.exhaustiveNoAccess() {
+			t.Error("a failure in the second pass must destroy exhaustiveness, or ignorance becomes org-wide allow-all")
+		}
+	})
+
+	t.Run("a second pass that also agrees keeps exhaustiveness", func(t *testing.T) {
+		var tally orgIssuerTally
+		s.scanInstalls(t.Context(), "orgallow", first, &tally)
+		second := []ghinstall.Installation{{Transport: blindB, ID: 2, AppID: 20}}
+		s.scanInstalls(t.Context(), "orgallow", second, &tally)
+		if !tally.exhaustiveNoAccess() {
+			t.Error("every installation across both passes agreed; that is exhaustive no-access")
+		}
+	})
+
+	// The common production path: the confirmation found nothing new, so
+	// installsNotIn returns nil and the second pass scans an empty slice. It must
+	// leave the first pass's verdict intact rather than resetting anything.
+	t.Run("an empty second pass leaves the verdict intact", func(t *testing.T) {
+		var tally orgIssuerTally
+		s.scanInstalls(t.Context(), "orgallow", first, &tally)
+		if _, definitive := s.scanInstalls(t.Context(), "orgallow", nil, &tally); definitive {
+			t.Fatal("scanInstalls() over an empty slice = definitive, want not definitive")
+		}
+		if !tally.exhaustiveNoAccess() {
+			t.Error("an empty second pass must not disturb the first pass's verdict")
+		}
+	})
+}
+
+// TestExhaustiveNoAccessZeroTallyIsFalse pins the fail-open guard that no
+// end-to-end test can reach, since orgIssuerLookup is only entered after routing
+// already found an installation. Without total > 0 the comparison is 0 == 0,
+// which would grant allow-all off no evidence at all.
+func TestExhaustiveNoAccessZeroTallyIsFalse(t *testing.T) {
+	var tally orgIssuerTally
+	if tally.exhaustiveNoAccess() {
+		t.Error("a zero tally must not report exhaustive no-access")
+	}
+}
+
+// TestInstallsNotInExcludesByID encodes the GetAllFresh contract: it can hand
+// back a fresh *AppsTransport for an installation the first pass already asked,
+// so exclusion must be by ID. Comparing structs or transport pointers would
+// re-scan every installation and double the API cost of every absence conclusion.
+func TestInstallsNotInExcludesByID(t *testing.T) {
+	one := newAppsTransport(t, newFakeGitHub())
+	two := newAppsTransport(t, newFakeGitHub())
+
+	fresh := []ghinstall.Installation{
+		{Transport: one, ID: 1, AppID: 10},
+		{Transport: two, ID: 2, AppID: 20},
+	}
+	// Same ID as fresh[0], deliberately a DIFFERENT transport pointer.
+	alreadyScanned := []ghinstall.Installation{{Transport: two, ID: 1, AppID: 10}}
+
+	got := installsNotIn(fresh, alreadyScanned)
+	if len(got) != 1 {
+		t.Fatalf("installsNotIn() returned %d installations, want 1", len(got))
+	}
+	if got[0].ID != 2 {
+		t.Errorf("installsNotIn() kept ID %d, want 2", got[0].ID)
+	}
+
+	if got := installsNotIn(fresh, fresh); len(got) != 0 {
+		t.Errorf("installsNotIn(x, x) = %v, want empty", got)
 	}
 }

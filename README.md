@@ -160,7 +160,7 @@ hit. Grant the App access to `.github` before relying on this control.
 | Situation | Result |
 | --- | --- |
 | File absent | All issuers permitted |
-| App cannot read `.github` | All issuers permitted, logged as a warning |
+| No App can read `.github` | All issuers permitted, logged as a warning. Re-checked against GitHub without the local installation cache before concluding — see the propagation note below |
 | Rate limited, or GitHub unavailable | Last known good allowlist; if there is none, the exchange is rejected |
 | File present but invalid | Last known good allowlist; if there is none, every exchange in the organization is rejected |
 
@@ -175,6 +175,10 @@ is degraded can keep permitting all issuers for up to an hour. This is
 deliberate: it is what keeps the organizations that do not use this feature
 working through a GitHub incident. One successful read replaces it. Confirm
 enforcement actually took effect after enabling rather than assuming it did.
+Installing the App is also not instantaneous: before concluding that no
+installation can read `.github`, octo-sts re-enumerates its installations
+without its local cache — but it cannot see an installation GitHub has not yet
+propagated, so enforcement can take a few minutes to begin after an install.
 
 #### Hardening
 
