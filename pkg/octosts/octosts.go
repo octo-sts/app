@@ -181,7 +181,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 
 	var base *ghinstallation.AppsTransport
-	base, e.InstallationID, e.TrustPolicy, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject)
+	base, e.InstallationID, e.TrustPolicy, e.IssuerAllowlist, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject, issuer)
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +276,18 @@ func (s *sts) getExchangeInstall(ctx context.Context, owner, scope, identity, su
 	return atr, id, nil
 }
 
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, subject string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, error) {
+// lookupInstallAndTrustPolicy resolves the installation, enforces the
+// organization trusted-issuer allowlist, and loads the trust policy.
+//
+// issuer must be the value apiauth.ExtractIssuer returned — the same one
+// provider.Get was given — because allowlist entries are always written with a
+// scheme, and ExtractIssuer applies auth.NormalizeIssuer. In practice the two
+// forms coincide for every token that reaches here: the only value
+// NormalizeIssuer rewrites is the schemeless "accounts.google.com", and
+// TrustPolicy.CheckToken rejects that outright because
+// oidcvalidate.IsValidIssuer returns false for it. Passing the normalized value
+// is the conservative choice should either of those change.
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, subject, issuer string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, *IssuerDecision, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -295,27 +306,39 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	if cached, ok := trustPolicies.Get(tpKey); ok && cached == negativeCacheConst {
 		clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-		return nil, 0, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+		return nil, 0, nil, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 
 	// Read the trust policy using any available installation.
 	readAtr, readID, err := s.rrm.Get(ctx, owner, scope, identity)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, nil, err
+	}
+
+	// Enforce the organization trusted-issuer allowlist before spending a policy
+	// read or a second token mint on an issuer we may reject.
+	//
+	// This runs AFTER s.rrm.Get even though it ignores its return values: Get's
+	// negative install cache rejects an owner the App is not installed on before
+	// we do any allowlist work, which bounds the API amplification an arbitrary
+	// caller-supplied scope can drive.
+	decision, err := s.checkOrgTrustedIssuers(ctx, owner, issuer)
+	if err != nil {
+		return nil, 0, nil, decision, err
 	}
 
 	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, readAtr, readID, owner, scope, identity, tpKey, tp)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, decision, err
 	}
 
 	// Now that we know the permissions, pick the exchange installation.
 	atr, id, err := s.getExchangeInstall(ctx, owner, scope, identity, subject, otp.Permissions, readAtr, readID)
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, nil, decision, err
 	}
 
-	return atr, id, otp, nil
+	return atr, id, otp, decision, nil
 }
 
 // lookupTrustPolicyWithRetry fetches the trust policy, retrying with

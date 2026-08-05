@@ -97,16 +97,49 @@ func newFakeGitHub() *fakeGitHub {
 		})
 	})
 	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		// Sentinel: owner "orgdir" always resolves the trusted-issuers path to
+		// a directory rather than a file. go-github distinguishes the two by
+		// response shape — a single JSON object is a file, a JSON array is a
+		// directory listing — so this is the only way to make GetContents
+		// return a nil *RepositoryContent without an actual directory on disk.
+		// A real testdata directory would hit os.ReadFile's EISDIR below, which
+		// is not os.IsNotExist and would fall into the 500 branch instead.
+		if r.PathValue("org") == "orgdir" && r.PathValue("identity") == "trusted-token-issuers.yaml" {
+			json.NewEncoder(w).Encode([]*github.RepositoryContent{
+				{Type: github.Ptr("file"), Name: github.Ptr("placeholder")},
+			})
+			return
+		}
+
 		b, err := os.ReadFile(filepath.Join("testdata", r.PathValue("org"), r.PathValue("repo"), r.PathValue("identity")))
 		if err != nil {
+			// A missing fixture is a 404, matching real GitHub. The previous
+			// 500 (which also fell through to write a body) made the
+			// file-absent path indistinguishable from a server error.
+			if os.IsNotExist(err) {
+				writeGitHubNotFound(w)
+				return
+			}
 			w.WriteHeader(http.StatusInternalServerError)
 			fmt.Fprintf(io.MultiWriter(w, os.Stdout), "ReadFile failed: %v\n", err)
+			return
 		}
 		json.NewEncoder(w).Encode(github.RepositoryContent{
 			Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
 			Type:     github.Ptr("file"),
 			Encoding: github.Ptr("base64"),
 		})
+	})
+	// Revoke() posts to this path, but it does NOT reach this fake. Revoke's URL
+	// follows the configured baseURL, which is empty in these tests, so it
+	// resolves to https://api.github.com/installation/token; and it sends via
+	// http.DefaultClient rather than the injected transport, so every revoke in
+	// tests escapes to real GitHub and 401s. Callers only log that warning, so
+	// nothing fails. This route is here so the fake is already correct if Revoke
+	// is ever pointed at the fake. The same dead route already exists in
+	// newFakeGitHubNotFoundCounter.
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
@@ -116,6 +149,20 @@ func newFakeGitHub() *fakeGitHub {
 	return &fakeGitHub{
 		mux: mux,
 	}
+}
+
+// writeGitHubNotFound writes a 404 shaped like a real GitHub error response, so
+// go-github produces a *github.ErrorResponse whose Response.StatusCode is 404.
+//
+// The status comes from WriteHeader, not from the body: go-github's
+// CheckResponse builds ErrorResponse{Response: r} from the real *http.Response
+// and unmarshals only Message/Errors/Block/DocumentationURL out of the body.
+// ErrorResponse.Response is tagged json:"-", so setting it here would be inert
+// — hence only Message is encoded.
+func writeGitHubNotFound(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	json.NewEncoder(w).Encode(github.ErrorResponse{Message: "Not Found"})
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -316,6 +363,14 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 		})
 	})
 	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		// The organization allowlist read must not be rate-limited here, or
+		// these tests stop exercising the *policy* read they were written for.
+		// A later task adds a separate all-paths rate-limit fake for testing
+		// the allowlist read's own rate-limit handling.
+		if r.PathValue("identity") == "trusted-token-issuers.yaml" {
+			writeGitHubNotFound(w)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		// Real GitHub sends this on a primary rate limit, and it is what makes
 		// go-github return a *github.RateLimitError rather than a bare
@@ -329,6 +384,9 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 			Response: &http.Response{StatusCode: statusCode},
 			Message:  "API rate limit exceeded",
 		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotImplemented)
@@ -358,6 +416,12 @@ func TestExchangeRateLimit(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			orgIssuers.Add("org", absentOrgIssuerEntry())
+			t.Cleanup(func() {
+				orgIssuers.Remove("org")
+				staleOrgIssuers.Remove("org")
+			})
+
 			ctx := context.Background()
 			atr := newAppsTransport(t, newFakeGitHubRateLimit(tc.statusCode))
 
@@ -532,6 +596,12 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 		staleTrustPolicies.Remove(key)
 	})
 
+	orgIssuers.Add("org", absentOrgIssuerEntry())
+	t.Cleanup(func() {
+		orgIssuers.Remove("org")
+		staleOrgIssuers.Remove("org")
+	})
+
 	ctx := context.Background()
 	rateLimitedAtr := newAppsTransport(t, newFakeGitHubRateLimit(http.StatusForbidden))
 	workingAtr := newAppsTransport(t, newFakeGitHub())
@@ -584,6 +654,12 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+	})
+
+	orgIssuers.Add("org", absentOrgIssuerEntry())
+	t.Cleanup(func() {
+		orgIssuers.Remove("org")
+		staleOrgIssuers.Remove("org")
 	})
 
 	ctx := context.Background()
@@ -728,7 +804,7 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 		appCount: 1,
 	}
 
-	_, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject")
+	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

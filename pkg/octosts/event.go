@@ -15,6 +15,22 @@ type Event struct {
 	TokenSHA256    string          `json:"token_sha256"`
 	Error          string          `json:"error,omitempty"`
 	Time           time.Time       `json:"time"`
+
+	// IssuerAllowlist records the org trusted-issuer decision: set for audit-mode
+	// pass-throughs and enforce-mode denials, so both are countable without Error.
+	IssuerAllowlist *IssuerDecision `json:"issuer_allowlist,omitempty"`
+}
+
+// IssuerDecision is the outcome of the org trusted-issuer check, recorded only
+// when the issuer was NOT on the allowlist.
+type IssuerDecision struct {
+	Mode Mode `json:"mode"`
+
+	// Allowed is the actual outcome, not the allowlist verdict (always "not
+	// permitted" here): true in audit mode, false in enforce.
+	Allowed bool `json:"allowed"`
+
+	Issuer string `json:"iss"`
 }
 
 type Actor struct {
