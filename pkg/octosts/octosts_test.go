@@ -63,6 +63,11 @@ func (f *fakeInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Instal
 	return []ghinstall.Installation{{Transport: f.atr, ID: 1234, AppID: f.atr.AppID()}}, nil
 }
 
+// GetAllFresh delegates: these tests exercise routing, not cache freshness.
+func (f *fakeInstallMgr) GetAllFresh(ctx context.Context, owner string) ([]ghinstall.Installation, error) {
+	return f.GetAll(ctx, owner)
+}
+
 var _ ghinstall.Manager = (*fakeInstallMgr)(nil)
 
 type fakeGitHub struct {
@@ -420,6 +425,11 @@ func (f *failInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Instal
 	return nil, fmt.Errorf("kms unavailable")
 }
 
+// GetAllFresh delegates: these tests exercise routing, not cache freshness.
+func (f *failInstallMgr) GetAllFresh(ctx context.Context, owner string) ([]ghinstall.Installation, error) {
+	return f.GetAll(ctx, owner)
+}
+
 var _ ghinstall.Manager = (*failInstallMgr)(nil)
 
 // sequentialInstallMgr returns transports in order on successive Get calls.
@@ -451,6 +461,11 @@ func (s *sequentialInstallMgr) GetAll(_ context.Context, _ string) ([]ghinstall.
 		out = append(out, ghinstall.Installation{Transport: atr, ID: int64(1234 + i), AppID: atr.AppID()})
 	}
 	return out, nil
+}
+
+// GetAllFresh delegates: these tests exercise routing, not cache freshness.
+func (s *sequentialInstallMgr) GetAllFresh(ctx context.Context, owner string) ([]ghinstall.Installation, error) {
+	return s.GetAll(ctx, owner)
 }
 
 var _ ghinstall.Manager = (*sequentialInstallMgr)(nil)
