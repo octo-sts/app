@@ -55,6 +55,15 @@ func (f *fakePickerManager) GetAll(_ context.Context, _ string) ([]Installation,
 	return []Installation{{ID: f.installID}}, nil
 }
 
+// GetAllFresh just delegates: these tests do not distinguish the two
+// enumerations, so this fake cannot model a negative cache hiding an install
+// from GetAll but not GetAllFresh. A test that needs that distinction must use a
+// fake that models the two separately — stubManager here, or enumMgr in
+// pkg/octosts — otherwise it is a regression test that cannot fail.
+func (f *fakePickerManager) GetAllFresh(ctx context.Context, owner string) ([]Installation, error) {
+	return f.GetAll(ctx, owner)
+}
+
 func newFakePickerManagers(installIDs ...int64) []Manager {
 	out := make([]Manager, len(installIDs))
 	for i, id := range installIDs {
