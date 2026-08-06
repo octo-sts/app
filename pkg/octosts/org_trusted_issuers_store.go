@@ -201,8 +201,6 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 		// ghinstallation leaves the body open for inspection, so closing it is ours.
 		if herr.Response.Body != nil {
 			defer herr.Response.Body.Close()
-		}
-		if herr.Response.Body != nil {
 			if body, rerr := io.ReadAll(io.LimitReader(herr.Response.Body, 4096)); rerr == nil && len(body) > 0 {
 				clog.DebugContextf(ctx, "org trusted issuers: mint failure body for %s: %s", owner, body)
 			}
@@ -513,13 +511,13 @@ func (s *sts) checkOrgTrustedIssuers(ctx context.Context, owner, issuer string) 
 		return nil, nil
 	}
 
-	d := &IssuerDecision{Mode: entry.allow.Mode(), Issuer: issuer}
-	if entry.allow.Mode() == ModeAudit {
-		d.Allowed = true
+	// Reached only once Allows has said no, so the outcome follows from the mode.
+	mode := entry.allow.Mode()
+	d := &IssuerDecision{Mode: mode, Issuer: issuer, Allowed: mode == ModeAudit}
+	if mode == ModeAudit {
 		clog.WarnContextf(ctx, "org issuer audit: %s would deny issuer %q", owner, issuer)
 		return d, nil
 	}
-	d.Allowed = false
 	clog.WarnContextf(ctx, "org issuer enforce: %s denied issuer %q", owner, issuer)
 	return d, status.Error(codes.PermissionDenied, msgIssuerNotPermitted)
 }

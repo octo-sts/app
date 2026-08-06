@@ -24,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -867,6 +868,17 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	}
 }
 
+// sharedAppKey returns one RSA key for the whole package. newAppsTransport is called
+// ~50 times across these tests and RSA-2048 generation dominated the suite's runtime;
+// the key only signs App JWTs that the fakes never verify, so one is enough.
+var sharedAppKey = sync.OnceValue(func() *rsa.PrivateKey {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		panic("generating the shared test App key: " + err.Error())
+	}
+	return key
+})
+
 func newAppsTransport(t *testing.T, h http.Handler) *ghinstallation.AppsTransport {
 	t.Helper()
 
@@ -895,11 +907,7 @@ func newAppsTransport(t *testing.T, h http.Handler) *ghinstallation.AppsTranspor
 		},
 	}
 
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("GenerateKey failed: %v", err)
-	}
-	ghsigner := ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)
+	ghsigner := ghinstallation.NewRSASigner(jwt.SigningMethodRS256, sharedAppKey())
 
 	atr, err := ghinstallation.NewAppsTransportWithOptions(transport, 1234, ghinstallation.WithSigner(ghsigner))
 	if err != nil {
