@@ -76,6 +76,13 @@ type sts struct {
 	orgPolicyRepo string
 }
 
+func (s *sts) policyRepo() string {
+	if s.orgPolicyRepo != "" {
+		return s.orgPolicyRepo
+	}
+	return ".github"
+}
+
 type cacheTrustPolicyKey struct {
 	owner    string
 	repo     string

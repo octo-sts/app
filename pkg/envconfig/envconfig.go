@@ -56,6 +56,10 @@ type EnvConfigWebhook struct {
 	WebhookSecret string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"true"`
 	// If set, only process events from these organizations (comma separated).
 	OrganizationFilter string `envconfig:"GITHUB_WEBHOOK_ORGANIZATION_FILTER"`
+	// OrgPolicyRepo is the repository name (without owner) that holds org-scoped
+	// trust policies and the org trusted-issuer allowlist. Defaults to ".github".
+	// Must not be empty; setting ORG_POLICY_REPO="" is rejected at startup.
+	OrgPolicyRepo string `envconfig:"ORG_POLICY_REPO" required:"false" default:".github"`
 }
 
 func AppConfig() (*EnvConfigApp, error) {
@@ -79,6 +83,10 @@ func WebhookConfig() (*EnvConfigWebhook, error) {
 	var err error
 	if err = envconfig.Process("", cfg); err != nil {
 		return nil, err
+	}
+
+	if cfg.OrgPolicyRepo == "" {
+		return nil, errors.New("ORG_POLICY_REPO must not be empty")
 	}
 
 	return cfg, err

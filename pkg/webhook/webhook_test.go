@@ -60,7 +60,7 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.Context(t)
-	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}); err != nil {
+	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -285,7 +285,7 @@ func TestFilterValidatedFiles(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := filterValidatedFiles("some-service", tc.input)
+			got := filterValidatedFiles("some-service", tc.input, ".github")
 			if !slices.Equal(tc.want, got) {
 				t.Errorf("filterValidatedFiles(%v) = %v, want %v", tc.input, got, tc.want)
 			}
@@ -1784,7 +1784,7 @@ func TestIsValidatedPath(t *testing.T) {
 		{name: "non-policy yaml inside the policy directory of .github", repo: ".github", path: ".github/chainguard/config.yaml", want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isValidatedPath(tc.repo, tc.path); got != tc.want {
+			if got := isValidatedPath(tc.repo, tc.path, ".github"); got != tc.want {
 				t.Errorf("isValidatedPath(%q, %q) = %v, want %v", tc.repo, tc.path, got, tc.want)
 			}
 		})
@@ -1802,13 +1802,13 @@ func TestDirScanBranchFiltersPaths(t *testing.T) {
 		".github/chainguard/README.md",
 	}
 
-	got := filterValidatedFiles("some-service", all)
+	got := filterValidatedFiles("some-service", all, ".github")
 	want := []string{".github/chainguard/foo.sts.yaml"}
 	if !slices.Equal(got, want) {
 		t.Errorf("filterValidatedFiles(some-service) = %v, want %v — the allowlist must not be validated outside .github", got, want)
 	}
 
-	got = filterValidatedFiles(".github", all)
+	got = filterValidatedFiles(".github", all, ".github")
 	want = []string{".github/chainguard/foo.sts.yaml", ".github/chainguard/trusted-token-issuers.yaml"}
 	if !slices.Equal(got, want) {
 		t.Errorf("filterValidatedFiles(.github) = %v, want %v", got, want)

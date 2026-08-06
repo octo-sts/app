@@ -259,7 +259,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 
 	atr := ghinstallation.NewFromAppsTransport(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: []string{".github"},
+		Repositories: []string{s.policyRepo()},
 		Permissions: &github.InstallationPermissions{
 			Contents: ptr("read"),
 		},
@@ -287,7 +287,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	}
 
 	file, _, _, err := client.Repositories.GetContents(ctx,
-		owner, ".github", OrgTrustedIssuersPath,
+		owner, s.policyRepo(), OrgTrustedIssuersPath,
 		&github.RepositoryContentGetOptions{},
 	)
 	if err != nil {

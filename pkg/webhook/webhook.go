@@ -48,6 +48,11 @@ type Validator struct {
 
 	Organizations []string
 
+	// OrgPolicyRepo is the repository name (without owner) that holds
+	// org-scoped trust policies and the org trusted-issuer allowlist.
+	// Defaults to ".github" when empty.
+	OrgPolicyRepo string
+
 	// clients caches one client per installation ID so the transport's token is
 	// reused (~1h) instead of re-minted per event. Keyed on installation ID
 	// alone: IDs are globally unique and the webhook serves one App. Building a
@@ -55,6 +60,13 @@ type Validator struct {
 	// can guard the whole get-or-create.
 	clientsMu sync.Mutex
 	clients   *lru.Cache[int64, *github.Client]
+}
+
+func (e *Validator) policyRepo() string {
+	if e.OrgPolicyRepo != "" {
+		return e.OrgPolicyRepo
+	}
+	return ".github"
 }
 
 // prActionsThatChangeFiles is the set of pull_request actions that can alter
@@ -199,7 +211,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 		return nil, nil
 	}
 
-	err := validatePolicies(ctx, client, owner, repo, sha, files)
+	err := validatePolicies(ctx, client, owner, repo, sha, files, e.policyRepo())
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which GitHub treats as a
 	// failed delivery and redelivers — amplifying load on the rate-limited API.
@@ -242,7 +254,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	return cr, nil
 }
 
-func validatePolicies(ctx context.Context, client *github.Client, owner, repo string, sha string, files []string) error {
+func validatePolicies(ctx context.Context, client *github.Client, owner, repo, sha string, files []string, orgPolicyRepo string) error {
 	var merr error
 	for _, f := range sets.List(sets.New(files...)) {
 		log := clog.FromContext(ctx).With("path", f)
@@ -276,7 +288,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 		}
 
 		switch {
-		case strings.EqualFold(repo, ".github") && f == octosts.OrgTrustedIssuersPath:
+		case strings.EqualFold(repo, orgPolicyRepo) && f == octosts.OrgTrustedIssuersPath:
 			// Parse AND compile: only compiling catches uncompilable patterns,
 			// invalid issuer URLs, and an empty allowlist. The exchange path calls
 			// this same function, so the two verdicts cannot diverge.
@@ -289,7 +301,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo st
 		// so an org whose repo is literally ".GitHub" would otherwise fall through
 		// to the default arm and have its org policy strict-unmarshalled as a
 		// repo-level TrustPolicy — a bogus check-run failure on a valid file.
-		case strings.EqualFold(repo, ".github"):
+		case strings.EqualFold(repo, orgPolicyRepo):
 			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.OrgTrustPolicy{}); err != nil {
 				log.Infof("failed to parse org trust policy: %v", err)
 				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
@@ -345,7 +357,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if isValidatedPath(repo, file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -401,7 +413,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 	for _, file := range resp {
-		if isValidatedPath(repo, file.GetFilename()) {
+		if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
 			if file.GetStatus() != "removed" {
 				files = append(files, file.GetFilename())
 			}
@@ -479,7 +491,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		for _, file := range dirContents {
 			// Type matters as well as path: a directory can be named to match, and
 			// listing it as a candidate would send a non-file down the read path.
-			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath()) {
+			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
 				files = append(files, file.GetPath())
 			}
 		}
@@ -489,7 +501,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp.Files {
-			if isValidatedPath(repo, file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -503,7 +515,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, file := range resp {
-			if isValidatedPath(repo, file.GetFilename()) {
+			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
 				if file.GetStatus() != "removed" {
 					files = append(files, file.GetFilename())
 				}
@@ -541,22 +553,22 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 
 // isValidatedPath reports whether octo-sts validates the given file. Trust
 // policies are validated in every repository; the organization trusted-issuer
-// allowlist only in the organization's .github repository.
+// allowlist only in the organization's org policy repository (orgPolicyRepo).
 //
 // The repository comparison folds case because GitHub repository names are
-// case-insensitive and the exchange path resolves .github through the API.
-func isValidatedPath(repo, path string) bool {
+// case-insensitive and the exchange path resolves the repo name through the API.
+func isValidatedPath(repo, path, orgPolicyRepo string) bool {
 	if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", path); err == nil && ok {
 		return true
 	}
-	return strings.EqualFold(repo, ".github") && path == octosts.OrgTrustedIssuersPath
+	return strings.EqualFold(repo, orgPolicyRepo) && path == octosts.OrgTrustedIssuersPath
 }
 
 // filterValidatedFiles returns the subset of files octo-sts validates.
-func filterValidatedFiles(repo string, files []string) []string {
+func filterValidatedFiles(repo string, files []string, orgPolicyRepo string) []string {
 	var filtered []string
 	for _, f := range files {
-		if isValidatedPath(repo, f) {
+		if isValidatedPath(repo, f, orgPolicyRepo) {
 			filtered = append(filtered, f)
 		}
 	}
@@ -572,8 +584,8 @@ func filterValidatedFiles(repo string, files []string) []string {
 func (e *Validator) filesFromPushEvent(repo string, event *github.PushEvent) []string {
 	var files []string //nolint:prealloc // size depends on file content, not commit count
 	for _, commit := range event.Commits {
-		files = append(files, filterValidatedFiles(repo, commit.Added)...)
-		files = append(files, filterValidatedFiles(repo, commit.Modified)...)
+		files = append(files, filterValidatedFiles(repo, commit.Added, e.policyRepo())...)
+		files = append(files, filterValidatedFiles(repo, commit.Modified, e.policyRepo())...)
 	}
 	return files
 }
