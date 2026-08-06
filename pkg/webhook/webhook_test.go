@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -28,8 +30,11 @@ import (
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
+	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 
 	"github.com/octo-sts/app/pkg/octosts"
 )
@@ -1799,5 +1804,181 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 
 	if got := mints.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 token mint across 2 events, got %d", got)
+	}
+}
+
+// redirectTransport sends a request to a test server while leaving the original
+// request's URL untouched, so wrappers above it still observe the real GitHub
+// host. Rewriting the URL in place would hide the request from httpmetrics,
+// which gates its GitHub rate-limit instrumentation on r.URL.Host both before
+// and after the round trip.
+type redirectTransport struct {
+	inner  http.RoundTripper
+	scheme string
+	host   string
+}
+
+func (t *redirectTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r2 := r.Clone(r.Context())
+	r2.URL.Scheme = t.scheme
+	r2.URL.Host = t.host
+	r2.Host = ""
+	return t.inner.RoundTrip(r2)
+}
+
+// gaugeValueForLabels returns the value of the first sample of the named gauge
+// whose labels are a superset of want.
+func gaugeValueForLabels(t *testing.T, name string, want map[string]string) (float64, bool) {
+	t.Helper()
+
+	mfs, err := prometheus.DefaultGatherer.Gather()
+	if err != nil {
+		t.Fatalf("gathering metrics: %v", err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != name {
+			continue
+		}
+		for _, m := range mf.GetMetric() {
+			matched := true
+			for k, v := range want {
+				if !slices.ContainsFunc(m.GetLabel(), func(lp *dto.LabelPair) bool {
+					return lp.GetName() == k && lp.GetValue() == v
+				}) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return m.GetGauge().GetValue(), true
+			}
+		}
+	}
+	return 0, false
+}
+
+// TestWebhookEnrichesMetricsContext is a regression test for GitHub rate-limit
+// metrics being reported with an empty app_id label. httpmetrics reads the app
+// and installation IDs off the request context, so a handler that never calls
+// ghtransport.EnrichContext produces unattributable time series.
+func TestWebhookEnrichesMetricsContext(t *testing.T) {
+	// The metric vectors are process-global, so use IDs no other test uses to
+	// keep the gathered series unambiguously ours.
+	const (
+		appID          = int64(424242)
+		installationID = int64(999999)
+		remaining      = 4999
+	)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(fmt.Sprintf("POST /app/installations/%d/access_tokens", installationID), func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"token":"t","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+	})
+	mux.HandleFunc("POST /repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, "{}")
+	})
+	// The client is pointed at api.github.com, whose host suppresses
+	// go-github's /api/v3/ prefix, so re-add it when reaching for fixtures.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", "api", "v3", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-RateLimit-Resource", "core")
+		w.Header().Set("X-RateLimit-Remaining", strconv.Itoa(remaining))
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		mux.ServeHTTP(w, r)
+	}))
+	defer gh.Close()
+
+	ghURL, err := url.Parse(gh.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Mirror the production transport chain from ghtransport.New: the
+	// httpmetrics wrapper sits above the base transport, and only records
+	// GitHub rate limits for requests whose host is api.github.com. Keeping
+	// that host (and redirecting underneath the wrapper) is what makes the
+	// app_id label observable here.
+	base := metrics.WrapTransport(&redirectTransport{
+		inner:  gh.Client().Transport,
+		scheme: ghURL.Scheme,
+		host:   ghURL.Host,
+	})
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(base, appID, key)
+	tr.BaseURL = "https://api.github.com"
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(installationID)},
+		Repo: &github.PushEventRepository{
+			Owner: &github.User{Login: github.Ptr("foo")},
+			Name:  github.Ptr("bar"),
+		},
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/test.sts.yaml"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200 OK, got\n%s", string(out))
+	}
+
+	got, ok := gaugeValueForLabels(t, "github_rate_limit_remaining", map[string]string{
+		"app_id":          strconv.FormatInt(appID, 10),
+		"installation_id": strconv.FormatInt(installationID, 10),
+	})
+	if !ok {
+		t.Fatalf("no github_rate_limit_remaining series labelled app_id=%d installation_id=%d: "+
+			"the webhook did not enrich the request context", appID, installationID)
+	}
+	if got != remaining {
+		t.Errorf("github_rate_limit_remaining = %v, want %v", got, float64(remaining))
+	}
+
+	// The bug's signature: requests attributed to no app at all.
+	if _, ok := gaugeValueForLabels(t, "github_rate_limit_remaining", map[string]string{
+		"app_id":       "",
+		"organization": "foo",
+	}); ok {
+		t.Error("found a github_rate_limit_remaining series with an empty app_id label")
 	}
 }
