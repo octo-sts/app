@@ -100,11 +100,7 @@ func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 		if len(p) > maxPatternLen {
 			return nil, fmt.Errorf("issuer_patterns[%d] too long: %d chars (max %d)", i, len(p), maxPatternLen)
 		}
-		// First, so a loose-and-malformed pattern reports its looseness.
-		if err := checkNoSlashMatchingAtom(i, p); err != nil {
-			return nil, err
-		}
-		if err := checkNoSeparatorUnderQuantifier(i, p); err != nil {
+		if err := checkPatternCannotSpanHost(i, p); err != nil {
 			return nil, err
 		}
 		// Compile p ALONE first: the group below hides an unbalanced ")", so
@@ -146,224 +142,67 @@ func (a *IssuerAllowlist) Allows(issuer string) bool {
 	return false
 }
 
-// checkNoSlashMatchingAtom rejects any single-character atom that can match "/": such an
-// atom lets a pattern span past the host, so "https://.*\.example\.com" would also permit
-// "https://totally-evil.com/x.example.com". BEST-EFFORT FOOTGUN GUARD, NOT A SECURITY
-// BOUNDARY — the author is the org owner.
+// checkPatternCannotSpanHost rejects an issuer_pattern that can match "/" and so span
+// past the host: "https://.*\.example\.com" also permits "https://evil.com/x.example.com".
+// BEST-EFFORT FOOTGUN GUARD, NOT A SECURITY BOUNDARY — the author is the org owner.
 //
-// The test is EMPIRICAL — each atom compiled alone as "^atom$" and asked whether it matches
-// "/" — because banned spellings cannot be enumerated: "\S", "[^\n]" and "[[:ascii:]]" match
-// "/" without containing ".", and "[.-9]" holds "/" by range. A LITERAL "/" stays allowed;
-// unterminated brackets are left to regexp.Compile.
-//
-// Being per-ATOM it cannot see a "/" that only spans because of surrounding
-// STRUCTURE; checkNoSeparatorUnderQuantifier covers that half.
-func checkNoSlashMatchingAtom(i int, p string) error {
-	for j := 0; j < len(p); j++ {
-		var atom string
-
-		switch p[j] {
-		case '.':
-			atom = "."
-
-		case '\\':
-			end := endOfEscape(p, j)
-			if end < 0 {
-				// Skip the escaped byte so "\." is never read as a wildcard.
-				j++
-				continue
-			}
-			atom, j = p[j:end], end-1
-
-		case '[':
-			end := endOfBracketExpression(p, j)
-			if end < 0 {
-				return nil
-			}
-			atom, j = p[j:end], end-1
-
-		default:
-			continue
-		}
-
-		re, err := regexp.Compile("^" + atom + "$")
-		if err != nil {
-			// Fail CLOSED: an atom we cannot analyze is not one we know is safe, and
-			// skipping it would turn every scanner mis-parse into a silent bypass.
-			return fmt.Errorf(`issuer_patterns[%d]: cannot verify that %q cannot `+
-				`match "/" (%v), so the pattern is rejected rather than assumed `+
-				`safe — rewrite it with a plain class such as [a-z0-9-]`, i, atom, err)
-		}
-		if re.MatchString("/") {
-			return fmt.Errorf(`issuer_patterns[%d]: %q can match "/", so the pattern `+
-				`can span past the host into an attacker-controlled domain, as `+
-				`"https://.*\.example\.com" also permits `+
-				`"https://totally-evil.com/x.example.com" — escape literal dots as `+
-				`"\." and bound each varying part, e.g. `+
-				`https://[a-z0-9-]+\.example\.com. Write a path one segment at a `+
-				`time with literal separators, e.g. `+
-				`https://example\.com/realms/[a-z0-9-]+, because a class that `+
-				`itself contains "/" is rejected for the same reason. `+
-				`This is a best-effort check, `+
-				`not a guarantee: write patterns as narrowly as you can`, i, atom)
-		}
-	}
-	return nil
-}
-
-// checkNoSeparatorUnderQuantifier rejects a pattern where a "/"-matching element sits
-// inside a repetition, an optional, or an alternation. The per-atom scan cannot see
-// this: every atom in "([a-z0-9.-]+/)*" is innocent on its own, yet the group spans
-// separators, so "https://([a-z0-9.-]+/)*trusted\.example\.com" matches
-// "https://evil.com/x/trusted.example.com" — attacker-chosen host, trusted name demoted
-// to a path segment. "?", "{n,m}" and alternation do the same.
-//
-// A literal "/" at a FIXED position stays allowed, so real multi-segment issuers such as
-// "https://host\.example\.com/id/[A-Z0-9]+" still validate. An author who wants
-// alternatives writes separate issuer_patterns entries instead of one alternation.
-func checkNoSeparatorUnderQuantifier(i int, p string) error {
+// It inspects the regexp/syntax AST — the same parse regexp.Compile performs — so it
+// cannot disagree with the matcher about tokenization. A hand-written byte scanner did
+// this before and disagreed six times, each a bypass.
+func checkPatternCannotSpanHost(i int, p string) error {
 	re, err := syntax.Parse(p, syntax.Perl)
 	if err != nil {
-		// Unparseable: regexp.Compile reports it better than we would.
+		// Unparseable: the compile below reports it better than we would.
 		return nil
 	}
-	if found := separatorUnderQuantifier(re, false); found != "" {
-		return fmt.Errorf(`issuer_patterns[%d]: %s can match "/" from inside a `+
-			`repetition, optional or alternation, so the pattern can span past the `+
-			`host — "https://([a-z0-9.-]+/)*trusted\.example\.com" also permits `+
-			`"https://evil.com/x/trusted.example.com". Keep "/" at a fixed position, `+
-			`e.g. https://host\.example\.com/id/[A-Z0-9]+, and write alternatives as `+
-			`separate issuer_patterns entries rather than one alternation`, i, found)
+	if what := spanningElement(re, false); what != "" {
+		return fmt.Errorf(`issuer_patterns[%d]: %s, so the pattern can span past the `+
+			`host into an attacker-controlled domain, as "https://.*\.example\.com" also `+
+			`permits "https://totally-evil.com/x.example.com" — escape literal dots as `+
+			`"\." and bound each varying part, e.g. https://[a-z0-9-]+\.example\.com. Keep `+
+			`"/" at a fixed position, writing a path one segment at a time, and give `+
+			`alternatives their own issuer_patterns entries. This is a best-effort check, `+
+			`not a guarantee: write patterns as narrowly as you can`, i, what)
 	}
 	return nil
 }
 
-// separatorUnderQuantifier reports the first "/"-matching element reachable under a
-// variable-length or alternating node, or "" if there is none. variable becomes true
-// once inside such a node and stays true for the whole subtree.
-func separatorUnderQuantifier(re *syntax.Regexp, variable bool) string {
+// spanningElement describes the first element that lets the pattern match "/", or "".
+//
+// A class or "." matching "/" is rejected ANYWHERE: parsing desugars "\S", "[^\n]",
+// "[[:ascii:]]", "\p{P}" and "[.-9]" into rune ranges, so one range test covers every
+// spelling. A literal "/" is rejected only under a repetition, optional or alternation
+// — at a fixed position it is how real multi-segment issuers are written, e.g.
+// https://host\.example\.com/id/[A-Z0-9]+. variable carries that down the subtree.
+func spanningElement(re *syntax.Regexp, variable bool) string {
 	switch re.Op {
 	case syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat, syntax.OpAlternate:
 		variable = true
 	}
-	if variable {
-		if what := slashMatchingElement(re); what != "" {
-			return what
-		}
-	}
-	for _, sub := range re.Sub {
-		if found := separatorUnderQuantifier(sub, variable); found != "" {
-			return found
-		}
-	}
-	return ""
-}
 
-// slashMatchingElement names re if it can match "/" on its own, else "".
-func slashMatchingElement(re *syntax.Regexp) string {
 	switch re.Op {
-	case syntax.OpLiteral:
-		if slices.Contains(re.Rune, '/') {
-			return `a literal "/"`
-		}
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return `"." can match "/"`
+
 	case syntax.OpCharClass:
 		for j := 0; j+1 < len(re.Rune); j += 2 {
 			if re.Rune[j] <= '/' && '/' <= re.Rune[j+1] {
-				return "a character class containing \"/\""
+				return `a character class can match "/"`
 			}
 		}
-	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
-		return `"." (which matches "/")`
+
+	case syntax.OpLiteral:
+		if variable && slices.Contains(re.Rune, '/') {
+			return `a literal "/" sits inside a repetition, optional or alternation`
+		}
+	}
+
+	for _, sub := range re.Sub {
+		if what := spanningElement(sub, variable); what != "" {
+			return what
+		}
 	}
 	return ""
-}
-
-// endOfEscape returns the index just past the character-class escape starting at the
-// backslash at p[j], or -1 when there is no atom to test (an escaped literal or
-// trailing backslash) and the caller should skip two bytes.
-func endOfEscape(p string, j int) int {
-	if j+1 >= len(p) {
-		return -1
-	}
-	switch p[j+1] {
-	case 'd', 'D', 's', 'S', 'w', 'W':
-		return j + 2
-
-	// Numeric escapes SPELL characters rather than naming classes ("\x2F", "\x{2F}" and
-	// "\057" are all "/"); as escaped literals they would be skipped and never tested.
-	case 'x':
-		if j+2 >= len(p) {
-			return -1
-		}
-		if p[j+2] == '{' {
-			if k := strings.IndexByte(p[j+2:], '}'); k >= 0 {
-				return j + 2 + k + 1
-			}
-			return -1
-		}
-		if j+3 < len(p) && isHexDigit(p[j+2]) && isHexDigit(p[j+3]) {
-			return j + 4
-		}
-		return -1
-	case '0', '1', '2', '3', '4', '5', '6', '7':
-		end := j + 2
-		for end < len(p) && end < j+4 && p[end] >= '0' && p[end] <= '7' {
-			end++
-		}
-		return end
-
-	case 'p', 'P':
-		if j+2 >= len(p) {
-			return -1
-		}
-		if p[j+2] != '{' {
-			return j + 3
-		}
-		if k := strings.IndexByte(p[j+2:], '}'); k >= 0 {
-			return j + 2 + k + 1
-		}
-		return -1
-	default:
-		return -1
-	}
-}
-
-func isHexDigit(b byte) bool {
-	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
-}
-
-// endOfBracketExpression returns the index just past the bracket expression opening at
-// p[j], or -1 if unterminated. More than a search for "]": a backslash escapes the next
-// byte ("[a-z\]]"), a POSIX class carries its own "]" ("[[:alpha:]]"), and a leading "]"
-// is a literal member ("[^]]").
-func endOfBracketExpression(p string, j int) int {
-	k := j + 1
-	if k < len(p) && p[k] == '^' {
-		k++
-	}
-	// RE2 reads a first-position "]" as a literal; stopping there would extract the
-	// uncompilable "[^]" and leave the real class untested.
-	if k < len(p) && p[k] == ']' {
-		k++
-	}
-	for ; k < len(p); k++ {
-		switch p[k] {
-		case '\\':
-			k++
-		case '[':
-			// "[:name:]" is a POSIX class only when a ":]" actually follows; otherwise
-			// RE2 reads this "[" as an ordinary member and the real "]" is still ahead,
-			// so keep scanning: bailing out let "[[:/-~]", holding "/", pass untested.
-			if strings.HasPrefix(p[k:], "[:") {
-				if end := strings.Index(p[k:], ":]"); end >= 0 {
-					k += end + 1
-				}
-			}
-		case ']':
-			return k + 1
-		}
-	}
-	return -1
 }
 
 // checkLowercaseSchemeAndHost rejects uppercase in an issuer's scheme or host: matching

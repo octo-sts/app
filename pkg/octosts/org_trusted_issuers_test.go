@@ -488,9 +488,6 @@ func TestCompileRejectsSlashMatchingAtoms(t *testing.T) {
 		// Numeric escapes SPELL "/" rather than naming a class, so treating them
 		// as escaped literals skipped two bytes and left the digits to be read as
 		// unexamined literal text. All three of these are "/".
-		{"hex escape for the slash byte", `https://a\x2Fb\.example\.com`, "https://a/b.example.com"},
-		{"braced hex escape for the slash byte", `https://a\x{2F}b\.example\.com`, "https://a/b.example.com"},
-		{"octal escape for the slash byte", `https://a\057b\.example\.com`, "https://a/b.example.com"},
 		// "[:" opens a POSIX class only when a ":]" follows; without one RE2 reads
 		// the "[" as an ordinary member and the class keeps going, so these are
 		// ordinary classes that happen to contain "/". The scanner used to give up
@@ -640,28 +637,61 @@ func TestCompileKeepsFixedPositionSlashes(t *testing.T) {
 	}
 }
 
-// TestCompileFailsClosedOnAnAtomItCannotAnalyze pins the posture, not a
-// particular syntax. Skipping an atom that does not compile turned every parsing
-// gap into a silent bypass ("[^]]", "\x2F"); the next gap must not be
-// exploitable, so an unanalyzable atom now rejects the pattern.
-func TestCompileFailsClosedOnAnAtomItCannotAnalyze(t *testing.T) {
-	// An unknown POSIX class name: the scanner delimits the bracket expression
-	// correctly, then regexp.Compile rejects the name.
-	//
-	// The name is assembled at runtime so staticcheck does not constant-fold the
-	// pattern and report the invalid class as a lint error — being invalid is the
-	// whole point of this input.
+// TestCompileRejectsAnUnparseablePattern pins that a pattern the AST check cannot
+// analyze is still rejected — the property survives, it just moved layers.
+//
+// checkPatternCannotSpanHost returns nil when syntax.Parse fails, so the rejection
+// comes from the subsequent regexp.Compile instead of a "cannot verify" message from
+// the guard. That branch used to exist because a hand-written scanner could
+// mis-delimit an atom it had itself extracted; parsing with regexp/syntax removes the
+// failure mode rather than reporting it.
+func TestCompileRejectsAnUnparseablePattern(t *testing.T) {
+	// Assembled at runtime so staticcheck does not constant-fold the pattern and
+	// report the invalid class as a lint error — being invalid is the point.
 	pat := `https://[[:` + strings.Repeat("bogus", 1) + `:]]+\.example\.com`
-	if re, err := regexp.Compile("^(?:" + pat + ")$"); err == nil {
-		t.Fatalf("regexp.Compile(%q) = nil error; this test needs an atom Go rejects, "+
-			"otherwise it exercises the match path rather than the fail-closed path (re=%v)", pat, re)
+	if _, err := regexp.Compile(pat); err == nil {
+		t.Fatalf("regexp.Compile(%q) = nil error; this test needs a pattern Go rejects", pat)
 	}
-	_, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile()
-	if err == nil {
+	if _, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile(); err == nil {
 		t.Fatalf("Compile() with pattern %q = nil error, want a rejection", pat)
 	}
-	if !strings.Contains(err.Error(), "cannot verify") {
-		t.Errorf("Compile() error = %q, want the fail-closed message mentioning %q", err, "cannot verify")
+}
+
+// TestCompileAllowsNumericEscapesForSlashAtAFixedPosition records a DELIBERATE
+// loosening that came with moving to AST analysis.
+//
+// The byte scanner treated "\x2F", "\x{2F}" and "\057" as opaque escapes and rejected
+// them wherever they appeared. regexp/syntax folds them into an OpLiteral containing
+// "/", indistinguishable from a typed "/" — because that is what they are. So they are
+// now allowed at a fixed position, on the same rule that permits
+// https://host\.example\.com/id/[A-Z0-9]+.
+//
+// That is safe for the reason the fixed-position rule is safe: the "/" cannot repeat or
+// be skipped, so the pattern still matches exactly one host. Asserted below, so this
+// stays a reasoned allowance rather than an accident.
+func TestCompileAllowsNumericEscapesForSlashAtAFixedPosition(t *testing.T) {
+	for _, pat := range []string{
+		`https://a\x2Fb\.example\.com`,
+		`https://a\x{2F}b\.example\.com`,
+		`https://a\057b\.example\.com`,
+	} {
+		al, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile()
+		if err != nil {
+			t.Fatalf("Compile() with pattern %q = %v, want nil", pat, err)
+		}
+		// It spells exactly one issuer, and cannot reach an attacker-chosen host.
+		if !al.Allows("https://a/b.example.com") {
+			t.Errorf("pattern %q does not match the issuer it spells", pat)
+		}
+		for _, evil := range []string{
+			"https://evil.com/b.example.com",
+			"https://a/x/b.example.com",
+			"https://evil.com/a/b.example.com",
+		} {
+			if al.Allows(evil) {
+				t.Errorf("pattern %q permitted %q — a fixed-position escape must not span", pat, evil)
+			}
+		}
 	}
 }
 
@@ -746,17 +776,13 @@ func TestCompileRejectsBadPatternWithCompileError(t *testing.T) {
 	}
 }
 
-// TestCompileReportsWildcardDotBeforeCompileError pins the ordering of the two
-// pattern checks. For a pattern that is both loose and malformed the
-// loose-pattern error is the more actionable of the two, so the wildcard-dot
-// scan has to run before regexp.Compile. "[unclosed" alone does not pin this —
-// it contains no ".", so either ordering yields the compile error.
-func TestCompileReportsWildcardDotBeforeCompileError(t *testing.T) {
-	_, err := (&OrgTrustedIssuers{IssuerPatterns: []string{`https://.*.example.com(`}}).Compile()
-	if err == nil {
-		t.Fatal("Compile() = nil error, want error")
-	}
-	if !strings.Contains(err.Error(), "can match") {
-		t.Errorf("Compile() error = %q, want the atom error to win over regexp's compile error", err)
+// TestCompileRejectsALoosePatternThatIsAlsoMalformed replaces an ordering pin that no
+// longer applies. It used to require the looseness error to beat regexp's compile
+// error for a pattern that is both loose and malformed. The span check now needs a
+// successful parse, so a malformed pattern reports the compile error instead — the
+// verdict is unchanged and still fail-closed, only the message differs.
+func TestCompileRejectsALoosePatternThatIsAlsoMalformed(t *testing.T) {
+	if _, err := (&OrgTrustedIssuers{IssuerPatterns: []string{`https://.*.example.com(`}}).Compile(); err == nil {
+		t.Fatal("Compile() = nil error, want a rejection")
 	}
 }
