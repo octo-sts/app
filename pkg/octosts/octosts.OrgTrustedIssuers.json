@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/octo-sts/app/pkg/octosts/org-trusted-issuers",
+  "$ref": "#/$defs/OrgTrustedIssuers",
+  "$defs": {
+    "OrgTrustedIssuers": {
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "enforce",
+            "audit"
+          ],
+          "description": "Mode selects enforcement behavior. \"enforce\" (the default) rejects\ntokens whose issuer is not permitted. \"audit\" permits them and records\nwhat would have been rejected, for staged rollout."
+        },
+        "issuers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Issuers is the set of permitted issuer URLs, matched exactly."
+        },
+        "issuer_patterns": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "IssuerPatterns are regular expressions matched against the token\nissuer. Patterns are anchored and must match the entire URL."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OrgTrustedIssuers is an organization-wide allowlist of OIDC issuers, read from .github/chainguard/trusted-token-issuers.yaml in the organization's .github repository."
+    }
+  }
+}

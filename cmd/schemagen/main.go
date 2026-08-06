@@ -33,6 +33,7 @@ func main() {
 	for _, t := range []any{
 		octosts.TrustPolicy{},
 		octosts.OrgTrustPolicy{},
+		octosts.OrgTrustedIssuers{},
 	} {
 		path := filepath.Join(*outputFlag, fmt.Sprintf("%T.json", t))
 		out, err := os.Create(path)

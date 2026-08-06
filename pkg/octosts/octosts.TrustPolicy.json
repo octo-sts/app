@@ -113,6 +113,9 @@
         "organization_codespaces_settings": {
           "type": "string"
         },
+        "organization_copilot_metrics": {
+          "type": "string"
+        },
         "organization_copilot_seat_management": {
           "type": "string"
         },

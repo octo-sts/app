@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -734,6 +735,15 @@ func TestManagerGetAllPropagatesFailure(t *testing.T) {
 type stubManager struct {
 	installs []Installation
 	err      error
+
+	// freshInstalls / freshErr are what GetAllFresh returns, full stop. They are
+	// deliberately NOT defaulted to installs / err: a test that means "the fresh
+	// enumeration sees nothing" must be able to say so and get nothing, rather
+	// than silently falling back to installs and passing vacuously. Set them to
+	// a superset of installs to model an App that the negative cache hides from
+	// GetAll but not from GetAllFresh.
+	freshInstalls []Installation
+	freshErr      error
 }
 
 func (s *stubManager) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
@@ -754,6 +764,10 @@ func (s *stubManager) GetByInstallation(_ context.Context, _ string, id int64) (
 
 func (s *stubManager) GetAll(_ context.Context, _ string) ([]Installation, error) {
 	return s.installs, s.err
+}
+
+func (s *stubManager) GetAllFresh(_ context.Context, _ string) ([]Installation, error) {
+	return s.freshInstalls, s.freshErr
 }
 
 var _ Manager = (*stubManager)(nil)
@@ -891,5 +905,314 @@ func TestRoundRobinGetAllWithRealManagers(t *testing.T) {
 	}
 	if len(none) != 0 {
 		t.Errorf("GetAll(unserved owner) returned %d installations, want 0", len(none))
+	}
+}
+
+// TestManagerGetAllFreshBypassesNegativeCache is the regression test for the
+// window this whole change exists to close.
+//
+// Sequence: the App is not installed, so a Get arms the negative cache. The App
+// is then installed. GetAll still reports nothing — with a NIL error, because
+// manager.GetAll maps NotFound to (nil, nil) — which is exactly what would let a
+// caller conclude "no installation can see this" and grant allow-all.
+// GetAllFresh must see the truth.
+func TestManagerGetAllFreshBypassesNegativeCache(t *testing.T) {
+	const installID = int64(4321)
+	var installed atomic.Bool
+
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			if !installed.Load() {
+				_ = json.NewEncoder(w).Encode([]github.Installation{})
+				return
+			}
+			_ = json.NewEncoder(w).Encode([]github.Installation{{
+				ID:      github.Ptr(installID),
+				Account: &github.User{Login: github.Ptr("org")},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	// Arm the negative cache the way ordinary routing traffic does.
+	if _, _, err := m.Get(context.Background(), "org", "", ""); err == nil {
+		t.Fatal("Get() = nil error, want NotFound before the App is installed")
+	}
+
+	installed.Store(true)
+
+	// GetAll is still blind, and reports no error while being blind.
+	stale, err := m.GetAll(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAll() = %v, want nil (a negative-cache hit is not an error)", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("GetAll() returned %d installations; this test is vacuous unless the negative cache hides the install", len(stale))
+	}
+
+	// GetAllFresh must not be fooled.
+	fresh, err := m.GetAllFresh(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAllFresh() = %v, want nil", err)
+	}
+	if len(fresh) != 1 {
+		t.Fatalf("GetAllFresh() returned %d installations, want 1 — the negative cache must not hide a real install", len(fresh))
+	}
+	if fresh[0].ID != installID {
+		t.Errorf("ID = %d, want %d", fresh[0].ID, installID)
+	}
+	if fresh[0].AppID != atr.AppID() {
+		t.Errorf("AppID = %d, want %d", fresh[0].AppID, atr.AppID())
+	}
+	if fresh[0].Transport == nil {
+		t.Error("Transport = nil, want the app transport")
+	}
+
+	// Get checks the negative cache BEFORE the positive one, so discovering the
+	// installation without clearing the negative entry would fix enforcement
+	// while leaving routing broken for the rest of the TTL.
+	if _, id, err := m.Get(context.Background(), "org", "", ""); err != nil {
+		t.Errorf("Get() = %v, want the installation GetAllFresh just confirmed exists", err)
+	} else if id != installID {
+		t.Errorf("Get() id = %d, want %d", id, installID)
+	}
+}
+
+// TestManagerGetAllFreshUsesPositiveCache pins that the confirm path is cheap
+// once warm: GetAllFresh skips only the NEGATIVE cache. A stale positive entry
+// yields a superset, which is the conservative direction for a caller deciding
+// whether NO installation can see something.
+func TestManagerGetAllFreshUsesPositiveCache(t *testing.T) {
+	const installID = int64(99)
+	var listCalls atomic.Int32
+
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			listCalls.Add(1)
+			_ = json.NewEncoder(w).Encode([]github.Installation{{
+				ID:      github.Ptr(installID),
+				Account: &github.User{Login: github.Ptr("org")},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	if _, _, err := m.Get(context.Background(), "org", "", ""); err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	before := listCalls.Load()
+
+	got, err := m.GetAllFresh(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAllFresh() = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != installID {
+		t.Fatalf("GetAllFresh() = %v, want the cached installation %d", got, installID)
+	}
+	if listCalls.Load() != before {
+		t.Errorf("GetAllFresh() made %d extra ListInstallations calls, want 0 — the positive cache must still short-circuit", listCalls.Load()-before)
+	}
+}
+
+// TestManagerGetAllFreshPropagatesFailure: a failed walk must not look like
+// not-installed, or a caller would treat it as a complete answer.
+func TestManagerGetAllFreshPropagatesFailure(t *testing.T) {
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	got, err := m.GetAllFresh(context.Background(), "org")
+	if err == nil {
+		t.Fatal("GetAllFresh() = nil error, want an error when the API call fails")
+	}
+	if st, ok := status.FromError(err); !ok || st.Code() == codes.NotFound {
+		t.Errorf("GetAllFresh() code = %v, want anything but NotFound (that would be indistinguishable from not-installed)", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("GetAllFresh() returned %d installations, want 0", len(got))
+	}
+}
+
+// TestManagerGetAllFreshNotInstalledArmsNegativeCache: a genuine miss must still
+// leave a negative entry, or every confirm would pay a full walk.
+func TestManagerGetAllFreshNotInstalledArmsNegativeCache(t *testing.T) {
+	var listCalls atomic.Int32
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			listCalls.Add(1)
+			_ = json.NewEncoder(w).Encode([]github.Installation{})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	m, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+
+	got, err := m.GetAllFresh(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAllFresh() = %v, want nil for a not-installed owner", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("GetAllFresh() returned %d installations, want 0", len(got))
+	}
+
+	before := listCalls.Load()
+	if _, _, err := m.Get(context.Background(), "org", "", ""); err == nil {
+		t.Fatal("Get() = nil error, want NotFound")
+	}
+	if listCalls.Load() != before {
+		t.Errorf("Get() made %d extra ListInstallations calls, want 0 — GetAllFresh must arm the negative cache on a genuine miss", listCalls.Load()-before)
+	}
+}
+
+func TestRoundRobinGetAllFresh(t *testing.T) {
+	t.Run("concatenates and dedups", func(t *testing.T) {
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{freshInstalls: []Installation{{ID: 2, AppID: 20}, {ID: 1, AppID: 10}}},
+		})
+		got, err := rr.GetAllFresh(context.Background(), "org")
+		if err != nil {
+			t.Fatalf("GetAllFresh() = %v, want nil", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("GetAllFresh() returned %d installations, want 2 (deduped)", len(got))
+		}
+		if got[0].ID != 1 || got[1].ID != 2 {
+			t.Errorf("GetAllFresh() = %v, want stable order [1 2]", []int64{got[0].ID, got[1].ID})
+		}
+	})
+
+	t.Run("one manager failing yields a partial result AND an error", func(t *testing.T) {
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{freshErr: errors.New("boom")},
+		})
+		got, err := rr.GetAllFresh(context.Background(), "org")
+		if err == nil {
+			t.Fatal("GetAllFresh() = nil error, want an error for a partial enumeration")
+		}
+		if len(got) != 1 {
+			t.Errorf("GetAllFresh() returned %d installations, want the 1 that succeeded", len(got))
+		}
+	})
+
+	t.Run("an unserved owner is not an error", func(t *testing.T) {
+		rr := NewRoundRobin([]Manager{&stubManager{}, &stubManager{}})
+		got, err := rr.GetAllFresh(context.Background(), "org")
+		if err != nil {
+			t.Fatalf("GetAllFresh() = %v, want nil", err)
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAllFresh() returned %d installations, want 0", len(got))
+		}
+	})
+
+	// GetAll and GetAllFresh share one aggregation helper, so this covers the
+	// cancellation bail-out for both.
+	t.Run("a cancelled context bails instead of collecting N identical errors", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
+			&stubManager{freshInstalls: []Installation{{ID: 2, AppID: 20}}},
+		})
+		got, err := rr.GetAllFresh(ctx, "org")
+		if err == nil {
+			t.Fatal("GetAllFresh() = nil error, want the cancellation")
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAllFresh() returned %d installations, want 0 — it must bail before querying any manager", len(got))
+		}
+	})
+}
+
+// TestManagerGetAllFreshRepairsCoexistingCacheEntries pins the invariant that a
+// positive cache entry implies no negative entry, on the positive-cache-HIT path
+// specifically.
+//
+// The two entries can coexist in production: GetAllFresh writes the positive
+// entry, then a concurrent Get whose walk STARTED before the install completes
+// and arms the negative entry afterwards. Because Get checks the negative cache
+// first, routing then returns NotFound for the rest of the TTL — and every later
+// GetAllFresh short-circuits on the positive hit, so without an unconditional
+// Remove there the state never self-heals.
+//
+// Racing to that interleaving would be flaky, so this test seeds the resulting
+// state directly (it is an in-package test) and asserts the repair. It covers
+// the state, not the schedule that produces it.
+func TestManagerGetAllFreshRepairsCoexistingCacheEntries(t *testing.T) {
+	const installID = int64(777)
+	var listCalls atomic.Int32
+
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations" {
+			listCalls.Add(1)
+			_ = json.NewEncoder(w).Encode([]github.Installation{{
+				ID:      github.Ptr(installID),
+				Account: &github.User{Login: github.Ptr("org")},
+			}})
+			return
+		}
+		w.WriteHeader(http.StatusNotImplemented)
+	}))
+	mgr, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	m, ok := mgr.(*manager)
+	if !ok {
+		t.Fatalf("New() returned %T, want *manager", mgr)
+	}
+
+	// Seed the coexistence state a lost race would leave behind.
+	key := m.cacheKey("org")
+	m.cache.Add(key, installID)
+	m.negativeCache.Add(key, true)
+
+	// Sanity: routing really is broken in this state, so the repair below is
+	// load-bearing rather than decorative.
+	if _, _, err := m.Get(context.Background(), "org", "", ""); err == nil {
+		t.Fatal("Get() = nil error; this test is vacuous unless the negative entry shadows the positive one")
+	}
+
+	before := listCalls.Load()
+	got, err := m.GetAllFresh(context.Background(), "org")
+	if err != nil {
+		t.Fatalf("GetAllFresh() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].ID != installID {
+		t.Fatalf("GetAllFresh() = %v, want the cached installation %d", got, installID)
+	}
+	if listCalls.Load() != before {
+		t.Errorf("GetAllFresh() made %d extra ListInstallations calls, want 0 — this must be the positive-cache-hit path", listCalls.Load()-before)
+	}
+
+	// The repair: routing recovers immediately instead of at TTL expiry.
+	if _, id, err := m.Get(context.Background(), "org", "", ""); err != nil {
+		t.Errorf("Get() = %v, want the installation — GetAllFresh must clear the negative entry on a positive-cache hit too", err)
+	} else if id != installID {
+		t.Errorf("Get() id = %d, want %d", id, installID)
 	}
 }

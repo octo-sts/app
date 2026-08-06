@@ -65,11 +65,29 @@ type Manager interface {
 	// installation this process has observed, not every installation that
 	// currently exists. An App uninstalled from an org keeps appearing here
 	// indefinitely; a newly-installed App stays invisible until any negative
-	// cache entry for it expires.
+	// cache entry for it expires. That missing App is reported as a nil error, so
+	// an incomplete enumeration is indistinguishable from a complete one; a caller
+	// whose conclusion becomes UNSAFE when an App is missing must confirm with
+	// GetAllFresh.
 	//
 	// Callers must test len(), not nil-ness: implementations differ in whether
 	// an empty result is a nil or a zero-length slice.
 	GetAll(ctx context.Context, owner string) ([]Installation, error)
+
+	// GetAllFresh enumerates like GetAll but does NOT consult the negative
+	// (not-installed) cache, so an App installed within the last negativeTTL is
+	// visible. The positive cache IS still consulted, so after an
+	// uninstall/reinstall this can report a stale ID; that fails closed, since
+	// the stale ID's token mint fails rather than agreeing. It bypasses this
+	// process's negative cache, not GitHub's replication, so it narrows the
+	// window rather than eliminating it.
+	//
+	// Use it to CONFIRM an absence conclusion GetAll can only support over
+	// observed state. It costs one ListInstallations walk per App with no
+	// positive cache entry, so it does not belong on a hot path. Like GetAll, a
+	// non-nil error means the enumeration is NOT exhaustive even if the returned
+	// slice is non-empty, and callers must test len() rather than nil-ness.
+	GetAllFresh(ctx context.Context, owner string) ([]Installation, error)
 }
 
 const defaultNegativeTTL = 5 * time.Minute
@@ -115,28 +133,21 @@ func NewWithOptions(atr *ghinstallation.AppsTransport, negativeTTL time.Duration
 	}, nil
 }
 
-// Get returns the AppsTransport and installation ID for the given owner.
-// scope and identity are unused by the single-app manager; routing across
-// apps is handled by the roundRobin manager.
-func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
-	cacheKey := fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
-	if _, ok := m.negativeCache.Get(cacheKey); ok {
-		clog.InfoContextf(ctx, "negative install cache hit for %s", cacheKey)
-		return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
-	}
-	if v, ok := m.cache.Get(cacheKey); ok {
-		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
-		return m.atr, v, nil
-	}
-
+// lookupInstallation walks this App's installations looking for owner.
+//
+// It consults and populates no caches, which lets Get and GetAllFresh share the
+// walk while disagreeing about the negative cache. A false found with a nil error
+// is a complete answer (not installed); a failed walk is not.
+func (m *manager) lookupInstallation(ctx context.Context, owner string) (int64, bool, error) {
 	opts := []github.ClientOptionsFunc{github.WithTransport(m.atr)}
 	if m.baseURL != "" {
 		opts = append(opts, github.WithEnterpriseURLs(m.baseURL, m.baseURL))
 	}
 	client, err := github.NewClient(opts...)
 	if err != nil {
-		return nil, 0, status.Errorf(codes.Internal, "creating GitHub client: %v", err)
+		return 0, false, status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}
+
 	// Walk through the pages of installations looking for an organization
 	// matching owner.
 	page := 1
@@ -146,20 +157,72 @@ func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.
 			PerPage: 100,
 		})
 		if err != nil {
-			return nil, 0, status.Errorf(codes.Internal, "listing installations for app %d: %v", m.atr.AppID(), err)
+			return 0, false, status.Errorf(codes.Internal, "listing installations for app %d: %v", m.atr.AppID(), err)
 		}
 
 		for _, install := range installs {
 			if install.Account.GetLogin() == owner {
-				installID := install.GetID()
-				m.cache.Add(cacheKey, installID)
-				return m.atr, installID, nil
+				return install.GetID(), true, nil
 			}
 		}
 		page = resp.NextPage
 	}
+	return 0, false, nil
+}
+
+// cacheKey is the shared key for both of manager's caches. Get and GetAllFresh
+// MUST agree on it: GetAllFresh clears the negative entry Get reads, so a
+// divergence here silently restores the shadowing described on setInstalled.
+func (m *manager) cacheKey(owner string) string {
+	return fmt.Sprintf("%d/%s", m.atr.AppID(), owner)
+}
+
+// setInstalled records that owner IS installed, clearing any negative entry that
+// would shadow it: Get reads the negative cache before the positive one, so a
+// negative entry left alongside a positive one means NotFound for the rest of the
+// negative TTL. Remove precedes Add because manager has no mutex — a concurrent
+// reader landing between the two sees neither entry and does a fresh walk,
+// whereas the other order leaves it reading the stale negative entry.
+//
+// This narrows that window rather than closing it, and establishes no global
+// invariant: a Get whose walk finished before the install can still call
+// setNotInstalled afterwards and re-shadow this entry. The residual fails safe as
+// a spurious NotFound, so routing rejects rather than grants.
+func (m *manager) setInstalled(cacheKey string, id int64) {
+	m.negativeCache.Remove(cacheKey)
+	m.cache.Add(cacheKey, id)
+}
+
+// setNotInstalled records that owner is NOT installed. Only ever called after a
+// completed walk found nothing — a failed walk is ignorance, not absence.
+func (m *manager) setNotInstalled(cacheKey string) {
 	m.negativeCache.Add(cacheKey, true)
-	return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+}
+
+// Get returns the AppsTransport and installation ID for the given owner.
+// scope and identity are unused by the single-app manager; routing across
+// apps is handled by the roundRobin manager.
+func (m *manager) Get(ctx context.Context, owner, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
+	cacheKey := m.cacheKey(owner)
+	if _, ok := m.negativeCache.Get(cacheKey); ok {
+		clog.InfoContextf(ctx, "negative install cache hit for %s", cacheKey)
+		return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+	}
+	if v, ok := m.cache.Get(cacheKey); ok {
+		clog.InfoContextf(ctx, "found installation in cache for %s", cacheKey)
+		return m.atr, v, nil
+	}
+
+	id, found, err := m.lookupInstallation(ctx, owner)
+	if err != nil {
+		return nil, 0, err
+	}
+	if !found {
+		m.setNotInstalled(cacheKey)
+		return nil, 0, status.Errorf(codes.NotFound, "no installation found for %q", owner)
+	}
+	m.setInstalled(cacheKey, id)
+	return m.atr, id, nil
 }
 
 // GetByInstallation returns this app's transport if its installation for
@@ -190,6 +253,31 @@ func (m *manager) GetAll(ctx context.Context, owner string) ([]Installation, err
 		return nil, err
 	}
 	return []Installation{{Transport: atr, ID: id, AppID: m.atr.AppID()}}, nil
+}
+
+// GetAllFresh implements Manager. See the interface for the contract.
+func (m *manager) GetAllFresh(ctx context.Context, owner string) ([]Installation, error) {
+	cacheKey := m.cacheKey(owner)
+	if v, ok := m.cache.Get(cacheKey); ok {
+		// Re-assert rather than read through: otherwise a negative entry armed
+		// after an earlier confirm cleared it is never repaired.
+		m.setInstalled(cacheKey, v)
+		return []Installation{{Transport: m.atr, ID: v, AppID: m.atr.AppID()}}, nil
+	}
+
+	id, found, err := m.lookupInstallation(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		// A confirmed absence is as cacheable here as in Get; without this every
+		// confirm pays a full walk.
+		m.setNotInstalled(cacheKey)
+		return nil, nil
+	}
+
+	m.setInstalled(cacheKey, id)
+	return []Installation{{Transport: m.atr, ID: id, AppID: m.atr.AppID()}}, nil
 }
 
 // QuotaConfig configures three-tier capacity-aware selection for the
@@ -305,6 +393,23 @@ func (rr *roundRobin) GetByInstallation(ctx context.Context, owner string, insta
 // returned alongside the aggregate error: the list is real but incomplete,
 // and a caller that needs exhaustiveness must not treat it as the whole set.
 func (rr *roundRobin) GetAll(ctx context.Context, owner string) ([]Installation, error) {
+	return rr.enumerate(ctx, owner, "GetAll", Manager.GetAll)
+}
+
+// GetAllFresh implements Manager. See the interface for the contract. It
+// aggregates exactly as GetAll does.
+func (rr *roundRobin) GetAllFresh(ctx context.Context, owner string) ([]Installation, error) {
+	return rr.enumerate(ctx, owner, "GetAllFresh", Manager.GetAllFresh)
+}
+
+// enumerate runs one enumeration method across every manager, concatenating in
+// managers order and deduplicating on installation ID. each takes the Manager
+// before ctx because that is the shape of an interface method expression.
+func (rr *roundRobin) enumerate(
+	ctx context.Context,
+	owner, label string,
+	each func(Manager, context.Context, string) ([]Installation, error),
+) ([]Installation, error) {
 	out := make([]Installation, 0, len(rr.managers))
 	var errs []error
 	seen := make(map[int64]struct{}, len(rr.managers))
@@ -317,7 +422,7 @@ func (rr *roundRobin) GetAll(ctx context.Context, owner string) ([]Installation,
 			break
 		}
 
-		installs, err := m.GetAll(ctx, owner)
+		installs, err := each(m, ctx, owner)
 		if err != nil {
 			errs = append(errs, err)
 			// installs may still be non-empty (a nested roundRobin or future
@@ -335,8 +440,8 @@ func (rr *roundRobin) GetAll(ctx context.Context, owner string) ([]Installation,
 
 	if len(errs) > 0 {
 		err := status.Errorf(codes.Unavailable, "enumerating installations for %q: %v", owner, errors.Join(errs...))
-		clog.WarnContextf(ctx, "ghinstall: GetAll enumeration incomplete for %q: %d of %d managers failed; "+
-			"callers requiring exhaustiveness must treat this as unknown: %v", owner, len(errs), len(rr.managers), err)
+		clog.WarnContextf(ctx, "ghinstall: %s enumeration incomplete for %q: %d of %d managers failed; "+
+			"callers requiring exhaustiveness must treat this as unknown: %v", label, owner, len(errs), len(rr.managers), err)
 		return out, err
 	}
 	return out, nil
