@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"regexp/syntax"
 	"slices"
 	"strings"
 
@@ -103,6 +104,9 @@ func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 		if err := checkNoSlashMatchingAtom(i, p); err != nil {
 			return nil, err
 		}
+		if err := checkNoSeparatorUnderQuantifier(i, p); err != nil {
+			return nil, err
+		}
 		// Compile p ALONE first: the group below hides an unbalanced ")", so
 		// "token\.example\.com)|(" wraps to "^(?:token\.example\.com)|()$", whose "()$"
 		// alternative matches everything. A legitimate top-level "a|b" still compiles.
@@ -152,10 +156,8 @@ func (a *IssuerAllowlist) Allows(issuer string) bool {
 // "/" without containing ".", and "[.-9]" holds "/" by range. A LITERAL "/" stays allowed;
 // unterminated brackets are left to regexp.Compile.
 //
-// KNOWN LIMITATION, structural rather than a missing case: being per-ATOM, a literal "/"
-// inside a QUANTIFIED group escapes it, so "https://([a-z0-9.-]+/)*trusted\.example\.com"
-// validates yet matches "https://evil.com/x/trusted.example.com". Catching it needs AST
-// analysis; TestCompileKnownLimitationQuantifiedGroupSpansSeparators pins the gap.
+// Being per-ATOM it cannot see a "/" that only spans because of surrounding
+// STRUCTURE; checkNoSeparatorUnderQuantifier covers that half.
 func checkNoSlashMatchingAtom(i int, p string) error {
 	for j := 0; j < len(p); j++ {
 		var atom string
@@ -207,6 +209,73 @@ func checkNoSlashMatchingAtom(i int, p string) error {
 		}
 	}
 	return nil
+}
+
+// checkNoSeparatorUnderQuantifier rejects a pattern where a "/"-matching element sits
+// inside a repetition, an optional, or an alternation. The per-atom scan cannot see
+// this: every atom in "([a-z0-9.-]+/)*" is innocent on its own, yet the group spans
+// separators, so "https://([a-z0-9.-]+/)*trusted\.example\.com" matches
+// "https://evil.com/x/trusted.example.com" — attacker-chosen host, trusted name demoted
+// to a path segment. "?", "{n,m}" and alternation do the same.
+//
+// A literal "/" at a FIXED position stays allowed, so real multi-segment issuers such as
+// "https://host\.example\.com/id/[A-Z0-9]+" still validate. An author who wants
+// alternatives writes separate issuer_patterns entries instead of one alternation.
+func checkNoSeparatorUnderQuantifier(i int, p string) error {
+	re, err := syntax.Parse(p, syntax.Perl)
+	if err != nil {
+		// Unparseable: regexp.Compile reports it better than we would.
+		return nil
+	}
+	if found := separatorUnderQuantifier(re, false); found != "" {
+		return fmt.Errorf(`issuer_patterns[%d]: %s can match "/" from inside a `+
+			`repetition, optional or alternation, so the pattern can span past the `+
+			`host — "https://([a-z0-9.-]+/)*trusted\.example\.com" also permits `+
+			`"https://evil.com/x/trusted.example.com". Keep "/" at a fixed position, `+
+			`e.g. https://host\.example\.com/id/[A-Z0-9]+, and write alternatives as `+
+			`separate issuer_patterns entries rather than one alternation`, i, found)
+	}
+	return nil
+}
+
+// separatorUnderQuantifier reports the first "/"-matching element reachable under a
+// variable-length or alternating node, or "" if there is none. variable becomes true
+// once inside such a node and stays true for the whole subtree.
+func separatorUnderQuantifier(re *syntax.Regexp, variable bool) string {
+	switch re.Op {
+	case syntax.OpStar, syntax.OpPlus, syntax.OpQuest, syntax.OpRepeat, syntax.OpAlternate:
+		variable = true
+	}
+	if variable {
+		if what := slashMatchingElement(re); what != "" {
+			return what
+		}
+	}
+	for _, sub := range re.Sub {
+		if found := separatorUnderQuantifier(sub, variable); found != "" {
+			return found
+		}
+	}
+	return ""
+}
+
+// slashMatchingElement names re if it can match "/" on its own, else "".
+func slashMatchingElement(re *syntax.Regexp) string {
+	switch re.Op {
+	case syntax.OpLiteral:
+		if slices.Contains(re.Rune, '/') {
+			return `a literal "/"`
+		}
+	case syntax.OpCharClass:
+		for j := 0; j+1 < len(re.Rune); j += 2 {
+			if re.Rune[j] <= '/' && '/' <= re.Rune[j+1] {
+				return "a character class containing \"/\""
+			}
+		}
+	case syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return `"." (which matches "/")`
+	}
+	return ""
 }
 
 // endOfEscape returns the index just past the character-class escape starting at the

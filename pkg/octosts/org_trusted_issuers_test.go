@@ -580,34 +580,63 @@ func TestCompileRejectsPatternsThatEscapeTheAnchoringGroup(t *testing.T) {
 	}
 }
 
-// TestCompileKnownLimitationQuantifiedGroupSpansSeparators documents a gap the
-// per-atom guard structurally cannot close, so that it stays a known limitation
-// rather than something readers assume is covered.
+// TestCompileRejectsSeparatorUnderQuantifier covers the half the per-atom scan
+// structurally cannot: a "/" that only spans because of the structure AROUND it.
 //
-// The guard asks of each single-character atom "can this match /". A literal "/"
-// is deliberately allowed, so a quantified GROUP containing one spans separators
-// while every atom in it is innocent. Closing this needs AST analysis of
-// quantified subexpressions.
+// Every atom in "([a-z0-9.-]+/)*" is innocent alone, so the atom scan passes it —
+// yet the group repeats across separators. "?", "{n,m}", "+" and alternation do the
+// same. In each case the host is attacker-chosen and the trusted name is demoted to
+// a path segment, while the pattern still matches its author's intended issuer,
+// which is exactly why it reads as safe.
 //
-// If a future change starts rejecting this, that is an improvement — update this
-// test to assert the rejection rather than deleting it, so the reasoning survives.
-func TestCompileKnownLimitationQuantifiedGroupSpansSeparators(t *testing.T) {
-	const pat = `https://([a-z0-9.-]+/)*trusted\.example\.com`
+// This test used to assert these were ACCEPTED, as a documented limitation. A
+// reviewer asked for the class closed rather than documented, so it now asserts
+// rejection; checkNoSeparatorUnderQuantifier walks the regexp/syntax tree.
+func TestCompileRejectsSeparatorUnderQuantifier(t *testing.T) {
+	for _, tc := range []struct{ name, pat, spanning string }{
+		{"star", `https://([a-z0-9.-]+/)*trusted\.example\.com`, "https://evil.com/x/trusted.example.com"},
+		{"plus", `https://([a-z0-9.-]+/)+trusted\.example\.com`, "https://evil.com/x/trusted.example.com"},
+		{"optional", `https://(x\.com/)?trusted\.example\.com`, "https://x.com/trusted.example.com"},
+		{"bounded repeat", `https://([a-z0-9.-]+/){1,3}trusted\.example\.com`, "https://evil.com/x/trusted.example.com"},
+		{"alternation", `https://(good\.example\.com|evil\.com/x/trusted\.example\.com)`, "https://evil.com/x/trusted.example.com"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Prove the shape really is a bypass, so the row cannot go vacuous.
+			re, err := regexp.Compile("^(?:" + tc.pat + ")$")
+			if err != nil {
+				t.Fatalf("regexp.Compile(%q) = %v; the row must be a valid regexp", tc.pat, err)
+			}
+			if !re.MatchString(tc.spanning) {
+				t.Fatalf("pattern %q does not match %q; the row no longer demonstrates spanning", tc.pat, tc.spanning)
+			}
 
-	al, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile()
-	if err != nil {
-		t.Fatalf("Compile() = %v; the guard now rejects this. That is an improvement — "+
-			"update this test to assert rejection instead of deleting it", err)
+			_, err = (&OrgTrustedIssuers{IssuerPatterns: []string{tc.pat}}).Compile()
+			if err == nil {
+				t.Fatalf("Compile() with pattern %q = nil error, want a rejection", tc.pat)
+			}
+			if !strings.Contains(err.Error(), "repetition, optional or alternation") {
+				t.Errorf("Compile() error = %q, want the separator-under-quantifier message", err)
+			}
+		})
 	}
+}
 
-	// The point of the limitation: an attacker-chosen host with the trusted name
-	// demoted to a path segment.
-	const spanning = "https://evil.com/x/trusted.example.com"
-	if !al.Allows(spanning) {
-		t.Fatalf("Allows(%q) = false; this test no longer demonstrates the limitation", spanning)
-	}
-	if !al.Allows("https://trusted.example.com") {
-		t.Error("the pattern should still match its intended issuer, which is why it looks correct to its author")
+// TestCompileKeepsFixedPositionSlashes is the other half: the check must not reject a
+// "/" at a FIXED position, or it would break every real issuer with a path. All of
+// these appear in the fixtures, the README or the schema examples.
+func TestCompileKeepsFixedPositionSlashes(t *testing.T) {
+	for _, pat := range []string{
+		`https://host\.example\.com/id/[A-Z0-9]+`,
+		`https://oidc\.eks\.[a-z0-9-]+\.amazonaws\.com/id/[A-Z0-9]+`,
+		`https://example\.com/realms/[a-z0-9-]+`,
+		`https://login\.microsoftonline\.com/[a-f0-9-]+/v2\.0`,
+		// An alternation with no separator in it stays legal: the check keys on the
+		// "/" being under variable structure, not on the structure alone.
+		`https://a\.example\.com|https://b\.example\.com`,
+	} {
+		if _, err := (&OrgTrustedIssuers{IssuerPatterns: []string{pat}}).Compile(); err != nil {
+			t.Errorf("Compile() with pattern %q = %v, want nil", pat, err)
+		}
 	}
 }
 
