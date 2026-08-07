@@ -391,7 +391,7 @@ func TestClassifyContentsError(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := classifyContentsError(t.Context(), "org", fmt.Errorf("wrapped: %w", tc.err))
+			got := classifyContentsError(t.Context(), "org", ".github", fmt.Errorf("wrapped: %w", tc.err))
 			if got.kind != tc.wantKind {
 				t.Fatalf("kind = %v, want %v", got.kind, tc.wantKind)
 			}
