@@ -302,7 +302,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	owner, repo := path.Dir(scope), path.Base(scope)
 	if owner == "." {
-		owner, repo = repo, s.orgPolicyRepo
+		owner, repo = repo, s.policyRepo()
 	} else {
 		otp.Repositories = []string{repo}
 	}
@@ -310,7 +310,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	// If the repo is the org policy repo, then parse with an org policy even
 	// if the repo was specified explicitly because we will reject the
 	// repositories field in policies otherwise.
-	if repo == s.orgPolicyRepo {
+	if repo == s.policyRepo() {
 		tp = otp
 	}
 
