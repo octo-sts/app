@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/yaml"
 
+	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/octosts"
 )
 
@@ -321,6 +322,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	repo := event.GetRepo().GetName()
 	sha := event.GetAfter()
 	installationID := event.GetInstallation().GetID()
+	ctx = ghtransport.EnrichContext(ctx, e.Transport.AppID(), installationID)
 
 	// Skip if the organization is not in the list of organizations to validate.
 	if e.shouldSkipOrganization(owner) {
@@ -374,6 +376,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	repo := pr.GetRepo().GetName()
 	sha := pr.GetPullRequest().GetHead().GetSHA()
 	installationID := pr.GetInstallation().GetID()
+	ctx = ghtransport.EnrichContext(ctx, e.Transport.AppID(), installationID)
 
 	// Skip if the organization is not in the list of organizations to validate.
 	if e.shouldSkipOrganization(owner) {
@@ -438,6 +441,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	repo := cs.GetRepo().GetName()
 	sha := cs.GetCheckSuite().GetHeadSHA()
 	installationID := cs.GetInstallation().GetID()
+	ctx = ghtransport.EnrichContext(ctx, e.Transport.AppID(), installationID)
 
 	// Skip if the organization is not in the list of organizations to validate.
 	if e.shouldSkipOrganization(owner) {
