@@ -125,7 +125,7 @@ func main() {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(rrm, sticky, len(managers), ceclient, appConfig.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appConfig.OrgPolicyRepo))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

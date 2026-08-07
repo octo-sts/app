@@ -224,8 +224,9 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 	return failedFetch()
 }
 
-// classifyContentsError maps a GetContents failure.
-func classifyContentsError(ctx context.Context, owner string, err error) fetchResult {
+// classifyContentsError maps a GetContents failure. policyRepo is the
+// repository name that was read, for use in log messages.
+func classifyContentsError(ctx context.Context, owner, policyRepo string, err error) fetchResult {
 	if isOrgIssuerRateLimit(err) {
 		clog.WarnContextf(ctx, "org trusted issuers: read rate limited for %s", owner)
 		return rateLimitedFetch()
@@ -242,7 +243,7 @@ func classifyContentsError(ctx context.Context, owner string, err error) fetchRe
 			// 403 is often org-wide (IP allowlist, SAML/SSO, ToS lock, API incident) and
 			// would make every installation "agree" no allowlist applies. Genuine
 			// per-installation blindness fails at the MINT with 422, the sole agreement.
-			clog.WarnContextf(ctx, "org trusted issuers: read forbidden for %s/.github (403, not a rate limit); treating as unknown", owner)
+			clog.WarnContextf(ctx, "org trusted issuers: read forbidden for %s/%s (403, not a rate limit); treating as unknown", owner, policyRepo)
 			return failedFetch()
 		}
 	}
@@ -259,7 +260,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 
 	atr := ghinstallation.NewFromAppsTransport(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: []string{".github"},
+		Repositories: []string{s.policyRepo()},
 		Permissions: &github.InstallationPermissions{
 			Contents: ptr("read"),
 		},
@@ -287,11 +288,11 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	}
 
 	file, _, _, err := client.Repositories.GetContents(ctx,
-		owner, ".github", OrgTrustedIssuersPath,
+		owner, s.policyRepo(), OrgTrustedIssuersPath,
 		&github.RepositoryContentGetOptions{},
 	)
 	if err != nil {
-		return classifyContentsError(ctx, owner, err)
+		return classifyContentsError(ctx, owner, s.policyRepo(), err)
 	}
 	if file == nil {
 		// A directory: GetContent() dereferences Encoding unguarded and would panic.
@@ -416,7 +417,7 @@ func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghins
 	// Re-check rather than reuse the earlier verdict: the newly-found installations may
 	// have added a failure, which is fatal to the conclusion.
 	if t.exhaustiveNoAccess() {
-		clog.WarnContextf(ctx, "no installation can read %s/.github (re-enumerated without the installation cache); org issuer enforcement not applied", owner)
+		clog.WarnContextf(ctx, "no installation can read %s/%s (re-enumerated without the installation cache); org issuer enforcement not applied", owner, s.policyRepo())
 		return absentOrgIssuerEntry(), true
 	}
 

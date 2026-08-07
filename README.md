@@ -79,9 +79,29 @@ This will read the `# yaml-language-server: $schema=...` header and provide code
 ### Organization Trusted Token Issuers
 
 An organization restricts which OIDC issuers can federate with its repositories.
-Add `.github/chainguard/trusted-token-issuers.yaml` to the organization's `.github`
-repository. octo-sts rejects a token with an issuer that the file does not permit.
+Add `<ORG_POLICY_REPO>/.github/chainguard/trusted-token-issuers.yaml` to the
+organization's policy repository (`.github` by default; see `ORG_POLICY_REPO`
+below). octo-sts rejects a token with an issuer that the file does not permit.
 It rejects the token before it reads the trust policy.
+
+#### Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORG_POLICY_REPO` | `.github` | Repository within the organization that holds the org-issuer allowlist. Must exist and be accessible to the App before enforcement takes effect. |
+
+> **Warning: migration hazard.** If you set `ORG_POLICY_REPO=my-policies` while
+> the allowlist is still in `.github`, octo-sts reads `my-policies` instead.
+> That file does not exist yet, so the read returns 404. A 404 is treated as
+> "no allowlist" — meaning **all issuers are permitted** for that organization,
+> silently. Create or move the allowlist into the new repository and protect it
+> **before** flipping `ORG_POLICY_REPO`.
+
+> **Note: two-binary config skew.** The exchange service and the webhook
+> validator each read `ORG_POLICY_REPO` from their own deployment config. If
+> you set `ORG_POLICY_REPO` on only one of the two, the webhook validates a
+> different repository than the exchange enforces. Update both deployments
+> together.
 
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustedIssuers.json
@@ -153,25 +173,25 @@ over-broad pattern is therefore an unwise choice, not an attack.
 
 Audit mode does not protect you against a broken file or a failed lookup.
 
-#### Requirement: the App must be able to read `.github`
+#### Requirement: the App must be able to read the policy repository
 
 octo-sts reads the allowlist with a short-lived `contents: read` token. The token
-is scoped to the `.github` repository. **Enforcement silently does not apply if
-octo-sts cannot read that repository.** The most common cause is an App that is
-installed on selected repositories only.
+is scoped to the `ORG_POLICY_REPO` repository (`.github` by default).
+**Enforcement silently does not apply if octo-sts cannot read that repository.**
+The most common cause is an App that is installed on selected repositories only.
 
 octo-sts cannot report which cause it hit. GitHub answers a token request for an
 inaccessible repository with one 422 status. That status does not separate "the
 repository does not exist" from "you do not have access".
 
-Grant the App access to `.github` before you rely on this control.
+Grant the App access to the policy repository before you rely on this control.
 
 #### When the lookup fails
 
 | Situation | Result |
 | --- | --- |
 | File absent | octo-sts permits all issuers |
-| No App can read `.github` | octo-sts permits all issuers and logs a warning. It first re-reads the installation list from GitHub, without its local cache. See effect 4 below |
+| No App can read `ORG_POLICY_REPO` | octo-sts permits all issuers and logs a warning. It first re-reads the installation list from GitHub, without its local cache. See effect 4 below |
 | Rate limited, or GitHub unavailable | octo-sts uses the last known good allowlist. If there is none, it rejects the exchange |
 | File present but invalid | octo-sts uses the last known good allowlist. If there is none, it rejects every exchange in the organization |
 
@@ -193,19 +213,20 @@ the incident. One successful read replaces the state. Check that enforcement
 started. Do not assume it started.
 
 Effect 4 has a different cause. Before octo-sts concludes that no installation can
-read `.github`, it re-reads the installation list from GitHub without its local
-cache. GitHub does not list a new installation at once. octo-sts cannot see an
-installation that GitHub has not yet propagated.
+read the policy repository, it re-reads the installation list from GitHub without
+its local cache. GitHub does not list a new installation at once. octo-sts cannot
+see an installation that GitHub has not yet propagated.
 
 #### Hardening
 
-This control is only as strong as write access to `org/.github`.
+This control is only as strong as write access to the policy repository.
 
-- **Create `org/.github` before you need it.** GitHub does not reserve the name. In
-  an organization without this repository, any member who can create a repository
-  becomes the sole author of this control. Restrict who can create repositories.
+- **Create the policy repository before you need it.** GitHub does not reserve
+  repository names. In an organization without this repository, any member who can
+  create a repository becomes the sole author of this control. Restrict who can
+  create repositories.
 
-- **Protect the default branch of `org/.github`.** Make the
+- **Protect the default branch of the policy repository.** Make the
   `Trust Policy Validation` check a **required** status check. The check validates
   this file on every pull request. It only reports. It blocks nothing until you make
   it required.
@@ -214,12 +235,12 @@ This control is only as strong as write access to `org/.github`.
 
 - **Scope organization-level trust policies with `repositories:`.** An
   organization-level policy that grants `contents: write` without a `repositories:`
-  restriction covers every repository the installation can see. That includes
-  `.github`. A federated identity can then rewrite the allowlist that constrains it.
-  Any permission that writes, renames, or deletes `org/.github` defeats this
-  control. **Deletion of the file fails open.**
+  restriction covers every repository the installation can see. That includes the
+  policy repository. A federated identity can then rewrite the allowlist that
+  constrains it. Any permission that writes, renames, or deletes the allowlist file
+  defeats this control. **Deletion of the file fails open.**
 
-- **`.github-private` is not consulted.** The file must live in `.github`.
+- **`.github-private` is not consulted.** The file must live in `ORG_POLICY_REPO`.
 
 ### Federating a token
 

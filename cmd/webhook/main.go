@@ -107,6 +107,7 @@ func main() {
 		Transport:     atr,
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
+		OrgPolicyRepo: webhookConfig.OrgPolicyRepo,
 	})
 	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

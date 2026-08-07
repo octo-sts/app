@@ -295,6 +295,22 @@ func TestAppConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "ORG_POLICY_REPO explicitly empty rejected",
+			envVars: map[string]string{
+				"STS_DOMAIN":      "octo-sts-test.local",
+				"ORG_POLICY_REPO": "",
+			},
+			wantErr: true,
+		},
+		{
+			name: "ORG_POLICY_REPO custom value accepted",
+			envVars: map[string]string{
+				"STS_DOMAIN":      "octo-sts-test.local",
+				"ORG_POLICY_REPO": "my-policies",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
