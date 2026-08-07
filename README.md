@@ -69,11 +69,157 @@ Chainguard email address to federate and read the repo contents.
 
 - [TrustPolicy](./pkg/octosts/octosts.TrustPolicy.json)
 - [OrgTrustPolicy](pkg/octosts/octosts.OrgTrustPolicy.json)
+- [OrgTrustedIssuers](pkg/octosts/octosts.OrgTrustedIssuers.json)
 
 ##### VSCode
 
 We recommend using [vscode-yaml](https://github.com/redhat-developer/vscode-yaml?tab=readme-ov-file).
 This will read the `# yaml-language-server: $schema=...` header and provide code completion.
+
+### Organization Trusted Token Issuers
+
+An organization restricts which OIDC issuers can federate with its repositories.
+Add `.github/chainguard/trusted-token-issuers.yaml` to the organization's `.github`
+repository. octo-sts rejects a token with an issuer that the file does not permit.
+It rejects the token before it reads the trust policy.
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustedIssuers.json
+
+# "enforce" (the default) rejects a token that the allowlist does not permit.
+# "audit" permits them and records each one the allowlist rejects.
+mode: enforce
+
+# octo-sts matches these exactly. A trailing slash makes a different issuer.
+issuers:
+  - https://token.actions.githubusercontent.com
+  - https://accounts.google.com
+
+# octo-sts matches these as anchored regexps against the whole issuer URL.
+# Escape a literal dot. octo-sts rejects a wildcard that can match "/".
+issuer_patterns:
+  - https://oidc\.eks\.[a-z0-9-]+\.amazonaws\.com/id/[A-Z0-9]+
+```
+
+octo-sts matches an entry in `issuers` exactly. It matches an entry in
+`issuer_patterns` as an anchored regular expression against the whole issuer URL.
+An issuer passes if it matches either list. Matching is case-sensitive, so write
+the scheme and the host in lowercase.
+
+**octo-sts rejects a pattern that can match `/`.** The `/` character separates the
+host from the path. A pattern that matches `/` can therefore reach past the host.
+Anchors at both ends do not prevent this, because a pattern can stay loose in the
+middle.
+
+octo-sts parses each pattern with the same parser that Go's `regexp` package uses.
+It then applies two rules:
+
+- It rejects a character class or a `.` that can match `/`, at any position. This
+  covers `\S`, `[^\n]`, `[[:ascii:]]` and a range such as `[.-9]`.
+- It rejects a literal `/` inside a repetition, an optional group, or an
+  alternation. A group such as `([a-z0-9.-]+/)*` repeats across separators.
+
+A literal `/` at a fixed position is correct. Every issuer with a path has one.
+
+These rules catch a common mistake: a pattern that spans into another domain.
+`https://.*.example.com` reads as "any subdomain of example.com". It also permits
+`https://evil.attacker-example.com`, because the unescaped `.` before `example`
+matches `-`. It also permits `https://totally-evil.com/x.example.com`, where an
+attacker controls the whole host.
+
+Write a literal dot as `\.`. Give an explicit character class for the part that
+varies. `https://[a-z0-9-]+\.example\.com` expresses "subdomains of example.com",
+and octo-sts accepts it. The error message names the pattern that failed.
+
+Write a path one segment at a time, with literal separators. Use
+`https://example\.com/realms/[a-z0-9-]+`. Do not use
+`https://example\.com/[a-z0-9/-]+`. octo-sts deliberately gives you no way to match
+a path of variable depth.
+
+**This is a best-effort guard, not a guarantee.** It catches accidents. It does not
+stop a determined author. Write your patterns as narrowly as you can. An
+organization owner writes this file, and the control serves that owner. An
+over-broad pattern is therefore an unwise choice, not an attack.
+
+**No file means no restriction.** An organization that adds no file sees no change.
+
+#### Rolling it out
+
+1. Commit the file with `mode: audit`. octo-sts rejects nothing in audit mode.
+2. Read the logs and the exchange events. octo-sts records each token that the
+   allowlist does not permit.
+3. Check that your list is complete.
+4. Remove the `mode` line to enforce.
+
+Audit mode does not protect you against a broken file or a failed lookup.
+
+#### Requirement: the App must be able to read `.github`
+
+octo-sts reads the allowlist with a short-lived `contents: read` token. The token
+is scoped to the `.github` repository. **Enforcement silently does not apply if
+octo-sts cannot read that repository.** The most common cause is an App that is
+installed on selected repositories only.
+
+octo-sts cannot report which cause it hit. GitHub answers a token request for an
+inaccessible repository with one 422 status. That status does not separate "the
+repository does not exist" from "you do not have access".
+
+Grant the App access to `.github` before you rely on this control.
+
+#### When the lookup fails
+
+| Situation | Result |
+| --- | --- |
+| File absent | octo-sts permits all issuers |
+| No App can read `.github` | octo-sts permits all issuers and logs a warning. It first re-reads the installation list from GitHub, without its local cache. See effect 4 below |
+| Rate limited, or GitHub unavailable | octo-sts uses the last known good allowlist. If there is none, it rejects the exchange |
+| File present but invalid | octo-sts uses the last known good allowlist. If there is none, it rejects every exchange in the organization |
+
+This caching creates four timing effects.
+
+1. After you *narrow* the allowlist, octo-sts can still serve the previous, broader
+   list for up to one hour. This happens whenever GitHub returns an error.
+2. After you *fix* an invalid file, rejections can continue for up to five minutes.
+   The cached result must expire first.
+3. When you *enable* the allowlist, octo-sts can permit all issuers for up to one
+   hour.
+4. After you install the App, enforcement can take a few minutes to start.
+
+Plan for effect 3. "No file" is itself a valid last known good state. An
+organization that adds its **first** allowlist during a GitHub incident can
+therefore keep permitting all issuers for up to one hour. This behavior is
+deliberate. It keeps the organizations that do not use this feature working through
+the incident. One successful read replaces the state. Check that enforcement
+started. Do not assume it started.
+
+Effect 4 has a different cause. Before octo-sts concludes that no installation can
+read `.github`, it re-reads the installation list from GitHub without its local
+cache. GitHub does not list a new installation at once. octo-sts cannot see an
+installation that GitHub has not yet propagated.
+
+#### Hardening
+
+This control is only as strong as write access to `org/.github`.
+
+- **Create `org/.github` before you need it.** GitHub does not reserve the name. In
+  an organization without this repository, any member who can create a repository
+  becomes the sole author of this control. Restrict who can create repositories.
+
+- **Protect the default branch of `org/.github`.** Make the
+  `Trust Policy Validation` check a **required** status check. The check validates
+  this file on every pull request. It only reports. It blocks nothing until you make
+  it required.
+
+- **Add a CODEOWNERS entry** for the file.
+
+- **Scope organization-level trust policies with `repositories:`.** An
+  organization-level policy that grants `contents: write` without a `repositories:`
+  restriction covers every repository the installation can see. That includes
+  `.github`. A federated identity can then rewrite the allowlist that constrains it.
+  Any permission that writes, renames, or deletes `org/.github` defeats this
+  control. **Deletion of the file fails open.**
+
+- **`.github-private` is not consulted.** The file must live in `.github`.
 
 ### Federating a token
 
@@ -149,6 +295,8 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 - **Enable branch protection**: Configure branch protection rules on your main/default branch to prevent direct commits and require pull request reviews before merging changes. This prevents OctoSTS clients from bypassing security controls by directly merging changes to main without review.
 
 - **Restrict who can approve pull requests**: Limit pull request approval permissions to trusted team members or repository administrators.
+
+- **Restrict trusted token issuers**: Use the [organization-wide allowlist](#organization-trusted-token-issuers) so that only approved identity providers can federate with your repositories. Without it, anyone who can write a trust policy can point `issuer:` at a provider they control.
 
 ### Trust Policy Management
 

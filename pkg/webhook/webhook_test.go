@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -33,10 +34,9 @@ import (
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+	"github.com/octo-sts/app/pkg/octosts"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-
-	"github.com/octo-sts/app/pkg/octosts"
 )
 
 func TestValidatePolicy(t *testing.T) {
@@ -256,54 +256,6 @@ func TestWebhookOK(t *testing.T) {
 	}
 }
 
-func TestIsValidatedPath(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		path string
-		want bool
-	}{
-		{
-			name: "trust policy",
-			path: ".github/chainguard/test.sts.yaml",
-			want: true,
-		},
-		{
-			name: "workflow not validated",
-			path: ".github/workflows/ci.yaml",
-			want: false,
-		},
-		{
-			name: "nested policy not validated: * does not cross a separator",
-			path: ".github/chainguard/sub/foo.sts.yaml",
-			want: false,
-		},
-		{
-			name: "top-level readme not validated",
-			path: "README.md",
-			want: false,
-		},
-		{
-			name: "readme inside the policy directory not validated",
-			path: ".github/chainguard/README.md",
-			want: false,
-		},
-		{
-			// Pins the ".sts." infix: a README does not match a looser
-			// ".github/chainguard/*.yaml" glob either, so it cannot tell the two
-			// apart on its own.
-			name: "non-policy yaml inside the policy directory not validated",
-			path: ".github/chainguard/config.yaml",
-			want: false,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := isValidatedPath(tc.path); got != tc.want {
-				t.Errorf("isValidatedPath(%q) = %v, want %v", tc.path, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestFilterValidatedFiles(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -337,7 +289,7 @@ func TestFilterValidatedFiles(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := filterValidatedFiles(tc.input)
+			got := filterValidatedFiles("some-service", tc.input)
 			if !slices.Equal(tc.want, got) {
 				t.Errorf("filterValidatedFiles(%v) = %v, want %v", tc.input, got, tc.want)
 			}
@@ -537,7 +489,7 @@ func TestFilesFromPushEvent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			event := &github.PushEvent{Commits: tc.commits}
-			got := v.filesFromPushEvent(event)
+			got := v.filesFromPushEvent("some-service", event)
 			if diff := cmp.Diff(tc.want, got); diff != "" {
 				t.Errorf("filesFromPushEvent() mismatch (-want +got):\n%s", diff)
 			}
@@ -1804,6 +1756,368 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 
 	if got := mints.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 token mint across 2 events, got %d", got)
+	}
+}
+
+func TestIsValidatedPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo string
+		path string
+		want bool
+	}{
+		{name: "trust policy in any repo", repo: "some-service", path: ".github/chainguard/foo.sts.yaml", want: true},
+		{name: "trust policy in .github", repo: ".github", path: ".github/chainguard/foo.sts.yaml", want: true},
+		{name: "allowlist in .github", repo: ".github", path: ".github/chainguard/trusted-token-issuers.yaml", want: true},
+		// GitHub repository names are case-insensitive, and the read path
+		// resolves .github through the API, so the predicate must fold.
+		{name: "allowlist in .GitHub", repo: ".GitHub", path: ".github/chainguard/trusted-token-issuers.yaml", want: true},
+		// A stray copy in an ordinary repo must NOT be validated, or it would be
+		// parsed as a TrustPolicy and fail the check run.
+		{name: "allowlist outside .github", repo: "some-service", path: ".github/chainguard/trusted-token-issuers.yaml", want: false},
+		{name: "unrelated yaml", repo: "some-service", path: ".github/workflows/ci.yaml", want: false},
+		{name: "nested deeper", repo: "some-service", path: ".github/chainguard/sub/foo.sts.yaml", want: false},
+		{name: "readme", repo: ".github", path: "README.md", want: false},
+		// Both of these live in the policy directory of the .github repository —
+		// the one place BOTH arms of the predicate are live. They pin that the
+		// allowlist arm matches one exact path rather than widening the trust
+		// policy glob: neither carries the ".sts." infix, and neither is the
+		// allowlist, so both must be rejected or they would be fetched and
+		// parsed as TrustPolicies and fail the check run.
+		{name: "readme inside the policy directory of .github", repo: ".github", path: ".github/chainguard/README.md", want: false},
+		{name: "non-policy yaml inside the policy directory of .github", repo: ".github", path: ".github/chainguard/config.yaml", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidatedPath(tc.repo, tc.path); got != tc.want {
+				t.Errorf("isValidatedPath(%q, %q) = %v, want %v", tc.repo, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDirScanBranchFiltersPaths covers handleCheckSuite's zeroHash branch, which
+// lists the policy directory instead of diffing it. It previously appended every
+// entry unfiltered, which would parse the organization allowlist — and anything
+// else in the directory — as a TrustPolicy.
+func TestDirScanBranchFiltersPaths(t *testing.T) {
+	all := []string{
+		".github/chainguard/foo.sts.yaml",
+		".github/chainguard/trusted-token-issuers.yaml",
+		".github/chainguard/README.md",
+	}
+
+	got := filterValidatedFiles("some-service", all)
+	want := []string{".github/chainguard/foo.sts.yaml"}
+	if !slices.Equal(got, want) {
+		t.Errorf("filterValidatedFiles(some-service) = %v, want %v — the allowlist must not be validated outside .github", got, want)
+	}
+
+	got = filterValidatedFiles(".github", all)
+	want = []string{".github/chainguard/foo.sts.yaml", ".github/chainguard/trusted-token-issuers.yaml"}
+	if !slices.Equal(got, want) {
+		t.Errorf("filterValidatedFiles(.github) = %v, want %v", got, want)
+	}
+}
+
+// TestCheckSuiteDirScanSkipsNonPolicyFiles pins the PRODUCTION call site of the
+// zeroHash directory-listing branch, which TestDirScanBranchFiltersPaths does not
+// reach. The listing contains a README and the organization allowlist alongside a
+// trust policy; in an ordinary repository only the trust policy may be fetched and
+// parsed. Before filtering, the README and the allowlist were both fetched (404 in
+// this fixture) and the check run concluded "failure".
+func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+	var fetched []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	// The directory listing carries entries that are NOT trust policies.
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]*github.RepositoryContent{
+			{Type: github.Ptr("file"), Name: github.Ptr("test.sts.yaml"), Path: github.Ptr(".github/chainguard/test.sts.yaml")},
+			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(".github/chainguard/trusted-token-issuers.yaml")},
+			{Type: github.Ptr("file"), Name: github.Ptr("README.md"), Path: github.Ptr(".github/chainguard/README.md")},
+		})
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/") {
+			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"))
+		}
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.Repository{
+			Owner:         &github.User{Login: github.Ptr("foo")},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	wantFetched := []string{".github/chainguard/test.sts.yaml"}
+	if !slices.Equal(fetched, wantFetched) {
+		t.Errorf("directory scan fetched %v, want %v — non-policy entries must not be validated", fetched, wantFetched)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Errorf("expected success, got %s: %s", *got[0].Conclusion, got[0].Output.GetSummary())
+	}
+}
+
+// TestValidateAllowlistContent checks that the webhook's validator runs the same
+// parse AND compile the exchange path runs, so a check-run verdict cannot
+// disagree with what happens at exchange time.
+func TestValidateAllowlistContent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{
+			name: "valid",
+			raw: `
+issuers:
+  - https://token.actions.githubusercontent.com
+`,
+		},
+		{
+			name: "valid audit with pattern",
+			raw: `
+mode: audit
+issuer_patterns:
+  - https://oidc\.eks\.[a-z0-9-]+\.amazonaws\.com/id/[A-Z0-9]+
+`,
+		},
+		// UnmarshalStrict alone would accept these; only Compile() catches them.
+		{name: "uncompilable pattern", raw: "issuer_patterns:\n  - \"[unclosed\"\n", wantErr: true},
+		{name: "uppercase host", raw: "issuers:\n  - https://Accounts.Google.com\n", wantErr: true},
+		{name: "http non-loopback", raw: "issuers:\n  - http://evil.example.com\n", wantErr: true},
+		{name: "empty lists", raw: "mode: enforce\n", wantErr: true},
+		{name: "unknown mode", raw: "mode: off\nissuers:\n  - https://a.example.com\n", wantErr: true},
+		// The singular spelling is the typo the plural field names invite.
+		{name: "singular issuer_pattern", raw: "issuer_pattern:\n  - https://a\\.example\\.com\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := octosts.ParseOrgTrustedIssuers([]byte(tc.raw))
+			if tc.wantErr && err == nil {
+				t.Fatal("ParseOrgTrustedIssuers() = nil error, want an error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("ParseOrgTrustedIssuers() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// runAllowlistCheckSuite drives the real check-run path over a fake GitHub for a
+// check_suite on the default branch of org repository ".github", whose policy
+// directory contains nothing but the trusted-issuer allowlist with the given
+// contents. It returns the check runs created and the content paths fetched.
+func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateCheckRunOptions, []string) {
+	t.Helper()
+
+	got := []*github.CreateCheckRunOptions{}
+	var fetched []string
+
+	const allowlistPath = ".github/chainguard/trusted-token-issuers.yaml"
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/.github/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/.github/chainguard", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
+			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
+		}); err != nil {
+			t.Error(err)
+		}
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/"+allowlistPath, func(w http.ResponseWriter, _ *http.Request) {
+		fetched = append(fetched, allowlistPath)
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(&github.RepositoryContent{
+			Type:     github.Ptr("file"),
+			Name:     github.Ptr("trusted-token-issuers.yaml"),
+			Path:     github.Ptr(allowlistPath),
+			Encoding: github.Ptr("base64"),
+			Content:  github.Ptr(base64.StdEncoding.EncodeToString([]byte(allowlist))),
+		}); err != nil {
+			t.Error(err)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/") {
+			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/"))
+		}
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.Repository{
+			Owner:         &github.User{Login: github.Ptr("foo")},
+			Name:          github.Ptr(".github"),
+			FullName:      github.Ptr("foo/.github"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	return got, fetched
+}
+
+// TestCheckSuiteAllowlistValidConcludesSuccess pins the PRODUCTION dispatch in
+// validatePolicies. A valid allowlist is NOT a valid TrustPolicy (nor a valid
+// OrgTrustPolicy), so before the allowlist arm existed this concluded "failure"
+// on a perfectly good file.
+func TestCheckSuiteAllowlistValidConcludesSuccess(t *testing.T) {
+	got, fetched := runAllowlistCheckSuite(t, `mode: audit
+issuers:
+  - https://token.actions.githubusercontent.com
+issuer_patterns:
+  - https://oidc\.eks\.[a-z0-9-]+\.amazonaws\.com/id/[A-Z0-9]+
+`)
+
+	wantFetched := []string{".github/chainguard/trusted-token-issuers.yaml"}
+	if !slices.Equal(fetched, wantFetched) {
+		t.Errorf("fetched %v, want %v", fetched, wantFetched)
+	}
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "success" {
+		t.Errorf("expected success, got %s: %s", *got[0].Conclusion, got[0].Output.GetSummary())
+	}
+}
+
+// TestCheckSuiteAllowlistInvalidConcludesFailure proves the dispatch COMPILES
+// rather than merely unmarshalling. "[unclosed" is a well-formed YAML string, so
+// yaml.UnmarshalStrict into OrgTrustedIssuers accepts it; only Compile() rejects
+// it. A dispatch that only unmarshalled would pass the valid test above and fail
+// this one.
+func TestCheckSuiteAllowlistInvalidConcludesFailure(t *testing.T) {
+	got, _ := runAllowlistCheckSuite(t, "issuer_patterns:\n  - \"[unclosed\"\n")
+
+	if len(got) != 1 {
+		t.Fatalf("expected 1 check run, got %d", len(got))
+	}
+	if *got[0].Conclusion != "failure" {
+		t.Errorf("expected failure, got %s: %s", *got[0].Conclusion, got[0].Output.GetSummary())
+	}
+	if !strings.Contains(got[0].Output.GetSummary(), "invalid issuer_pattern") {
+		t.Errorf("summary %q does not mention the uncompilable pattern — the file may have been merely unmarshalled", got[0].Output.GetSummary())
 	}
 }
 
