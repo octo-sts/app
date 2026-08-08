@@ -1,0 +1,27 @@
+# Copyright 2024 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Production deploys are manual only, and this workflow is intentionally kept
+# separate from staging so it can be disabled from the Actions UI without
+# affecting the staging auto-deploy on merge to main.
+name: Deploy (production)
+
+on:
+  workflow_dispatch:
+
+# Serialize production deploys and never cancel one in progress.
+concurrency: deploy-octo-sts
+
+permissions: {}
+
+jobs:
+  production:
+    permissions:
+      contents: read # clone the repository contents (in the reusable workflow)
+      id-token: write # federate with GCP via Workload Identity (in the reusable workflow)
+    uses: ./.github/workflows/deploy.yaml
+    with:
+      environment: octo-sts
+    # Pass only the secret the reusable workflow needs, not `secrets: inherit`.
+    secrets:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
