@@ -14,6 +14,10 @@ on:
         description: "The environment to deploy to (octo-sts-staging or octo-sts)"
         required: true
         type: string
+    secrets:
+      SLACK_WEBHOOK:
+        description: "Slack webhook for failure notifications"
+        required: false
 
 permissions: {}
 

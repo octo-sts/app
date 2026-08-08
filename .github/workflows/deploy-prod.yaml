@@ -22,4 +22,6 @@ jobs:
     uses: ./.github/workflows/deploy.yaml
     with:
       environment: octo-sts
-    secrets: inherit
+    # Pass only the secret the reusable workflow needs, not `secrets: inherit`.
+    secrets:
+      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
