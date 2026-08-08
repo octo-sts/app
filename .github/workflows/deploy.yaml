@@ -1,27 +1,19 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-name: Deploy to Cloud Run
+# Reusable deploy workflow. Do not add triggers here: it is invoked by
+# deploy-staging.yaml (push to main + manual) and deploy-prod.yaml (manual only).
+# Keeping prod in its own caller workflow lets it be disabled from the Actions UI
+# independently of the staging auto-deploy.
+name: Deploy to Cloud Run (reusable)
 
 on:
-  push:
-    branches:
-      - "main"
-  workflow_dispatch:
+  workflow_call:
     inputs:
       environment:
-        description: "The environment to deploy to"
+        description: "The environment to deploy to (octo-sts-staging or octo-sts)"
         required: true
-        default: "octo-sts-staging"
-        type: choice
-        options:
-          - octo-sts-staging
-          - octo-sts
-
-env:
-  DEFAULT_ENVIRONMENT: "octo-sts-staging"
-
-concurrency: deploy
+        type: string
 
 permissions: {}
 
@@ -33,7 +25,7 @@ jobs:
 
     permissions:
       contents: read # clone the repository contents
-      id-token: write # federates with GCP
+      id-token: write # federate with GCP via Workload Identity
 
     steps:
       - name: Harden Runner
@@ -97,7 +89,7 @@ jobs:
       - name: Resolve auth config
         id: auth-config
         env:
-          INPUT_ENVIRONMENT: ${{ inputs.environment || env.DEFAULT_ENVIRONMENT }}
+          INPUT_ENVIRONMENT: ${{ inputs.environment }}
         run: |
           ENVIRONMENT="${INPUT_ENVIRONMENT}"
           echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
