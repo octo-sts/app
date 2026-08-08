@@ -22,6 +22,7 @@ import (
 	"github.com/google/go-github/v88/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -74,6 +75,10 @@ type sts struct {
 	metrics       bool
 	baseURL       string
 	orgPolicyRepo string
+
+	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
+	// owner into one enumeration. Its zero value is ready to use.
+	orgIssuerFlight singleflight.Group
 }
 
 func (s *sts) policyRepo() string {

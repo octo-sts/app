@@ -1928,3 +1928,123 @@ func TestStaleEntryIsNotReseededIntoPrimary(t *testing.T) {
 		t.Error("stale entry was reseeded into the primary cache; that extends the fail-open past the stale TTL")
 	}
 }
+
+// countingMgr wraps an enumMgr to count GetAll calls and optionally block the
+// first one, so a test can hold a single-flight leader inside the walk while
+// other callers pile up as waiters.
+type countingMgr struct {
+	*enumMgr
+	getAllN     atomic.Int32
+	block       chan struct{} // if non-nil, GetAll waits on it (closed to release)
+	entered     chan struct{} // if non-nil, closed once when GetAll is first entered
+	enteredOnce sync.Once
+}
+
+func (m *countingMgr) GetAll(ctx context.Context, owner string) ([]ghinstall.Installation, error) {
+	m.getAllN.Add(1)
+	if m.entered != nil {
+		m.enteredOnce.Do(func() { close(m.entered) })
+	}
+	if m.block != nil {
+		<-m.block
+	}
+	return m.enumMgr.GetAll(ctx, owner)
+}
+
+var _ ghinstall.Manager = (*countingMgr)(nil)
+
+// TestOrgIssuerLookupSingleFlightsColdBurst proves the mitigation: a burst of
+// concurrent lookups for the same cold-cache owner collapses to ONE enumeration
+// (GetAll + the confirm's GetAllFresh each run once), and every caller receives
+// the same definitive result. Without single-flight each concurrent miss would
+// re-walk GetAll, amplifying rate-limit pressure right after a deploy.
+func TestOrgIssuerLookupSingleFlightsColdBurst(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	// All installations are blind, so the walk confirms Absent via GetAllFresh —
+	// exercising the whole enumeration, not just the cheap path.
+	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	base := &enumMgr{installs: []ghinstall.Installation{
+		{Transport: a, ID: 1, AppID: 10},
+		{Transport: b, ID: 2, AppID: 20},
+	}}
+	release := make(chan struct{})
+	mgr := &countingMgr{enumMgr: base, block: release}
+	s := &sts{rrm: mgr, appCount: 2}
+
+	const n = 50
+	var wg sync.WaitGroup
+	results := make([]orgIssuerEntry, n)
+	errs := make([]error, n)
+	start := make(chan struct{})
+	for i := range n {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = s.orgIssuerLookup(t.Context(), "orgallow")
+		}(i)
+	}
+	close(start) // release all goroutines together so they collide on the cold cache
+	// Let every goroutine miss the cache and join the in-flight before the leader
+	// returns. Populating the cache happens only after GetAll unblocks, so a late
+	// caller either joins this flight or hits the warm cache — never a 2nd walk.
+	time.Sleep(100 * time.Millisecond)
+	close(release)
+	wg.Wait()
+
+	if got := mgr.getAllN.Load(); got != 1 {
+		t.Errorf("GetAll ran %d times under a %d-way cold burst, want 1 (single-flight collapse)", got, n)
+	}
+	if got := base.freshCalls.Load(); got != 1 {
+		t.Errorf("GetAllFresh ran %d times, want 1", got)
+	}
+	for i := range n {
+		if errs[i] != nil {
+			t.Fatalf("caller %d: %v", i, errs[i])
+		}
+		if results[i].state != orgIssuerAbsent {
+			t.Fatalf("caller %d: state %v, want the shared orgIssuerAbsent result", i, results[i].state)
+		}
+	}
+}
+
+// TestOrgIssuerLookupWaiterHonorsOwnContext proves a waiter joining an in-flight
+// lookup returns on its OWN deadline rather than blocking until the leader
+// finishes — the reason the mitigation uses DoChan plus a context select.
+func TestOrgIssuerLookupWaiterHonorsOwnContext(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
+	base := &enumMgr{installs: []ghinstall.Installation{{Transport: a, ID: 1, AppID: 10}}}
+	release := make(chan struct{})
+	entered := make(chan struct{})
+	mgr := &countingMgr{enumMgr: base, block: release, entered: entered}
+	s := &sts{rrm: mgr, appCount: 1}
+
+	// Leader: starts the flight on a background context and blocks inside GetAll.
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = s.orgIssuerLookup(context.Background(), "orgallow")
+	}()
+	<-entered // the flight is active and parked in GetAll
+
+	// Waiter with a short deadline must return promptly, not block on the leader.
+	wctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	begin := time.Now()
+	_, err := s.orgIssuerLookup(wctx, "orgallow")
+	elapsed := time.Since(begin)
+
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Fatalf("waiter err = %v (code %v), want DeadlineExceeded", err, status.Code(err))
+	}
+	if elapsed > 2*time.Second {
+		t.Errorf("waiter blocked %v; it must honor its own context, not the leader's walk", elapsed)
+	}
+
+	close(release) // let the leader finish so its goroutine does not linger
+	<-leaderDone
+}
