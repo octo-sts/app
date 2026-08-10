@@ -54,9 +54,11 @@ module "github_identity" {
   name       = "github-identity"
   wif-pool   = module.github-wif.pool_name
 
-  repository   = "octo-sts/app"
-  refspec      = "refs/heads/main"
-  workflow_ref = ".github/workflows/deploy.yaml"
+  repository = "octo-sts/app"
+  refspec    = "refs/heads/main"
+  # Production deploys run from deploy-prod.yaml (split out so prod can be
+  # disabled independently in the Actions UI). Staging stays on deploy.yaml.
+  workflow_ref = ".github/workflows/deploy-prod.yaml"
 
   notification_channels = local.notification_channels
 }
