@@ -424,17 +424,60 @@ func (s *sts) confirmNoAccess(ctx context.Context, owner string, scanned []ghins
 	return orgIssuerEntry{}, false
 }
 
+// orgIssuerLookupTimeout bounds the shared enumeration a single-flight leader runs
+// on a cancellation-detached context, so a leader whose GitHub calls hang cannot
+// leak its goroutine. Waiters are already bounded by their own request context.
+// Generous relative to a mint + read per installation.
+const orgIssuerLookupTimeout = 30 * time.Second
+
 // orgIssuerLookup returns the effective allowlist entry for owner, enumerating EVERY
 // installation and stopping at the first definitive answer. Not s.rrm.Get: pickByQuota
 // is argmax(remaining) with no rotation, so a Get-based loop could see one blind
 // installation forever and wrongly cache allow-all for the whole org. A non-nil error
 // is a terminal gRPC status; a nil error with an Invalid entry means the config is
 // unusable and the caller surfaces entry.err.
+//
+// A cold-cache burst for one owner (many exchanges arriving just after a deploy) is
+// collapsed into a single enumeration via singleflight. Without it, every concurrent
+// miss re-walks GetAll (a mint + read per installation) at once, amplifying
+// rate-limit pressure enough to flip the org to fail-closed. Waiters share the
+// leader's result and honor their own context rather than blocking on the leader.
 func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry, error) {
+	// Fast path: a cached entry needs neither enumeration nor single-flight.
 	if e, ok := orgIssuers.Get(owner); ok {
 		return e, nil
 	}
 
+	ch := s.orgIssuerFlight.DoChan(owner, func() (interface{}, error) {
+		// A prior flight may have populated the cache between our miss and here.
+		if e, ok := orgIssuers.Get(owner); ok {
+			return e, nil
+		}
+		// Detach from the triggering caller's cancellation so one caller giving up
+		// cannot fail the shared walk for the others, and a completed walk still
+		// warms the cache; the timeout keeps a stuck walk from leaking the
+		// goroutine. WithoutCancel preserves values, so the rate-limit metric
+		// labels set on the context survive.
+		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), orgIssuerLookupTimeout)
+		defer cancel()
+		return s.orgIssuerLookupUncached(workCtx, owner)
+	})
+
+	select {
+	case <-ctx.Done():
+		// This caller gave up; the shared flight keeps running for the others.
+		return orgIssuerEntry{}, status.FromContextError(ctx.Err()).Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return orgIssuerEntry{}, res.Err
+		}
+		return res.Val.(orgIssuerEntry), nil
+	}
+}
+
+// orgIssuerLookupUncached performs the enumeration behind orgIssuerLookup's cache
+// and single-flight; it is the walk whose amplification the flight exists to prevent.
+func (s *sts) orgIssuerLookupUncached(ctx context.Context, owner string) (orgIssuerEntry, error) {
 	installs, enumErr := s.rrm.GetAll(ctx, owner)
 
 	var t orgIssuerTally
@@ -455,7 +498,7 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 	if stale, ok := staleOrgIssuers.Get(owner); ok {
 		// Served but NOT reseeded into the primary: a fresh 5-minute TTL on an entry
 		// already up to an hour old would let an Absent survive past its stale bound.
-		// Costs a re-enumeration per exchange for the duration of the outage.
+		// Costs a re-enumeration per lookup for the duration of the outage.
 		clog.InfoContextf(ctx, "org issuer lookup incomplete for %s, serving stale entry", owner)
 		return stale, nil
 	}
