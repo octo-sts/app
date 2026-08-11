@@ -1,0 +1,44 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+name: stale
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily at 6am UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    permissions:
+      issues: write # label and close stale issues
+      pull-requests: write # label and close stale PRs
+
+    steps:
+      - name: Harden the runner (audit all outbound calls)
+        uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+        with:
+          egress-policy: audit
+
+      - uses: actions/stale@4391f3da665fdf50b6810c1a66712fb9ba21aa93 # v11.0.0
+        with:
+          days-before-stale: 30
+          days-before-close: 7
+          stale-issue-label: stale
+          stale-pr-label: stale
+          stale-issue-message: >
+            This issue has been automatically marked as stale because it has not
+            had activity in the last 30 days. It will be closed in 7 days if no
+            further activity occurs. Add the `keep` label to prevent this.
+          stale-pr-message: >
+            This PR has been automatically marked as stale because it has not
+            had activity in the last 30 days. It will be closed in 7 days if no
+            further activity occurs. Add the `keep` label to prevent this.
+          exempt-issue-labels: keep
+          exempt-pr-labels: keep
+          operations-per-run: 200
