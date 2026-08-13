@@ -48,10 +48,11 @@ variable "images" {
 }
 
 variable "github_apps" {
-  description = "The GitHub Apps, each with an app_id and key_version for KMS signing."
+  description = "The GitHub Apps, each with an app_id, key_version for KMS signing, and org_name for multi-org routing."
   type = list(object({
     app_id      = number
     key_version = number
+    org_name    = optional(string, "")
   }))
 }
 

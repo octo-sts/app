@@ -43,6 +43,14 @@ import (
 
 var errTestInvalid = errors.New("test: invalid config")
 
+// routerFor wraps m in a single wildcard pool so any owner resolves to it,
+// mirroring the legacy flat-pool behavior these tests were written against.
+func routerFor(m ghinstall.Manager, appCount int) *ghinstall.OrgRouter {
+	return ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
+		ghinstall.WildcardOrg: {M: m, AppCount: appCount},
+	})
+}
+
 // cleanupOrgIssuers removes the owner keys a test seeded. The caches are
 // package-level shared state, so leaking entries makes later tests in this
 // package order-dependent. This mirrors the existing convention for
@@ -423,7 +431,7 @@ func TestFetchOrgIssuersOnce(t *testing.T) {
 	cleanupOrgIssuers(t, "orgallow")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	res := s.fetchOrgIssuersOnce(t.Context(), atr, 1234, "orgallow")
 	if res.kind != fetchOK {
@@ -447,7 +455,7 @@ func TestFetchOrgIssuersOnceAbsent(t *testing.T) {
 	cleanupOrgIssuers(t, "orgnone")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	// No fixture for orgnone, so the fake returns a GitHub-shaped 404. A 404 is
 	// definitive: the repo was readable and the file is not there.
@@ -467,7 +475,7 @@ func TestFetchOrgIssuersOnceInvalid(t *testing.T) {
 	cleanupOrgIssuers(t, "orgbad")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	res := s.fetchOrgIssuersOnce(t.Context(), atr, 1234, "orgbad")
 	if res.kind != fetchOK {
@@ -543,7 +551,7 @@ func TestFetchOrgIssuersOnceMintsLeastPrivilegeToken(t *testing.T) {
 
 	capture := &scopeCapturingHandler{Handler: newFakeGitHub()}
 	atr := newAppsTransport(t, capture)
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	res := s.fetchOrgIssuersOnce(t.Context(), atr, 1234, "orgallow")
 	if res.kind != fetchOK {
@@ -573,7 +581,7 @@ func TestFetchOrgIssuersOnceDirectory(t *testing.T) {
 	cleanupOrgIssuers(t, "orgdir")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	// A different installation ID than the other tests use, so fetchOrgIssuersOnce
 	// keeps this parameter's plumbing (EnrichContext, ghinstallation.NewFromAppsTransport)
@@ -839,7 +847,7 @@ func TestLookupSurvivesOneBlindInstallation(t *testing.T) {
 		{Transport: blind, ID: 1, AppID: 10},
 		{Transport: working, ID: 2, AppID: 20},
 	}}
-	s := &sts{rrm: mgr, appCount: 2}
+	s := &sts{router: routerFor(mgr, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -870,7 +878,7 @@ func TestLookupAllInstallationsBlindIsAbsent(t *testing.T) {
 		{Transport: a, ID: 1, AppID: 10},
 		{Transport: b, ID: 2, AppID: 20},
 	}}
-	s := &sts{rrm: mgr, appCount: 2}
+	s := &sts{router: routerFor(mgr, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -917,7 +925,7 @@ func TestLookupPartialEnumerationNeverCachesAbsent(t *testing.T) {
 			{Transport: blind, ID: 2, AppID: 20},
 		},
 	}
-	s := &sts{rrm: mgr, appCount: 2}
+	s := &sts{router: routerFor(mgr, 2)}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -940,10 +948,10 @@ func TestLookupMintRateLimitRetriesNextInstallation(t *testing.T) {
 	limited := newAppsTransport(t, newOrgFakeGitHub(withMintRateLimited()))
 	working := newAppsTransport(t, newFakeGitHub())
 
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{
 		{Transport: limited, ID: 1, AppID: 10},
 		{Transport: working, ID: 2, AppID: 20},
-	}}, appCount: 2}
+	}}, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -966,7 +974,7 @@ func TestLookupServesStaleOnRateLimit(t *testing.T) {
 	staleOrgIssuers.Add("orgallow", presentOrgIssuerEntry(allow))
 
 	rl := newAppsTransport(t, newOrgFakeGitHub(withContentsRateLimited()))
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -989,7 +997,7 @@ func TestLookupRateLimitedWithoutStaleDenies(t *testing.T) {
 	cleanupOrgIssuers(t, "orgallow")
 
 	rl := newAppsTransport(t, newOrgFakeGitHub(withContentsRateLimited()))
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, 1)}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -1011,7 +1019,7 @@ func TestLookupInvalidServesLastKnownGood(t *testing.T) {
 	staleOrgIssuers.Add("orgbad", presentOrgIssuerEntry(good))
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgbad")
 	if err != nil {
@@ -1026,7 +1034,7 @@ func TestLookupInvalidWithoutStaleReturnsInvalid(t *testing.T) {
 	cleanupOrgIssuers(t, "orgbad")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgbad")
 	if err != nil {
@@ -1052,7 +1060,7 @@ func TestLookupInvalidIgnoresStaleAbsent(t *testing.T) {
 	staleOrgIssuers.Add("orgbad", absentOrgIssuerEntry())
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgbad")
 	if err != nil {
@@ -1080,10 +1088,10 @@ func TestLookupBlindPlusFailedIsNotAbsent(t *testing.T) {
 	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	broken := newAppsTransport(t, newOrgFakeGitHub(withContentsServerError()))
 
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{
 		{Transport: blind, ID: 1, AppID: 10},
 		{Transport: broken, ID: 2, AppID: 20},
-	}}, appCount: 2}
+	}}, 2)}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -1107,7 +1115,7 @@ func TestLookupBlindPlusFailedIsNotAbsent(t *testing.T) {
 func TestLookupEmptyEnumerationIsNotAbsent(t *testing.T) {
 	cleanupOrgIssuers(t, "orgempty")
 
-	s := &sts{rrm: &enumMgr{installs: nil}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: nil}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgempty")
 	st, ok := status.FromError(err)
@@ -1143,7 +1151,7 @@ func TestLookupAllBlindWithStaleFallsOpen(t *testing.T) {
 	staleOrgIssuers.Add("orgallow", presentOrgIssuerEntry(allow))
 
 	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -1170,7 +1178,7 @@ func TestLookupAbsentFileIsCachedAbsent(t *testing.T) {
 	cleanupOrgIssuers(t, "orgnone")
 
 	atr := newAppsTransport(t, newFakeGitHub())
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: atr, ID: 1, AppID: 10}}}, 1)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgnone")
 	if err != nil {
@@ -1253,10 +1261,10 @@ func TestCheckOrgTrustedIssuers(t *testing.T) {
 			cleanupOrgIssuers(t, owner)
 			orgIssuers.Add(owner, tc.entry)
 
-			// rrm is deliberately nil: every row pre-seeds the primary cache, so
+			// The pool manager is deliberately nil: every row pre-seeds the primary cache, so
 			// orgIssuerLookup must return on its cache hit without enumerating.
 			// A nil-pointer panic here means the check is doing more than it should.
-			s := &sts{appCount: 1}
+			s := &sts{router: routerFor(nil, 1)}
 			decision, err := s.checkOrgTrustedIssuers(t.Context(), owner, tc.issuer)
 
 			if tc.wantCode == codes.OK {
@@ -1299,7 +1307,7 @@ func TestCheckOrgTrustedIssuersPropagatesLookupError(t *testing.T) {
 	cleanupOrgIssuers(t, "orgallow")
 
 	rl := newAppsTransport(t, newOrgFakeGitHub(withContentsRateLimited()))
-	s := &sts{rrm: &enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: rl, ID: 1, AppID: 10}}}, 1)}
 
 	decision, err := s.checkOrgTrustedIssuers(t.Context(), "orgallow", testGitHubIssuer)
 	st, ok := status.FromError(err)
@@ -1323,7 +1331,7 @@ func TestDeniedMessagesLeakNothing(t *testing.T) {
 	}
 	orgIssuers.Add(owner, presentOrgIssuerEntry(allow))
 
-	s := &sts{appCount: 1}
+	s := &sts{router: routerFor(nil, 1)}
 	_, err = s.checkOrgTrustedIssuers(t.Context(), owner, "https://evil.example.com")
 	st, _ := status.FromError(err)
 	if st.Message() != msgIssuerNotPermitted {
@@ -1405,7 +1413,7 @@ func TestExchangeEnforcesOrgAllowlist(t *testing.T) {
 
 			atr := newAppsTransport(t, newFakeGitHub())
 			ctx := newExchangeContext(t)
-			s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+			s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 			_, err := s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: "foo",
@@ -1456,7 +1464,7 @@ func TestExchangeAllowlistIsCached(t *testing.T) {
 	counter := &allowlistCounter{Handler: newFakeGitHub()}
 	atr := newAppsTransport(t, counter)
 	ctx := newExchangeContext(t)
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	for i := range 2 {
 		if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "org/repo"}); err != nil {
@@ -1515,7 +1523,7 @@ func TestExchangeRecordsAuditDecisionOnEvent(t *testing.T) {
 	ce := &captureCEClient{}
 	atr := newAppsTransport(t, newFakeGitHub())
 	ctx := newExchangeContext(t)
-	s := &sts{rrm: &fakeInstallMgr{atr: atr}, appCount: 1, ceclient: ce, metrics: true}
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1), ceclient: ce, metrics: true}
 
 	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "orgaudit/repo"}); err != nil {
 		t.Fatalf("Exchange() = %v, want success (audit mode never denies)", err)
@@ -1570,7 +1578,7 @@ var _ ghinstall.Manager = (*notInstalledMgr)(nil)
 // than a cost one.
 //
 // scope is caller-supplied and arbitrary. The check therefore runs AFTER
-// s.rrm.Get, whose negative install cache rejects an owner the App is not
+// the pool's Get, whose negative install cache rejects an owner the App is not
 // installed on. Hoisting the check above it would let any holder of one valid
 // token drive an installation enumeration, a token mint and a contents read
 // against ANY organization on GitHub, once per request — unauthenticated
@@ -1586,7 +1594,7 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 	counter := &allowlistCounter{Handler: newFakeGitHub()}
 	atr := newAppsTransport(t, counter)
 	ctx := newExchangeContext(t)
-	s := &sts{rrm: &notInstalledMgr{atr: atr}, appCount: 1}
+	s := &sts{router: routerFor(&notInstalledMgr{atr: atr}, 1)}
 
 	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
@@ -1596,7 +1604,7 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 	}
 
 	if got := counter.n.Load(); got != 0 {
-		t.Errorf("allowlist was read %d times for an owner with no installation, want 0 — the check must not run before s.rrm.Get", got)
+		t.Errorf("allowlist was read %d times for an owner with no installation, want 0 — the check must not run before the pool's Get", got)
 	}
 	if _, ok := orgIssuers.Get("orgallow"); ok {
 		t.Error("nothing may be cached for an owner the App is not installed on")
@@ -1625,7 +1633,7 @@ func TestLookupConfirmsBeforeGrantingAllowAll(t *testing.T) {
 			{Transport: hidden, ID: 2, AppID: 20},
 		},
 	}
-	s := &sts{rrm: mgr, appCount: 2}
+	s := &sts{router: routerFor(mgr, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -1649,10 +1657,10 @@ func TestLookupFailedConfirmNeverCachesAbsent(t *testing.T) {
 
 	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 
-	s := &sts{rrm: &enumMgr{
+	s := &sts{router: routerFor(&enumMgr{
 		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
 		freshErr: errors.New("could not list installations for app 20"),
-	}, appCount: 2}
+	}, 2)}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -1673,13 +1681,13 @@ func TestLookupNewlyFoundInstallationBlindIsAbsent(t *testing.T) {
 	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 
-	s := &sts{rrm: &enumMgr{
+	s := &sts{router: routerFor(&enumMgr{
 		installs: []ghinstall.Installation{{Transport: a, ID: 1, AppID: 10}},
 		freshInstalls: []ghinstall.Installation{
 			{Transport: a, ID: 1, AppID: 10},
 			{Transport: b, ID: 2, AppID: 20},
 		},
-	}, appCount: 2}
+	}, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -1702,13 +1710,13 @@ func TestLookupNewlyFoundInstallationRateLimitedFailsClosed(t *testing.T) {
 	blind := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	limited := newAppsTransport(t, newOrgFakeGitHub(withMintRateLimited()))
 
-	s := &sts{rrm: &enumMgr{
+	s := &sts{router: routerFor(&enumMgr{
 		installs: []ghinstall.Installation{{Transport: blind, ID: 1, AppID: 10}},
 		freshInstalls: []ghinstall.Installation{
 			{Transport: blind, ID: 1, AppID: 10},
 			{Transport: limited, ID: 2, AppID: 20},
 		},
-	}, appCount: 2}
+	}, 2)}
 
 	_, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	st, ok := status.FromError(err)
@@ -1730,13 +1738,13 @@ func TestLookupConfirmSubsetIsAbsent(t *testing.T) {
 	a := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	b := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 
-	s := &sts{rrm: &enumMgr{
+	s := &sts{router: routerFor(&enumMgr{
 		installs: []ghinstall.Installation{
 			{Transport: a, ID: 1, AppID: 10},
 			{Transport: b, ID: 2, AppID: 20},
 		},
 		freshInstalls: []ghinstall.Installation{{Transport: a, ID: 1, AppID: 10}},
-	}, appCount: 2}
+	}, 2)}
 
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
@@ -1756,7 +1764,7 @@ func TestTallyAccumulatesAcrossPasses(t *testing.T) {
 	blindB := newAppsTransport(t, newOrgFakeGitHub(withNoGitHubRepoAccess()))
 	broken := newAppsTransport(t, newOrgFakeGitHub(withContentsServerError()))
 
-	s := &sts{appCount: 2}
+	s := &sts{router: routerFor(nil, 2)}
 	first := []ghinstall.Installation{{Transport: blindA, ID: 1, AppID: 10}}
 
 	t.Run("a failure in the second pass destroys exhaustiveness", func(t *testing.T) {
@@ -1916,7 +1924,7 @@ func TestStaleEntryIsNotReseededIntoPrimary(t *testing.T) {
 		t.Fatal("stale entry missing; this test needs one to serve")
 	}
 
-	s := &sts{rrm: &enumMgr{err: errors.New("enumeration failed")}, appCount: 1}
+	s := &sts{router: routerFor(&enumMgr{err: errors.New("enumeration failed")}, 1)}
 	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
 	if err != nil {
 		t.Fatalf("orgIssuerLookup() = %v, want the stale entry served", err)
@@ -1971,7 +1979,7 @@ func TestOrgIssuerLookupSingleFlightsColdBurst(t *testing.T) {
 	}}
 	release := make(chan struct{})
 	mgr := &countingMgr{enumMgr: base, block: release}
-	s := &sts{rrm: mgr, appCount: 2}
+	s := &sts{router: routerFor(mgr, 2)}
 
 	const n = 50
 	var wg sync.WaitGroup
@@ -2021,7 +2029,7 @@ func TestOrgIssuerLookupWaiterHonorsOwnContext(t *testing.T) {
 	release := make(chan struct{})
 	entered := make(chan struct{})
 	mgr := &countingMgr{enumMgr: base, block: release, entered: entered}
-	s := &sts{rrm: mgr, appCount: 1}
+	s := &sts{router: routerFor(mgr, 1)}
 
 	// Leader: starts the flight on a background context and blocks inside GetAll.
 	leaderDone := make(chan struct{})

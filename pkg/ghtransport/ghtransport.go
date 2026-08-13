@@ -12,6 +12,7 @@ import (
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	"github.com/octo-sts/app/pkg/appconfig"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/kms"
@@ -65,41 +66,45 @@ func (q *quotaTap) RoundTrip(req *http.Request) (*http.Response, error) {
 	return resp, err
 }
 
-// New creates a GitHub AppsTransport. If quota is non-nil, response headers
-// are also tapped into the QuotaStore for capacity-aware routing decisions.
-func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient kms.KMS, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
-	// Wrap the base HTTP transport so every GitHub response's X-RateLimit-*
-	// headers populate the github_rate_limit_* metrics with the app_id and
-	// installation_id labels set on the request context by EnrichContext.
+// baseTransport returns the HTTP transport used by every AppsTransport: the
+// default transport, wrapped by the httpmetrics transport for rate-limit
+// labelling, and optionally a quotaTap if a QuotaStore is provided.
+//
+// The httpmetrics wrapping ensures every GitHub response's X-RateLimit-*
+// headers populate the github_rate_limit_* metrics with the app_id and
+// installation_id labels set on the request context by EnrichContext.
+func baseTransport(quota *ghinstall.QuotaStore) http.RoundTripper {
 	base := metrics.WrapTransport(http.DefaultTransport)
 	if quota != nil {
 		base = &quotaTap{inner: base, store: quota}
 	}
+	return base
+}
+
+// NewFromAppConfig creates an AppsTransport from an appconfig.AppConfig entry.
+// Exactly one of app.PrivateKey, app.PrivateKeyFile, or app.KMSKey must be set.
+// When app.KMSKey is set, kmsClient must be a signer bound to that key
+// (constructed by the caller via kms.NewKMS so it can be closed at shutdown).
+// If quota is non-nil, response headers are tapped into the QuotaStore for
+// capacity-aware routing decisions.
+func NewFromAppConfig(_ context.Context, app appconfig.AppConfig, env *envConfig.EnvConfig, kmsClient kms.KMS, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
+	base := baseTransport(quota)
 
 	var atr *ghinstallation.AppsTransport
 	var err error
 	switch {
-	case env.AppSecretCertificateEnvVar != "":
-		atr, err = ghinstallation.NewAppsTransport(base, appID, []byte(env.AppSecretCertificateEnvVar))
-		if err != nil {
-			return nil, err
-		}
-
-	case env.AppSecretCertificateFile != "":
-		atr, err = ghinstallation.NewAppsTransportKeyFromFile(base, appID, env.AppSecretCertificateFile)
-		if err != nil {
-			return nil, err
-		}
-
+	case app.PrivateKey != "":
+		atr, err = ghinstallation.NewAppsTransport(base, app.AppID, []byte(app.PrivateKey))
+	case app.PrivateKeyFile != "":
+		atr, err = ghinstallation.NewAppsTransportKeyFromFile(base, app.AppID, app.PrivateKeyFile)
 	default:
-		if kmsKey == "" {
-			return nil, fmt.Errorf("no KMS key provided for app %d", appID)
+		if app.KMSKey == "" {
+			return nil, fmt.Errorf("no credential source for app %d", app.AppID)
 		}
-
-		atr, err = ghinstallation.NewAppsTransportWithOptions(base, appID, ghinstallation.WithSigner(kmsClient))
-		if err != nil {
-			return nil, err
-		}
+		atr, err = ghinstallation.NewAppsTransportWithOptions(base, app.AppID, ghinstallation.WithSigner(kmsClient))
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	if env.GitHubBaseURL != "" {
@@ -107,4 +112,15 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 	}
 
 	return atr, nil
+}
+
+// New creates an AppsTransport from legacy environment-variable config.
+// It delegates to NewFromAppConfig after mapping the env fields.
+func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConfig, kmsClient kms.KMS, quota *ghinstall.QuotaStore) (*ghinstallation.AppsTransport, error) {
+	return NewFromAppConfig(ctx, appconfig.AppConfig{
+		AppID:          appID,
+		PrivateKey:     env.AppSecretCertificateEnvVar,
+		PrivateKeyFile: env.AppSecretCertificateFile,
+		KMSKey:         kmsKey,
+	}, env, kmsClient, quota)
 }
