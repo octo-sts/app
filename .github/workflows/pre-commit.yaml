@@ -67,7 +67,7 @@ jobs:
         run: go install golang.org/x/tools/cmd/goimports@latest
 
       - name: Set up Terraform
-        uses: chainguard-dev/actions/setup-terraform@bed8050123fff65538e2db1902ff9404030c0221 # v1.6.31
+        uses: chainguard-dev/actions/setup-terraform@7bd1e94b2a1b7faa891392757de7d89489070c5c # v1.6.32
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
