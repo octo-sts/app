@@ -20,6 +20,9 @@
 # ai
 **/.claude/*.local.*
 
+# Editor settings (schema mapping is handled by the inline yaml-language-server header)
+.vscode/
+
 # Go workspace file
 go.work
 
