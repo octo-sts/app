@@ -68,13 +68,36 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	return provider, nil
 }
 
+// Discovery is driven by an issuer taken from an unverified bearer token, so
+// its cost has to be bounded rather than left to the caller's deadline. A
+// target that stalls — accepting the connection and never responding — would
+// otherwise hold a request open for as long as the client waits, once per
+// attempt, with no ceiling on the number of attempts.
+//
+// These are variables rather than constants only so that tests can shorten
+// them; nothing outside this package changes them.
+var (
+	// discoveryAttemptTimeout bounds a single discovery attempt.
+	discoveryAttemptTimeout = 5 * time.Second
+	// discoveryMaxElapsedTime bounds all attempts together.
+	discoveryMaxElapsedTime = 15 * time.Second
+	// discoveryMaxTries bounds how many attempts are made.
+	discoveryMaxTries uint = 3
+)
+
 // newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic
 func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider, error) {
 	attempt := 0
 
 	operation := func() (VerifierProvider, error) {
 		attempt++
-		p, err := oidc.NewProvider(ctx, issuer)
+		// Bound the attempt itself. go-oidc keeps only the HTTP client from
+		// this context, not the context, so cancelling it here does not
+		// affect the returned provider or its later key set fetches.
+		attemptCtx, cancel := context.WithTimeout(ctx, discoveryAttemptTimeout)
+		defer cancel()
+
+		p, err := oidc.NewProvider(attemptCtx, issuer)
 		if err != nil {
 			clog.WarnContext(ctx, "provider creation failed", "attempt", attempt, "issuer", issuer, "error", err)
 			// Check for permanent errors that shouldn't be retried
@@ -97,7 +120,11 @@ func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider,
 	expBackoff.Multiplier = 2.0
 	expBackoff.RandomizationFactor = 0.1
 
-	return backoff.Retry(ctx, operation, backoff.WithBackOff(expBackoff))
+	return backoff.Retry(ctx, operation,
+		backoff.WithBackOff(expBackoff),
+		backoff.WithMaxTries(discoveryMaxTries),
+		backoff.WithMaxElapsedTime(discoveryMaxElapsedTime),
+	)
 }
 
 // isPermanentError checks if an error should not be retried based on HTTP status codes
