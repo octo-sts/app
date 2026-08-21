@@ -383,6 +383,38 @@ The URL must use HTTPS. When set, all GitHub API interactions (installation
 lookups, trust policy reads, token exchanges, and token revocations) will target
 the configured endpoint instead of the public GitHub API.
 
+Note that `GITHUB_BASE_URL` does not affect OIDC discovery, which targets the
+issuer named by the presented token. A GHES deployment whose issuer is not
+reachable from the public internet should name it in `OCTOSTS_ALLOWED_ISSUERS`,
+described below.
+
+### Restricting issuers (`OCTOSTS_ALLOWED_ISSUERS`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_ALLOWED_ISSUERS` | (empty — any issuer) | Comma-separated issuers this deployment will perform OIDC discovery against. |
+
+A token names its own issuer, and octo-sts must fetch that issuer's discovery
+document to learn the keys that verify the token. The fetch therefore happens
+while the token is still unverified, which means a caller who has presented
+nothing but an unsigned assertion chooses a host this deployment connects to.
+
+Setting `OCTOSTS_ALLOWED_ISSUERS` confines that choice to issuers you name:
+
+```sh
+OCTOSTS_ALLOWED_ISSUERS=https://token.actions.githubusercontent.com
+```
+
+Matching is exact, as it is for the org-level `issuers` list, so a trailing
+slash makes a different issuer. Each entry is validated at startup and the
+process refuses to start if one could never match a valid issuer.
+
+Leave it unset to keep accepting any issuer your trust policies allow. Most
+deployments federate a small, fixed set of identity providers and can name them
+all; a deployment serving organizations that bring their own issuers, or one
+using `issuer_patterns`, will want to leave it unset and rely on the trust
+policy and the org-level allowlist instead.
+
 ### Best Practices
 
 To ensure secure and effective use of octo-sts, follow these recommended practices:

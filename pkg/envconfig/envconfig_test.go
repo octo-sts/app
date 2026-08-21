@@ -276,6 +276,26 @@ func TestBaseConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "OCTOSTS_ALLOWED_ISSUERS accepts a list of issuers",
+			envVars: map[string]string{
+				"PORT":                        "8080",
+				"GITHUB_APP_IDS":              "12345678",
+				"APP_SECRET_CERTIFICATE_FILE": "some-file-path",
+				"OCTOSTS_ALLOWED_ISSUERS":     "https://token.actions.githubusercontent.com,https://accounts.example.com",
+			},
+			wantErr: false,
+		},
+		{
+			name: "OCTOSTS_ALLOWED_ISSUERS rejects an entry no issuer can equal",
+			envVars: map[string]string{
+				"PORT":                        "8080",
+				"GITHUB_APP_IDS":              "12345678",
+				"APP_SECRET_CERTIFICATE_FILE": "some-file-path",
+				"OCTOSTS_ALLOWED_ISSUERS":     "not-a-url",
+			},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
