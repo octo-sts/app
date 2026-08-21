@@ -1104,6 +1104,190 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 	}
 }
 
+// TestCheckSuiteNoPolicyDirSkipped exercises the zeroHash / initial-commit
+// branch of handleCheckSuite when the repository has no .github/chainguard
+// directory: the directory scan 404s, which must be treated as "no policies"
+// (logged, no check run) rather than failing the delivery with a 500.
+func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs when policy directory is missing, got %d", len(got))
+	}
+}
+
+// TestCheckSuiteNonNotFoundDirScanError verifies that a non-404 error from the
+// policy-directory scan still fails the delivery (so it is redelivered) rather
+// than being swallowed like a missing directory.
+func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Internal Server Error"}`, http.StatusInternalServerError)
+	})
+	// Catch-all serves the installation token mint (and anything else) from
+	// testdata so the request reaches the directory scan above.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: github.Ptr(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: github.Ptr("foo"),
+			},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Sender: &github.User{Login: github.Ptr("test-user")},
+		Action: github.Ptr("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           github.Ptr(int64(1)),
+			HeadSHA:      github.Ptr("deadbeef"),
+			HeadBranch:   github.Ptr("main"),
+			BeforeSHA:    github.Ptr(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode == 200 {
+		t.Fatal("expected non-200 for a non-404 directory scan error, got 200")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs on scan error, got %d", len(got))
+	}
+}
+
 // TestCheckSuiteDefaultBranchSkipsNonPolicyFiles exercises the zeroHash /
 // initial-commit branch of handleCheckSuite, which lists the policy directory
 // instead of diffing it. The listing contains a README.md alongside the trust
