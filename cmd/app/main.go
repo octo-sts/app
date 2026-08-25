@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 
 	"chainguard.dev/go-grpc-kit/pkg/duplex"
 	pboidc "chainguard.dev/sdk/proto/platform/oidc/v1"
@@ -19,6 +21,9 @@ import (
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/octo-sts/app/pkg/ratelimit"
+	ratelimitfactory "github.com/octo-sts/app/pkg/ratelimit/factory"
+	"github.com/octo-sts/app/pkg/ratelimit/redisentra"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -32,6 +37,11 @@ import (
 	"github.com/octo-sts/app/pkg/octosts"
 	"github.com/octo-sts/app/pkg/stickystore"
 )
+
+// redisAuthEntra selects Microsoft Entra ID workload identity for Redis.
+// Building that client here, rather than inside the factory, is what keeps
+// the rate-limiting packages free of cloud SDK imports.
+const redisAuthEntra = "entra"
 
 func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -111,7 +121,61 @@ func main() {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo))
+	// A non-nil limiter is always injected: leaving the interface nil would
+	// panic on the first exchange once the limiter is consulted.
+	rateLimiter := ratelimit.Limiter(ratelimit.AllowAll{})
+	if baseCfg.RateLimitStore != "" {
+		limiterCfg := ratelimitfactory.Config{
+			Backend:  ratelimitfactory.Backend(baseCfg.RateLimitStore),
+			Limit:    baseCfg.RateLimit,
+			Window:   baseCfg.RateLimitWindow,
+			RedisURL: baseCfg.RateLimitRedisURL,
+		}
+
+		if strings.EqualFold(baseCfg.RateLimitRedisAuth, redisAuthEntra) {
+			client, err := redisentra.NewClient(baseCfg.RateLimitRedisAddr)
+			if err != nil {
+				// Credential setup failing is a configuration fault, not a
+				// transient one, so there is nothing to degrade to.
+				log.Panicf("failed to create Entra ID redis client: %v", err)
+			}
+			defer func() {
+				if err := client.Close(); err != nil {
+					log.Printf("failed to close redis client: %v", err)
+				}
+			}()
+			limiterCfg.RedisClient = client
+		}
+
+		limiter, closer, err := ratelimitfactory.New(ctx, limiterCfg)
+		switch {
+		case errors.Is(err, ratelimitfactory.ErrRedisUnreachable) && baseCfg.RateLimitFailOpen:
+			// The operator has already chosen availability over quota
+			// protection, so honour that at startup instead of crash-looping
+			// and taking down token exchange for callers nowhere near their
+			// limit. go-redis reconnects on its own, and every request
+			// admitted meanwhile is counted by
+			// octosts_ratelimit_fail_open_total.
+			clog.FromContext(ctx).Errorf("starting with rate limiting degraded: %v", err)
+		case err != nil:
+			log.Panicf("failed to create rate limiter: %v", err)
+		}
+
+		defer func() {
+			if err := closer.Close(); err != nil {
+				log.Printf("failed to close rate limiter: %v", err)
+			}
+		}()
+		rateLimiter = ratelimit.Observed(limiter, baseCfg.RateLimitStore)
+
+		clog.FromContext(ctx).Infof(
+			"caller rate limiting enabled: backend=%s limit=%d window=%s fail_open=%t",
+			baseCfg.RateLimitStore, baseCfg.RateLimit, baseCfg.RateLimitWindow, baseCfg.RateLimitFailOpen)
+	} else {
+		clog.FromContext(ctx).Info("caller rate limiting disabled (OCTOSTS_RATE_LIMIT_STORE unset)")
+	}
+
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo, rateLimiter, baseCfg.RateLimitFailOpen))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}

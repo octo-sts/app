@@ -7,12 +7,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httputil"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,8 +23,10 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v88/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/octo-sts/app/pkg/ratelimit"
 
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
@@ -43,21 +47,34 @@ const (
 	retryDelay         = 10 * time.Millisecond
 	maxRetry           = 3
 	negativeCacheConst = ""
+
+	// errorDomain namespaces the structured error reasons this service emits.
+	errorDomain = "octo-sts.dev"
+	// reasonCallerRateLimited marks a denial caused by the caller's own
+	// budget, as opposed to exhaustion of the upstream GitHub quota.
+	reasonCallerRateLimited = "CALLER_RATE_LIMITED"
 )
 
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, rateLimiter ratelimit.Limiter, rateLimitFailOpen bool) pboidc.SecurityTokenServiceServer {
+	// Guarantee a usable limiter: a nil interface would panic on the first
+	// exchange rather than simply skipping enforcement.
+	if rateLimiter == nil {
+		rateLimiter = ratelimit.AllowAll{}
+	}
 	return &sts{
-		router:        router,
-		sticky:        sticky,
-		ceclient:      ceclient,
-		domain:        domain,
-		metrics:       metrics,
-		baseURL:       baseURL,
-		orgPolicyRepo: orgPolicyRepo,
+		router:            router,
+		sticky:            sticky,
+		ceclient:          ceclient,
+		domain:            domain,
+		metrics:           metrics,
+		baseURL:           baseURL,
+		orgPolicyRepo:     orgPolicyRepo,
+		rateLimiter:       rateLimiter,
+		rateLimitFailOpen: rateLimitFailOpen,
 	}
 }
 
@@ -78,6 +95,20 @@ type sts struct {
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
 	orgIssuerFlight singleflight.Group
+
+	rateLimiter       ratelimit.Limiter
+	rateLimitFailOpen bool
+}
+
+// limiter returns the configured rate limiter, falling back to a permissive
+// one when none is set. This keeps the zero value of sts usable and means a
+// missing limiter degrades to "no limiting" rather than a nil-pointer panic on
+// the request path.
+func (s *sts) limiter() ratelimit.Limiter {
+	if s.rateLimiter == nil {
+		return ratelimit.AllowAll{}
+	}
+	return s.rateLimiter
 }
 
 func (s *sts) policyRepo() string {
@@ -102,6 +133,67 @@ type cacheTrustPolicyKey struct {
 	owner    string
 	repo     string
 	identity string
+}
+
+// rateLimitKey derives the rate-limit bucket for a verified caller.
+//
+// The bucket must identify the caller using only values the caller cannot
+// freely vary. The request scope and identity are excluded deliberately: both
+// are chosen by the requester, so including them would let one client multiply
+// its budget simply by varying them.
+//
+// GitHub Actions subjects embed the git ref (for example
+// "repo:org/repo:ref:refs/heads/main"), so keying on the subject alone would
+// hand a fresh budget to every new branch. repository_id and
+// repository_owner_id are stable across both branches and renames, so they are
+// preferred when the issuer provides them.
+func rateLimitKey(tok *oidc.IDToken) string {
+	callerID := "sub:" + tok.Subject
+
+	var claims map[string]any
+	if err := tok.Claims(&claims); err == nil {
+		if id := stringClaim(claims, "repository_id"); id != "" {
+			callerID = "repository_id:" + id
+		} else if id := stringClaim(claims, "repository_owner_id"); id != "" {
+			callerID = "repository_owner_id:" + id
+		}
+	}
+
+	return tok.Issuer + "|" + callerID
+}
+
+// stringClaim returns a claim as a string, tolerating both JSON strings and
+// numbers since issuers encode numeric IDs either way.
+func stringClaim(claims map[string]any, name string) string {
+	switch v := claims[name].(type) {
+	case string:
+		return v
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case json.Number:
+		return v.String()
+	default:
+		return ""
+	}
+}
+
+// callerRateLimitedError builds the error returned when a caller exceeds its
+// own budget.
+//
+// The code matches the GitHub-quota path, so the reason is attached as
+// ErrorInfo to let clients distinguish "you are sending too fast" from "the
+// upstream GitHub quota is exhausted". The message stays generic: disclosing
+// remaining budget would tell an attacker exactly how much room is left.
+func callerRateLimitedError() error {
+	st := status.New(codes.ResourceExhausted, "rate limit exceeded")
+	detailed, err := st.WithDetails(&errdetails.ErrorInfo{
+		Reason: reasonCallerRateLimited,
+		Domain: errorDomain,
+	})
+	if err != nil {
+		return st.Err()
+	}
+	return detailed.Err()
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
@@ -202,6 +294,26 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	}
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
+	}
+
+	// Rate limiting runs after validation, so malformed requests cannot create
+	// buckets, and before lookupInstallAndTrustPolicy, which fans out into
+	// GitHub API calls across installations and is the spend being protected.
+	decision, err := s.limiter().Allow(ctx, rateLimitKey(tok))
+	switch {
+	case err != nil:
+		clog.FromContext(ctx).Errorf("rate limiter failed for issuer %q: %v", tok.Issuer, err)
+		if !s.rateLimitFailOpen {
+			// Unavailable rather than Internal: the limiter, not the request,
+			// is at fault and a retry may well succeed.
+			return nil, status.Error(codes.Unavailable, "rate limiter unavailable")
+		}
+		// Admitting the request leaves the GitHub quota unprotected, so make
+		// that countable rather than only visible in logs.
+		ratelimit.RecordFailOpen()
+	case !decision.Allowed:
+		clog.FromContext(ctx).Warnf("rate limit exceeded for issuer %q", tok.Issuer)
+		return nil, callerRateLimitedError()
 	}
 
 	var base *ghinstallation.AppsTransport
@@ -399,12 +511,25 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 
 // isRateLimit reports whether err is a gRPC ResourceExhausted error,
 // indicating a GitHub API rate limit (403 secondary or 429 primary).
+//
+// Caller rate-limit denials share the ResourceExhausted code but carry an
+// ErrorInfo reason of CALLER_RATE_LIMITED. They are excluded here: retrying
+// such a request against a different installation would not help, and would
+// defeat the budget that was just enforced.
 func isRateLimit(err error) bool {
 	if err == nil {
 		return false
 	}
 	st, ok := status.FromError(err)
-	return ok && st.Code() == codes.ResourceExhausted
+	if !ok || st.Code() != codes.ResourceExhausted {
+		return false
+	}
+	for _, d := range st.Details() {
+		if info, ok := d.(*errdetails.ErrorInfo); ok && info.GetReason() == reasonCallerRateLimited {
+			return false
+		}
+	}
+	return true
 }
 
 // IsGitHubRateLimited reports whether err looks like a GitHub rate-limit

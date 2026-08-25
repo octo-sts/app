@@ -5,6 +5,7 @@ package envconfig
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -405,6 +406,106 @@ func TestWebhookConfig(t *testing.T) {
 				assert.NoError(t, err)
 				assert.NotNil(t, cfg)
 			}
+		})
+	}
+}
+
+// TestValidateRateLimit covers the settings that would otherwise disable
+// enforcement silently: an unknown store name, a non-positive window, and
+// redis selected without the settings it needs to reach a server.
+func TestValidateRateLimit(t *testing.T) {
+	base := func(mutate func(*EnvConfig)) *EnvConfig {
+		cfg := &EnvConfig{
+			RateLimit:       100,
+			RateLimitWindow: 5 * time.Minute,
+		}
+		mutate(cfg)
+		return cfg
+	}
+
+	tests := []struct {
+		name    string
+		cfg     *EnvConfig
+		wantErr string
+	}{
+		{
+			name: "disabled by default",
+			cfg:  base(func(*EnvConfig) {}),
+		},
+		{
+			name: "memory needs no store settings",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "memory"
+			}),
+		},
+		{
+			name: "unknown store",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "redsi"
+			}),
+			wantErr: "is not supported",
+		},
+		{
+			// A zero window expires every bucket immediately, which admits
+			// every request while appearing to be configured.
+			name: "non-positive window",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "memory"
+				c.RateLimitWindow = 0
+			}),
+			wantErr: "must be positive",
+		},
+		{
+			name: "non-positive limit",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "memory"
+				c.RateLimit = 0
+			}),
+			wantErr: "must be positive",
+		},
+		{
+			name: "redis without a URL",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "redis"
+				c.RateLimitRedisAuth = "none"
+			}),
+			wantErr: "OCTOSTS_REDIS_URL is required",
+		},
+		{
+			name: "redis with entra auth but no address",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "redis"
+				c.RateLimitRedisAuth = "entra"
+			}),
+			wantErr: "OCTOSTS_REDIS_ADDR is required",
+		},
+		{
+			name: "redis with an unknown auth mode",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "redis"
+				c.RateLimitRedisAuth = "iam"
+				c.RateLimitRedisURL = "rediss://example:6380"
+			}),
+			wantErr: "is not supported",
+		},
+		{
+			name: "redis configured correctly",
+			cfg: base(func(c *EnvConfig) {
+				c.RateLimitStore = "redis"
+				c.RateLimitRedisAuth = "none"
+				c.RateLimitRedisURL = "rediss://example:6380"
+			}),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateRateLimit(tt.cfg)
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tt.wantErr)
 		})
 	}
 }
