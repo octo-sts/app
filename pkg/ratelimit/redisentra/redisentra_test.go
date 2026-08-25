@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/redis/go-redis/v9"
 )
 
 func TestOptionsRejectsEmptyAddress(t *testing.T) {
@@ -71,5 +73,41 @@ func TestOptionsSetsCredentialsProviderAndNoUsername(t *testing.T) {
 func TestNewClientRejectsBadAddress(t *testing.T) {
 	if _, err := NewClient(""); !errors.Is(err, ErrNoAddress) {
 		t.Errorf("error = %v, want ErrNoAddress", err)
+	}
+}
+
+// TestNewClientIsNotClusterAware pins the constraint the package documents:
+// NewClient returns a single-node client, so the instance must use the
+// Enterprise or Non-clustered cluster policy.
+//
+// If go-redis ever made cluster mode the default for a single address, the
+// documented policy requirement would silently become wrong.
+func TestNewClientIsNotClusterAware(t *testing.T) {
+	client, err := NewClient("cache.example.redis.azure.net:10000")
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	if _, ok := client.(*redis.ClusterClient); ok {
+		t.Error("NewClient() returned a cluster client, want a single-node client")
+	}
+}
+
+// TestOptionsSupportsOSSClusterOptIn compiles and exercises the escape hatch
+// given in the package documentation, so that the documented workaround
+// cannot rot away from the code.
+func TestOptionsSupportsOSSClusterOptIn(t *testing.T) {
+	opts, err := Options("cache.example.redis.azure.net:10000")
+	if err != nil {
+		t.Fatalf("Options() error = %v", err)
+	}
+	opts.IsClusterMode = true
+
+	client := redis.NewUniversalClient(opts)
+	t.Cleanup(func() { _ = client.Close() })
+
+	if _, ok := client.(*redis.ClusterClient); !ok {
+		t.Errorf("IsClusterMode did not yield a cluster-aware client, got %T", client)
 	}
 }

@@ -9,12 +9,34 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 
 	"github.com/octo-sts/app/pkg/ratelimit"
+)
+
+// ErrClusterRedirect reports that Redis answered with a MOVED or ASK
+// redirect, which means the endpoint is running in cluster mode while the
+// client is not cluster-aware.
+//
+// This is a deployment error rather than a transient one, and it fails in a
+// way that is easy to misread: a non-cluster client does not follow
+// redirects, so requests fail only for callers whose key hashes to a slot on
+// another shard and succeed for the rest. It therefore presents as a subset
+// of callers being unable to obtain a decision - and under the default
+// fail-closed policy, as a subset of callers being denied outright - rather
+// than as an obvious total outage.
+//
+// Every managed Redis that speaks the Redis Cluster API can produce this,
+// so the remedy is stated in terms of the client: supply a cluster-aware
+// client, or point the deployment at a non-clustered endpoint.
+var ErrClusterRedirect = errors.New(
+	"redis endpoint is clustered but the client is not cluster-aware: " +
+		"supply a cluster-aware client (redis.UniversalOptions.IsClusterMode) " +
+		"or use a non-clustered endpoint",
 )
 
 // keyPrefix namespaces every counter this package writes.
@@ -75,6 +97,12 @@ func (l *Limiter) Allow(ctx context.Context, key string) (ratelimit.Result, erro
 		ctx, l.client, []string{redisKey(key)}, l.limit, l.window.Milliseconds(),
 	).Int64Slice()
 	if err != nil {
+		// A redirect is called out specifically because the raw error names a
+		// shard address the operator never configured, which reads as a
+		// networking fault rather than as the configuration mistake it is.
+		if isClusterRedirect(err) {
+			return ratelimit.Result{}, fmt.Errorf("ratelimit: %w: %w", ErrClusterRedirect, err)
+		}
 		// The key is hashed into the error to keep caller identity out of logs.
 		return ratelimit.Result{}, fmt.Errorf("ratelimit: evaluating script: %w", err)
 	}
@@ -97,6 +125,19 @@ func (l *Limiter) Allow(ctx context.Context, key string) (ratelimit.Result, erro
 		}
 	}
 	return res, nil
+}
+
+// isClusterRedirect reports whether err is a MOVED or ASK cluster redirect.
+//
+// ASK is included alongside MOVED because a slot migration produces it for
+// the duration of the migration; a non-cluster client cannot follow either,
+// and the operator's remedy is the same for both.
+func isClusterRedirect(err error) bool {
+	if _, ok := redis.IsMovedError(err); ok {
+		return true
+	}
+	_, ok := redis.IsAskError(err)
+	return ok
 }
 
 // redisKey namespaces and hashes a caller key.

@@ -13,6 +13,38 @@
 // which keeps the rate-limiting core cloud-neutral: the limiter logic is
 // identical whichever cloud provides Redis, and only client construction
 // differs.
+//
+// # Cluster policy
+//
+// Every Azure Managed Redis instance is internally clustered, on all tiers
+// and SKUs, and the cluster policy chosen when the instance is provisioned
+// decides whether the client this package builds can talk to it:
+//
+//   - Enterprise: supported. A proxy routes every request from a single
+//     endpoint, so the instance behaves as non-clustered.
+//   - Non-clustered: supported. Available up to 25 GB.
+//   - OSS: NOT supported by NewClient. This policy exposes the Redis Cluster
+//     API, and the client built here is not cluster-aware, so it fails with
+//     redis.ErrClusterRedirect for any key whose slot is on another shard.
+//
+// Provision with the Enterprise or Non-clustered policy. This is worth
+// stating explicitly because Azure recommends OSS as the general-purpose
+// default, so the incompatible option is the one an operator is most likely
+// to pick.
+//
+// The OSS policy can still be used, but the caller must build the client
+// because a cluster-aware client cannot simply be the default here: the
+// Enterprise policy blocks CLUSTER NODES and CLUSTER SLOTS, which is exactly
+// how go-redis discovers topology, so enabling cluster mode unconditionally
+// would break the supported policies instead. To opt in, take Options and
+// set IsClusterMode before dialling:
+//
+//	opts, err := redisentra.Options(addr)
+//	if err != nil {
+//		return err
+//	}
+//	opts.IsClusterMode = true
+//	client := redis.NewUniversalClient(opts)
 package redisentra
 
 import (
@@ -68,6 +100,10 @@ func Options(addr string) (*redis.UniversalOptions, error) {
 
 // NewClient builds a Redis client authenticated with Entra ID workload
 // identity.
+//
+// The client is not cluster-aware, so the instance must use the Enterprise or
+// Non-clustered cluster policy; see the package documentation for why that is
+// the default and how to opt in to the OSS policy.
 //
 // It does not verify connectivity: the caller decides whether an unreachable
 // Redis is fatal, and go-redis reconnects on its own once it is reachable.
