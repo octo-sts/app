@@ -45,13 +45,35 @@ type EnvConfig struct {
 	// GitHubBaseURL overrides the GitHub API base URL for GitHub Enterprise
 	// Server deployments (e.g. "https://github.example.com/api/v3").
 	// When empty, the default https://api.github.com is used.
-	GitHubBaseURL      string `envconfig:"GITHUB_BASE_URL" required:"false"`
-	RateLimit          int    `envconfig:"RATE_LIMIT" required:"false" default:"100"`
-	RateLimitWindow    int    `envconfig:"RATE_LIMIT_WINDOW_SECONDS" required:"false" default:"300"`
-	RateLimitStore     string `envconfig:"RATE_LIMIT_METHOD" required:"false" default:"memory"`
-	RateLimitRedisAddr string `envconfig:"REDIS_ADDR" required:"false"`
-	RateLimitRedisURL  string `envconfig:"REDIS_URL" required:"false"`
-	RateLimitRedisAuth string `envconfig:"REDIS_AUTH" required:"false" default:"none"`
+	GitHubBaseURL string `envconfig:"GITHUB_BASE_URL" required:"false"`
+
+	// Rate limiting protects the shared GitHub App quota from a single
+	// runaway or compromised caller. It is disabled unless
+	// OCTOSTS_RATE_LIMIT_STORE is set, so enabling it is always an explicit
+	// operator decision.
+	//
+	// These are OCTOSTS_-prefixed for the same reason as the quota and sticky
+	// store settings: the deployment environment is shared, and bare names
+	// like REDIS_URL are routinely injected by Helm charts, operators and
+	// sidecars. An unprefixed REDIS_URL could silently point the limiter at
+	// somebody else's Redis.
+	//
+	// OCTOSTS_RATE_LIMIT_WINDOW is a duration ("5m"), not a count of seconds.
+	RateLimit          int           `envconfig:"OCTOSTS_RATE_LIMIT" required:"false" default:"100"`
+	RateLimitWindow    time.Duration `envconfig:"OCTOSTS_RATE_LIMIT_WINDOW" required:"false" default:"5m"`
+	RateLimitStore     string        `envconfig:"OCTOSTS_RATE_LIMIT_STORE" required:"false"`
+	RateLimitRedisAddr string        `envconfig:"OCTOSTS_REDIS_ADDR" required:"false"`
+	RateLimitRedisURL  string        `envconfig:"OCTOSTS_REDIS_URL" required:"false"`
+	RateLimitRedisAuth string        `envconfig:"OCTOSTS_REDIS_AUTH" required:"false" default:"none"`
+	// RateLimitFailOpen controls what happens when the limiter itself fails.
+	// Closed (the default) refuses the exchange, protecting the GitHub quota
+	// at the cost of availability. Open admits the request, preferring
+	// availability. Rate limiting here is a quota control rather than an
+	// authentication control, so operators who value uptime may prefer open.
+	//
+	// Failing open is observable: every admitted request increments the
+	// octosts_ratelimit_fail_open_total metric.
+	RateLimitFailOpen bool `envconfig:"OCTOSTS_RATE_LIMIT_FAIL_OPEN" required:"false" default:"false"`
 }
 
 type EnvConfigApp struct {
@@ -164,5 +186,49 @@ func BaseConfig() (*EnvConfig, error) {
 		}
 	}
 
+	if err := validateRateLimit(cfg); err != nil {
+		return nil, err
+	}
+
 	return cfg, err
+}
+
+// validateRateLimit rejects rate-limit settings that would silently disable
+// enforcement, such as a zero window (which expires every bucket immediately).
+func validateRateLimit(cfg *EnvConfig) error {
+	if cfg.RateLimitStore == "" {
+		return nil
+	}
+
+	switch cfg.RateLimitStore {
+	case "memory", "redis":
+	default:
+		return fmt.Errorf("OCTOSTS_RATE_LIMIT_STORE %q is not supported (valid: memory, redis)", cfg.RateLimitStore)
+	}
+
+	if cfg.RateLimit <= 0 {
+		return fmt.Errorf("OCTOSTS_RATE_LIMIT (%d) must be positive when OCTOSTS_RATE_LIMIT_STORE is set", cfg.RateLimit)
+	}
+	if cfg.RateLimitWindow <= 0 {
+		return fmt.Errorf("OCTOSTS_RATE_LIMIT_WINDOW (%s) must be positive", cfg.RateLimitWindow)
+	}
+
+	if cfg.RateLimitStore != "redis" {
+		return nil
+	}
+
+	switch cfg.RateLimitRedisAuth {
+	case "", "none":
+		if cfg.RateLimitRedisURL == "" {
+			return errors.New("OCTOSTS_REDIS_URL is required when OCTOSTS_RATE_LIMIT_STORE=redis and OCTOSTS_REDIS_AUTH=none")
+		}
+	case "entra":
+		if cfg.RateLimitRedisAddr == "" {
+			return errors.New("OCTOSTS_REDIS_ADDR is required when OCTOSTS_RATE_LIMIT_STORE=redis and OCTOSTS_REDIS_AUTH=entra")
+		}
+	default:
+		return fmt.Errorf("OCTOSTS_REDIS_AUTH %q is not supported (valid: none, entra)", cfg.RateLimitRedisAuth)
+	}
+
+	return nil
 }

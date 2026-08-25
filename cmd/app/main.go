@@ -20,6 +20,7 @@ import (
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/octo-sts/app/pkg/ratelimit"
+	ratelimitfactory "github.com/octo-sts/app/pkg/ratelimit/factory"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -112,26 +113,36 @@ func main() {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
-	var rateLimiter ratelimit.Limiter
-	if baseCfg.RateLimitStore != "" && baseCfg.RateLimit > 0 {
-		var closer io.Closer
-		limiterCfg := ratelimit.LimiterConfig{
-			Limit:  baseCfg.RateLimit,
-			Window: baseCfg.RateLimitWindow,
-		}
-		rateLimiter, closer, err = ratelimit.NewLimiter(ctx, baseCfg.RateLimitStore, limiterCfg, baseCfg)
+	// A non-nil limiter is always injected: leaving the interface nil would
+	// panic on the first exchange once the limiter is consulted.
+	rateLimiter := ratelimit.Limiter(ratelimit.AllowAll{})
+	if baseCfg.RateLimitStore != "" {
+		limiter, closer, err := ratelimitfactory.New(ctx, ratelimitfactory.Config{
+			Backend:   ratelimitfactory.Backend(baseCfg.RateLimitStore),
+			Limit:     baseCfg.RateLimit,
+			Window:    baseCfg.RateLimitWindow,
+			RedisURL:  baseCfg.RateLimitRedisURL,
+			RedisAddr: baseCfg.RateLimitRedisAddr,
+			RedisAuth: ratelimitfactory.RedisAuth(baseCfg.RateLimitRedisAuth),
+		})
 		if err != nil {
 			log.Panicf("failed to create rate limiter: %v", err)
 		}
-		defer func(closer io.Closer) {
-			err := closer.Close()
-			if err != nil {
+		defer func() {
+			if err := closer.Close(); err != nil {
 				log.Printf("failed to close rate limiter: %v", err)
 			}
-		}(closer)
+		}()
+		rateLimiter = ratelimit.Observed(limiter, baseCfg.RateLimitStore)
+
+		clog.FromContext(ctx).Infof(
+			"caller rate limiting enabled: backend=%s limit=%d window=%s fail_open=%t",
+			baseCfg.RateLimitStore, baseCfg.RateLimit, baseCfg.RateLimitWindow, baseCfg.RateLimitFailOpen)
+	} else {
+		clog.FromContext(ctx).Info("caller rate limiting disabled (OCTOSTS_RATE_LIMIT_STORE unset)")
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo, rateLimiter))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo, rateLimiter, baseCfg.RateLimitFailOpen))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
