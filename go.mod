@@ -34,6 +34,8 @@ require (
 	github.com/knadh/koanf/parsers/yaml v1.1.1
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/v2 v2.3.6
+	github.com/redis/go-redis-entraid v1.0.7
+	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/oauth2 v0.36.0
 	google.golang.org/api v0.293.0
 	google.golang.org/grpc v1.83.0
@@ -87,6 +89,7 @@ require (
 	go.opentelemetry.io/contrib/detectors/gcp v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/prometheus v0.66.0 // indirect
 	go.opentelemetry.io/otel/sdk/metric v1.45.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0-rc.6 // indirect

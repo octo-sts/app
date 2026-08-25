@@ -21,6 +21,7 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v88/github"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/octo-sts/app/pkg/ratelimit"
 
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/codes"
@@ -49,7 +50,7 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, rateLimiter ratelimit.Limiter) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		router:        router,
 		sticky:        sticky,
@@ -58,6 +59,7 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		metrics:       metrics,
 		baseURL:       baseURL,
 		orgPolicyRepo: orgPolicyRepo,
+		rateLimiter:   rateLimiter,
 	}
 }
 
@@ -78,6 +80,8 @@ type sts struct {
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
 	orgIssuerFlight singleflight.Group
+
+	rateLimiter ratelimit.Limiter
 }
 
 func (s *sts) policyRepo() string {
@@ -102,6 +106,10 @@ type cacheTrustPolicyKey struct {
 	owner    string
 	repo     string
 	identity string
+}
+
+func RateLimitKey(scope, identity, subject string) string {
+	return fmt.Sprintf("%s/%s/%s", scope, identity, subject)
 }
 
 // Exchange implements pboidc.SecurityTokenServiceServer
@@ -188,6 +196,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if err != nil {
 		clog.FromContext(ctx).Debugf("unable to validate token: %v", err)
 		return nil, status.Error(codes.Unauthenticated, "unable to verify bearer token")
+	}
+	allowed, err := s.rateLimiter.Allow(ctx, RateLimitKey(requestScope, tok.Issuer, tok.Subject))
+	if err != nil {
+		return nil, status.Error(codes.Internal, "rate limiter error")
+	}
+	if !allowed {
+		clog.FromContext(ctx).Infof("rate limit exceeded for %s/%s/%s", requestScope, tok.Issuer, tok.Subject)
+		return nil, status.Error(codes.ResourceExhausted, "rate limit exceeded")
 	}
 	// This is typically overwritten below, but we populate this here to enrich
 	// certain error paths with the issuer and subject.

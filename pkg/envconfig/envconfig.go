@@ -45,7 +45,13 @@ type EnvConfig struct {
 	// GitHubBaseURL overrides the GitHub API base URL for GitHub Enterprise
 	// Server deployments (e.g. "https://github.example.com/api/v3").
 	// When empty, the default https://api.github.com is used.
-	GitHubBaseURL string `envconfig:"GITHUB_BASE_URL" required:"false"`
+	GitHubBaseURL      string `envconfig:"GITHUB_BASE_URL" required:"false"`
+	RateLimit          int    `envconfig:"RATE_LIMIT" required:"false" default:"100"`
+	RateLimitWindow    int    `envconfig:"RATE_LIMIT_WINDOW_SECONDS" required:"false" default:"300"`
+	RateLimitStore     string `envconfig:"RATE_LIMIT_METHOD" required:"false" default:"memory"`
+	RateLimitRedisAddr string `envconfig:"REDIS_ADDR" required:"false"`
+	RateLimitRedisURL  string `envconfig:"REDIS_URL" required:"false"`
+	RateLimitRedisAuth string `envconfig:"REDIS_AUTH" required:"false" default:"none"`
 }
 
 type EnvConfigApp struct {

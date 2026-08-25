@@ -19,6 +19,7 @@ import (
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/octo-sts/app/pkg/ratelimit"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
@@ -111,7 +112,26 @@ func main() {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo))
+	var rateLimiter ratelimit.Limiter
+	if baseCfg.RateLimitStore != "" && baseCfg.RateLimit > 0 {
+		var closer io.Closer
+		limiterCfg := ratelimit.LimiterConfig{
+			Limit:  baseCfg.RateLimit,
+			Window: baseCfg.RateLimitWindow,
+		}
+		rateLimiter, closer, err = ratelimit.NewLimiter(ctx, baseCfg.RateLimitStore, limiterCfg, baseCfg)
+		if err != nil {
+			log.Panicf("failed to create rate limiter: %v", err)
+		}
+		defer func(closer io.Closer) {
+			err := closer.Close()
+			if err != nil {
+				log.Printf("failed to close rate limiter: %v", err)
+			}
+		}(closer)
+	}
+
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo, rateLimiter))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
