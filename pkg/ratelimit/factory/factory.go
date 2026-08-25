@@ -6,11 +6,16 @@
 // It lives in its own package so that the backends can depend on the
 // ratelimit contract without creating an import cycle, and so that the
 // package can be configured without importing the application's env schema.
+//
+// It is deliberately cloud-neutral. Provider-specific Redis authentication
+// belongs in its own package (see pkg/ratelimit/redisentra) and reaches the
+// factory through Config.RedisClient, so that a deployment which does not use
+// a given cloud never imports its SDK.
 package factory
 
 import (
 	"context"
-	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -18,8 +23,6 @@ import (
 	"strings"
 	"time"
 
-	entraid "github.com/redis/go-redis-entraid"
-	"github.com/redis/go-redis-entraid/identity"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/octo-sts/app/pkg/ratelimit"
@@ -37,21 +40,19 @@ const (
 	BackendRedis Backend = "redis"
 )
 
-// RedisAuth selects how the Redis connection authenticates.
-type RedisAuth string
-
-const (
-	// RedisAuthNone uses the credentials embedded in the Redis URL, if any.
-	RedisAuthNone RedisAuth = "none"
-	// RedisAuthEntra uses Microsoft Entra ID workload identity.
-	RedisAuthEntra RedisAuth = "entra"
-)
-
-// redisScope is the Entra ID scope for Azure Managed Redis.
-const redisScope = "https://redis.azure.com/.default"
-
 // pingTimeout bounds the startup connectivity check.
 const pingTimeout = 5 * time.Second
+
+// ErrRedisUnreachable reports that Redis did not answer the startup ping.
+//
+// It is distinct from a configuration error because the two demand different
+// responses: a bad backend name or a malformed URL is an operator mistake that
+// will never fix itself, whereas an unreachable Redis is usually transient.
+// When New returns an error wrapping this, the returned Limiter and Closer are
+// still non-nil and usable: go-redis reconnects in the background, so a caller
+// that prefers availability may start in a degraded state and enforcement will
+// resume by itself once Redis returns.
+var ErrRedisUnreachable = errors.New("redis unreachable at startup")
 
 // Config describes the limiter to build.
 type Config struct {
@@ -62,12 +63,17 @@ type Config struct {
 	// Window is the fixed window duration.
 	Window time.Duration
 
-	// RedisURL is a redis:// or rediss:// URL used when RedisAuth is none.
+	// RedisURL is a redis:// or rediss:// URL. It is ignored when
+	// RedisClient is set.
 	RedisURL string
-	// RedisAddr is a host:port used when RedisAuth is entra.
-	RedisAddr string
-	// RedisAuth selects the Redis authentication mode.
-	RedisAuth RedisAuth
+
+	// RedisClient, when set, is used as-is instead of dialling RedisURL.
+	//
+	// This is the seam for provider-specific authentication such as Entra ID
+	// workload identity: the caller builds an authenticated client and the
+	// factory stays free of cloud SDKs. The caller retains ownership and must
+	// close it; the Closer returned by New is a no-op in that case.
+	RedisClient redis.UniversalClient
 
 	// MaxKeys bounds the memory backend's tracked callers. Zero uses the
 	// package default.
@@ -80,7 +86,11 @@ type nopCloser struct{}
 func (nopCloser) Close() error { return nil }
 
 // New builds a Limiter along with a Closer that releases any resources it
-// owns. The Closer is always non-nil when err is nil.
+// owns.
+//
+// On success the Closer is non-nil. The one case where a non-nil error
+// accompanies a usable Limiter and Closer is ErrRedisUnreachable; see its
+// documentation. For every other error both are nil.
 func New(ctx context.Context, cfg Config) (ratelimit.Limiter, io.Closer, error) {
 	if cfg.Limit <= 0 {
 		return nil, nil, fmt.Errorf("rate limit must be positive, got %d", cfg.Limit)
@@ -100,80 +110,57 @@ func New(ctx context.Context, cfg Config) (ratelimit.Limiter, io.Closer, error) 
 	}
 }
 
-// newRedis dials Redis and returns a limiter backed by it.
+// newRedis resolves a client and returns a limiter backed by it.
 func newRedis(ctx context.Context, cfg Config) (ratelimit.Limiter, io.Closer, error) {
-	opts, err := redisOptions(cfg)
+	client, closer, err := redisClient(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	rdb := redis.NewUniversalClient(opts)
+	limiter := redislimiter.NewLimiter(cfg.Limit, cfg.Window, client)
 
 	// A dedicated context: reassigning ctx here would hand a context that is
 	// dead after pingTimeout to anything long-lived added below.
 	pingCtx, cancel := context.WithTimeout(ctx, pingTimeout)
 	defer cancel()
-	if err := rdb.Ping(pingCtx).Err(); err != nil {
-		// Close before returning, otherwise the connection pool leaks.
-		if cerr := rdb.Close(); cerr != nil {
-			return nil, nil, fmt.Errorf("connecting to redis: %w (also failed to close client: %w)", err, cerr)
-		}
-		return nil, nil, fmt.Errorf("connecting to redis: %w", err)
+	if err := client.Ping(pingCtx).Err(); err != nil {
+		// The client is returned rather than closed so the caller can choose
+		// to proceed degraded. A caller that treats this as fatal will exit,
+		// which releases the pool anyway.
+		return limiter, closer, fmt.Errorf("%w: %w", ErrRedisUnreachable, err)
 	}
 
-	return redislimiter.NewLimiter(cfg.Limit, cfg.Window, rdb), rdb, nil
+	return limiter, closer, nil
 }
 
-// redisOptions builds connection options for the configured auth mode.
-func redisOptions(cfg Config) (*redis.UniversalOptions, error) {
-	switch RedisAuth(strings.ToLower(string(cfg.RedisAuth))) {
-	case RedisAuthEntra:
-		return entraOptions(cfg)
-	case RedisAuthNone, "":
-		return urlOptions(cfg)
-	default:
-		return nil, fmt.Errorf("unsupported redis auth mode %q (valid: %s, %s)",
-			cfg.RedisAuth, RedisAuthNone, RedisAuthEntra)
-	}
-}
-
-// entraOptions authenticates with Entra ID workload identity.
+// redisClient returns the injected client, or dials RedisURL.
 //
-// NewDefaultAzureCredentialsProvider is used rather than the managed-identity
-// provider because AKS workload identity presents a federated ServiceAccount
-// token, which the IMDS-based managed-identity path cannot consume. This
-// matches how pkg/kms/akv and pkg/secrets obtain Azure credentials.
-func entraOptions(cfg Config) (*redis.UniversalOptions, error) {
-	if cfg.RedisAddr == "" {
-		return nil, fmt.Errorf("redis address is required for %s auth", RedisAuthEntra)
-	}
-	host, _, err := net.SplitHostPort(cfg.RedisAddr)
-	if err != nil {
-		return nil, fmt.Errorf("redis address must be host:port: %w", err)
+// The returned Closer reflects ownership: an injected client belongs to the
+// caller and must not be closed here, or the caller would be left holding a
+// dead client it still believes it owns.
+func redisClient(cfg Config) (redis.UniversalClient, io.Closer, error) {
+	if cfg.RedisClient != nil {
+		return cfg.RedisClient, nopCloser{}, nil
 	}
 
-	cp, err := entraid.NewDefaultAzureCredentialsProvider(entraid.DefaultAzureCredentialsProviderOptions{
-		DefaultAzureIdentityProviderOptions: identity.DefaultAzureIdentityProviderOptions{
-			Scopes: []string{redisScope},
-		},
-	})
+	opts, err := urlOptions(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("creating Entra credentials provider: %w", err)
+		return nil, nil, err
 	}
-
-	// The username is derived from the token's oid claim by the provider and
-	// must not be set here. Entra authentication requires TLS.
-	return &redis.UniversalOptions{
-		Addrs:                        []string{cfg.RedisAddr},
-		StreamingCredentialsProvider: cp,
-		TLSConfig:                    &tls.Config{MinVersion: tls.VersionTLS12, ServerName: host},
-	}, nil
+	rdb := redis.NewClient(opts)
+	return rdb, rdb, nil
 }
 
 // urlOptions builds options from a redis:// or rediss:// URL.
-func urlOptions(cfg Config) (*redis.UniversalOptions, error) {
+//
+// The parsed options are used as-is rather than being copied field by field
+// into UniversalOptions. Copying silently dropped everything not explicitly
+// listed - credentials once, and every connection-tuning parameter the URL
+// can carry (max_retries, dial_timeout, pool_size and the rest) - and would
+// drop any option a future library version adds.
+func urlOptions(cfg Config) (*redis.Options, error) {
 	if cfg.RedisURL == "" {
-		return nil, fmt.Errorf("redis URL is required for %s auth", RedisAuthNone)
+		return nil, errors.New("redis URL is required when no Redis client is supplied")
 	}
 
 	parsed, err := redis.ParseURL(cfg.RedisURL)
@@ -184,16 +171,7 @@ func urlOptions(cfg Config) (*redis.UniversalOptions, error) {
 		return nil, err
 	}
 
-	// Every credential-bearing field must be carried across: building
-	// UniversalOptions from Addr alone silently drops authentication and the
-	// selected database.
-	return &redis.UniversalOptions{
-		Addrs:     []string{parsed.Addr},
-		Username:  parsed.Username,
-		Password:  parsed.Password,
-		DB:        parsed.DB,
-		TLSConfig: parsed.TLSConfig,
-	}, nil
+	return parsed, nil
 }
 
 // requireTLS rejects plaintext Redis outside loopback.
