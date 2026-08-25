@@ -483,9 +483,16 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			log.Infof("skipping new non-default branch with no PRs")
 			return nil, nil
 		}
-		_, dirContents, _, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
+		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
-			return nil, err
+			// A missing policy directory means there are no policies to
+			// validate; only a non-404 (or transport) error should fail the
+			// delivery. Otherwise an initial commit to a repo without
+			// .github/chainguard would 500 and GitHub would redeliver.
+			if resp == nil || resp.StatusCode != http.StatusNotFound {
+				return nil, err
+			}
+			log.Infof("no policy directory at %s, skipping validation", sha)
 		}
 		// This branch lists the policy directory rather than diffing it, so the
 		// entries are everything the directory holds — not just trust policies.
