@@ -12,12 +12,15 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/chainguard-dev/clog"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/google/go-github/v88/github"
 	"github.com/hashicorp/go-multierror"
 	lru "github.com/hashicorp/golang-lru/v2"
@@ -41,6 +44,151 @@ const (
 	zeroHash = "0000000000000000000000000000000000000000"
 )
 
+type PolicyAction string
+
+const (
+	PolicyCreated PolicyAction = "created"
+	PolicyUpdated PolicyAction = "updated"
+	PolicyDeleted PolicyAction = "deleted"
+)
+
+type PolicyChange struct {
+	Path   string       `json:"path"`
+	Policy string       `json:"policy"`
+	Action PolicyAction `json:"action"`
+}
+
+type PolicyEvent struct {
+	Org            string       `json:"org"`
+	Repo           string       `json:"repo"`
+	Ref            string       `json:"ref"`
+	Commit         string       `json:"commit"`
+	Before         string       `json:"before"`
+	InstallationID int64        `json:"installation_id"`
+	Actor          string       `json:"actor"`
+	ActorID        int64        `json:"actor_id"`
+	Pusher         string       `json:"pusher"`
+	Forced         bool         `json:"forced"`
+	Change         PolicyChange `json:"change"`
+	// Valid reports whether THIS policy parsed at Commit, and is nil when the
+	// policy was never read: deletions (the path no longer exists at Commit),
+	// a validation pass aborted by GitHub rate limiting, or a push that failed
+	// before validation ran. A nil Valid must not be read as "valid" — it means
+	// unknown, and PushError usually explains why.
+	Valid *bool `json:"valid"`
+	// Error is this policy's own validation failure, not the push's aggregate.
+	Error string `json:"error,omitempty"`
+	// PushError records a failure that prevented validation from running at
+	// all, and so applies to every policy in the push rather than this one.
+	PushError string    `json:"push_error,omitempty"`
+	Time      time.Time `json:"time"`
+}
+
+const (
+	retryDelay = 10 * time.Millisecond
+	maxRetry   = 3
+)
+
+func policyName(path string) string {
+	base := filepath.Base(path)
+	if strings.HasSuffix(base, ".sts.yaml") {
+		return strings.TrimSuffix(base, ".sts.yaml")
+	}
+	return ""
+}
+
+func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEvent) []PolicyChange {
+	byPath := make(map[string]PolicyAction)
+
+	apply := func(paths []string, action PolicyAction) {
+		for _, p := range filterValidatedFiles(repo, paths, e.policyRepo()) {
+			switch prev, seen := byPath[p]; {
+			case !seen:
+				byPath[p] = action
+			case prev == PolicyCreated && action == PolicyUpdated:
+				// Created then edited in the same push is still a creation.
+			default:
+				byPath[p] = action
+			}
+		}
+	}
+
+	for _, commit := range event.Commits {
+		apply(commit.Added, PolicyCreated)
+		apply(commit.Modified, PolicyUpdated)
+		apply(commit.Removed, PolicyDeleted)
+	}
+
+	changes := make([]PolicyChange, 0, len(byPath))
+	for path, action := range byPath {
+		changes = append(changes, PolicyChange{
+			Path:   path,
+			Policy: policyName(path),
+			Action: action,
+		})
+	}
+	// Stable output so consumers diffing records don't see spurious churn.
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes
+}
+
+// policyChangesFromCompare derives policy changes from a CompareCommits (or
+// ListFiles) response.
+//
+// This is the path taken when the push payload's commit list is truncated, and
+// it is the only path that sees renames: GitHub reports a rename as a single
+// entry for the new path plus a PreviousFilename, so a policy renamed from a to
+// b is recorded as b created and a deleted.
+func (e *Validator) policyChangesFromCompare(repo string, files []*github.CommitFile) []PolicyChange {
+	var changes []PolicyChange //nolint:prealloc // most files in a push aren't policies
+
+	add := func(path string, action PolicyAction) {
+		if !isValidatedPath(repo, path, e.policyRepo()) {
+			return
+		}
+		changes = append(changes, PolicyChange{
+			Path:   path,
+			Policy: policyName(path),
+			Action: action,
+		})
+	}
+
+	for _, file := range files {
+		switch file.GetStatus() {
+		case "added", "copied":
+			add(file.GetFilename(), PolicyCreated)
+		case "removed":
+			add(file.GetFilename(), PolicyDeleted)
+		case "renamed":
+			add(file.GetFilename(), PolicyCreated)
+			add(file.GetPreviousFilename(), PolicyDeleted)
+		default:
+			// "modified", "changed", and anything GitHub adds later: the file
+			// exists at the head SHA and its content differs, which is an
+			// update as far as an audit trail is concerned.
+			add(file.GetFilename(), PolicyUpdated)
+		}
+	}
+
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes
+}
+
+// pathsToValidate returns the paths that still exist at the head SHA, and so
+// can be read and parsed. Deletions are excluded: validation reads content at
+// the head SHA, where a deleted path 404s, which would turn every policy
+// deletion into a failing check run.
+func pathsToValidate(changes []PolicyChange) []string {
+	var files []string //nolint:prealloc // deletions are dropped
+	for _, c := range changes {
+		if c.Action == PolicyDeleted {
+			continue
+		}
+		files = append(files, c.Path)
+	}
+	return files
+}
+
 type Validator struct {
 	Transport *ghinstallation.AppsTransport
 	// Store multiple secrets to allow for rolling updates.
@@ -53,6 +201,8 @@ type Validator struct {
 	// org-scoped trust policies and the org trusted-issuer allowlist.
 	// Defaults to ".github" when empty.
 	OrgPolicyRepo string
+
+	CEClient cloudevents.Client
 
 	// clients caches one client per installation ID so the transport's token is
 	// reused (~1h) instead of re-minted per event. Keyed on installation ID
@@ -204,21 +354,27 @@ func (e *Validator) clientForInstallation(installationID int64) (*github.Client,
 	return client, nil
 }
 
-func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner, repo, sha string, files []string) (*github.CheckRun, error) {
+// handleSHA validates the given files at sha and reports the result as a check
+// run. The returned map holds one entry per validated file (a nil value means
+// the file parsed). It is nil when no validation happened, which callers must
+// distinguish from "everything was valid".
+func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner, repo, sha string, files []string) (*github.CheckRun, map[string]error, error) {
 	log := clog.FromContext(ctx)
 
 	// Commit doesn't exist - nothing to do.
 	if sha == zeroHash {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	err := validatePolicies(ctx, client, owner, repo, sha, files, e.policyRepo())
+	results, err := validatePolicies(ctx, client, owner, repo, sha, files, e.policyRepo())
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which GitHub treats as a
 	// failed delivery and redelivers — amplifying load on the rate-limited API.
 	if octosts.IsGitHubRateLimited(err) {
 		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, repo, sha)
-		return nil, nil
+		// Files validated before the limit was hit still have real verdicts;
+		// the rest are simply absent from the map and stay unknown.
+		return nil, results, nil
 	}
 	// Whether or not the commit is verified, we still create a CheckRun.
 	// The only difference is whether it shows up to the user as success or
@@ -250,13 +406,25 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, opts)
 	if err != nil {
 		log.Errorf("error creating CheckRun: %v", err)
-		return nil, err
+		return nil, results, err
 	}
-	return cr, nil
+	return cr, results, nil
 }
 
-func validatePolicies(ctx context.Context, client *github.Client, owner, repo, sha string, files []string, orgPolicyRepo string) error {
+// validatePolicies parses each file at sha and returns both a per-file verdict
+// and the aggregate error used for the check run. A file present in the map
+// with a nil value parsed cleanly; a file absent from the map was never read,
+// because a rate limit aborted the pass before reaching it.
+func validatePolicies(ctx context.Context, client *github.Client, owner, repo, sha string, files []string, orgPolicyRepo string) (map[string]error, error) {
 	var merr error
+	results := make(map[string]error, len(files))
+
+	// fail records a file's verdict and folds it into the aggregate.
+	fail := func(f string, err error) {
+		results[f] = err
+		merr = multierror.Append(merr, err)
+	}
+
 	for _, f := range sets.List(sets.New(files...)) {
 		log := clog.FromContext(ctx).With("path", f)
 
@@ -265,9 +433,12 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 			log.Infof("failed to get content for: %v", err)
 			if octosts.IsGitHubRateLimited(err) {
 				log.Warnf("rate-limited, aborting remaining policy validations")
-				return fmt.Errorf("%s: %w", f, err)
+				// Deliberately not recorded as a verdict: being rate-limited
+				// says nothing about whether this policy is valid, and an
+				// audit consumer must not read it as a policy failure.
+				return results, fmt.Errorf("%s: %w", f, err)
 			}
-			merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+			fail(f, fmt.Errorf("%s: %w", f, err))
 			continue
 		}
 
@@ -277,14 +448,14 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 		// would panic the handler rather than fail the check run.
 		if resp == nil {
 			log.Infof("%s is not a file, skipping", f)
-			merr = multierror.Append(merr, fmt.Errorf("%s: not a file", f))
+			fail(f, fmt.Errorf("%s: not a file", f))
 			continue
 		}
 
 		raw, err := resp.GetContent()
 		if err != nil {
 			log.Infof("failed to read content: %v", err)
-			merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+			fail(f, fmt.Errorf("%s: %w", f, err))
 			continue
 		}
 
@@ -295,7 +466,8 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 			// this same function, so the two verdicts cannot diverge.
 			if _, err := octosts.ParseOrgTrustedIssuers([]byte(raw)); err != nil {
 				log.Infof("failed to validate org trusted issuers: %v", err)
-				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+				fail(f, fmt.Errorf("%s: %w", f, err))
+				continue
 			}
 
 		// EqualFold, matching the arm above: GitHub preserves repository-name case,
@@ -305,21 +477,25 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 		case strings.EqualFold(repo, orgPolicyRepo):
 			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.OrgTrustPolicy{}); err != nil {
 				log.Infof("failed to parse org trust policy: %v", err)
-				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+				fail(f, fmt.Errorf("%s: %w", f, err))
+				continue
 			}
 
 		default:
 			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.TrustPolicy{}); err != nil {
 				log.Infof("failed to parse trust policy: %v", err)
-				merr = multierror.Append(merr, fmt.Errorf("%s: %w", f, err))
+				fail(f, fmt.Errorf("%s: %w", f, err))
+				continue
 			}
 		}
+
+		results[f] = nil
 	}
 
-	return merr
+	return results, merr
 }
 
-func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*github.CheckRun, error) {
+func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (checkRun *github.CheckRun, err error) {
 	log := clog.FromContext(ctx).With(
 		"github/repo", event.GetRepo().GetFullName(),
 		"github/installation", event.GetInstallation().GetID(),
@@ -334,6 +510,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 	repo := event.GetRepo().GetName()
 	sha := event.GetAfter()
 	installationID := event.GetInstallation().GetID()
+
 	ctx = ghtransport.EnrichContext(ctx, e.Transport.AppID(), installationID)
 
 	// Skip if the organization is not in the list of organizations to validate.
@@ -347,30 +524,97 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 		return nil, err
 	}
 
-	var files []string
-
-	// GitHub push payloads include up to 20 commits. When not truncated,
-	// use the payload directly to avoid a Compare API call.
+	// GitHub push payloads include up to 20 commits. When not truncated, use
+	// the payload directly to avoid a Compare API call. When truncated, the
+	// payload's commit list silently omits changes, so a large push would
+	// under-report both the files to validate and the policies to audit.
+	var changes []PolicyChange
 	if len(event.Commits) < 20 {
-		files = e.filesFromPushEvent(repo, event)
+		changes = e.policyChangesFromPushEvent(repo, event)
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
-		for _, file := range resp.Files {
-			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
-				if file.GetStatus() != "removed" {
-					files = append(files, file.GetFilename())
-				}
-			}
-		}
+		changes = e.policyChangesFromCompare(repo, resp.Files)
 	}
+
+	// Validation and auditing share one view of the push so the two can't
+	// disagree about which policies it touched.
+	files := pathsToValidate(changes)
+
+	// validation is populated by handleSHA below; the deferred closure reads it
+	// after the fact, so a push that returns early leaves it nil and every
+	// policy is reported with an unknown verdict rather than a clean one.
+	var validation map[string]error
+	if e.CEClient != nil && len(changes) > 0 && event.GetRef() == "refs/heads/"+event.GetRepo().GetDefaultBranch() {
+		defer func() {
+			e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, changes, validation, err)
+		}()
+	}
+
+	// Deletions leave nothing to read at the head SHA, so a push that only
+	// removes policies has nothing to validate — but the removals still belong
+	// in the audit trail, which the deferred emit above has already captured.
 	if len(files) == 0 {
 		return nil, nil
 	}
 
-	return e.handleSHA(ctx, client, owner, repo, sha, files)
+	checkRun, validation, err = e.handleSHA(ctx, client, owner, repo, sha, files)
+	return checkRun, err
+}
+
+// emitPolicyEvents publishes one audit event per trust policy touched by a push
+// to the default branch.
+//
+// validation carries the per-file verdicts from handleSHA and may be nil or
+// partial: a policy missing from it was never read, and is reported with a nil
+// Valid so consumers can tell "unknown" from "valid". pushErr is a failure that
+// stopped validation from running at all.
+func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEvent, owner, repo, sha string, installationID int64, changes []PolicyChange, validation map[string]error, pushErr error) {
+	log := clog.FromContext(ctx)
+
+	for _, change := range changes {
+		pe := PolicyEvent{
+			Org:            owner,
+			Repo:           repo,
+			Ref:            event.GetRef(),
+			Commit:         sha,
+			Before:         event.GetBefore(),
+			InstallationID: installationID,
+			Actor:          event.GetSender().GetLogin(),
+			ActorID:        event.GetSender().GetID(),
+			Pusher:         event.GetPusher().GetName(),
+			Forced:         event.GetForced(),
+			Change:         change,
+			Time:           time.Now(),
+		}
+		if verr, ok := validation[change.Path]; ok {
+			pe.Valid = github.Ptr(verr == nil)
+			if verr != nil {
+				pe.Error = verr.Error()
+			}
+		}
+		if pushErr != nil {
+			pe.PushError = pushErr.Error()
+		}
+
+		ce := cloudevents.NewEvent()
+		ce.SetType("dev.octo-sts.policy")
+		ce.SetSource(fmt.Sprintf("https://github.com/%s/%s", owner, repo))
+		ce.SetSubject(event.GetRepo().GetFullName() + "/" + change.Policy)
+		ce.SetTime(pe.Time)
+		ce.SetExtension("githubinstallationid", strconv.FormatInt(installationID, 10))
+		ce.SetExtension("githubcommit", sha)
+		if err := ce.SetData(cloudevents.ApplicationJSON, pe); err != nil {
+			log.Errorf("failed to set cloudevents data: %v", err)
+			continue
+		}
+		rctx := cloudevents.ContextWithRetriesExponentialBackoff(context.WithoutCancel(ctx), retryDelay, maxRetry)
+		if res := e.CEClient.Send(rctx, ce); cloudevents.IsUndelivered(res) || cloudevents.IsNACK(res) {
+			log.Errorf("failed to deliver policy event: %v", res)
+		}
+	}
 }
 
 func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullRequestEvent) (*github.CheckRun, error) {
@@ -426,7 +670,8 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, nil
 	}
 
-	return e.handleSHA(ctx, client, owner, repo, sha, files)
+	cr, _, err := e.handleSHA(ctx, client, owner, repo, sha, files)
+	return cr, err
 }
 
 type checkSuite interface {
@@ -537,7 +782,8 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		return nil, nil
 	}
 
-	return e.handleSHA(ctx, client, owner, repo, sha, files)
+	cr, _, err := e.handleSHA(ctx, client, owner, repo, sha, files)
+	return cr, err
 }
 
 type fauxCheckSuite struct {
@@ -584,19 +830,4 @@ func filterValidatedFiles(repo string, files []string, orgPolicyRepo string) []s
 		}
 	}
 	return filtered
-}
-
-// filesFromPushEvent returns the validated files touched by the push.
-//
-// Deletions are deliberately excluded: validation reads each file's content at
-// the head SHA, and a deleted path 404s there, so including removals would turn
-// every trust-policy deletion into a failing check run. The CompareCommits
-// branches skip "removed" for the same reason.
-func (e *Validator) filesFromPushEvent(repo string, event *github.PushEvent) []string {
-	var files []string //nolint:prealloc // size depends on file content, not commit count
-	for _, commit := range event.Commits {
-		files = append(files, filterValidatedFiles(repo, commit.Added, e.policyRepo())...)
-		files = append(files, filterValidatedFiles(repo, commit.Modified, e.policyRepo())...)
-	}
-	return files
 }

@@ -16,6 +16,8 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/kms"
@@ -42,6 +44,16 @@ func main() {
 
 		// Setup tracing.
 		defer metrics.SetupTracer(ctx)()
+	}
+
+	var ceclient cloudevents.Client
+	if baseCfg.Metrics && webhookConfig.EventingIngress != "" {
+		ceclient, err = mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, webhookConfig.EventingIngress)...)
+		if err != nil {
+			log.Panicf("failed to create cloudevents client: %v", err)
+		}
+	} else if baseCfg.Metrics {
+		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
 	// Only use the primary app ID and KMS key for the webhook transport.
@@ -108,6 +120,7 @@ func main() {
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 		OrgPolicyRepo: webhookConfig.OrgPolicyRepo,
+		CEClient:      ceclient,
 	})
 	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

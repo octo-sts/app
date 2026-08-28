@@ -5,6 +5,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -32,6 +33,8 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/cloudevents/sdk-go/v2/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
 	"github.com/octo-sts/app/pkg/octosts"
@@ -64,7 +67,7 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.Context(t)
-	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -408,7 +411,7 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	}
 }
 
-func TestFilesFromPushEvent(t *testing.T) {
+func TestPathsToValidateFromPushEvent(t *testing.T) {
 	v := &Validator{}
 	for _, tc := range []struct {
 		name    string
@@ -437,12 +440,12 @@ func TestFilesFromPushEvent(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "multiple commits deduplicated downstream",
+			name: "multiple commits deduplicated",
 			commits: []*github.HeadCommit{
 				{Added: []string{".github/chainguard/a.sts.yaml"}},
 				{Modified: []string{".github/chainguard/a.sts.yaml"}},
 			},
-			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/a.sts.yaml"},
+			want: []string{".github/chainguard/a.sts.yaml"},
 		},
 		{
 			name: "non-sts files filtered out",
@@ -489,9 +492,9 @@ func TestFilesFromPushEvent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			event := &github.PushEvent{Commits: tc.commits}
-			got := v.filesFromPushEvent("some-service", event)
+			got := pathsToValidate(v.policyChangesFromPushEvent("some-service", event))
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("filesFromPushEvent() mismatch (-want +got):\n%s", diff)
+				t.Errorf("pathsToValidate() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -2478,5 +2481,368 @@ func TestWebhookEnrichesMetricsContext(t *testing.T) {
 		"organization": "foo",
 	}); ok {
 		t.Error("found a github_rate_limit_remaining series with an empty app_id label")
+	}
+}
+
+// fakeCEClient records the events a handler publishes. A nil Send result is an
+// ACK as far as the SDK is concerned, so delivery always "succeeds".
+type fakeCEClient struct {
+	mu     sync.Mutex
+	events []cloudevents.Event
+}
+
+func (f *fakeCEClient) Send(_ context.Context, e cloudevents.Event) protocol.Result {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+	return nil
+}
+
+func (f *fakeCEClient) Request(ctx context.Context, e cloudevents.Event) (*cloudevents.Event, protocol.Result) {
+	return nil, f.Send(ctx, e)
+}
+
+func (f *fakeCEClient) StartReceiver(context.Context, interface{}) error { return nil }
+
+func (f *fakeCEClient) sent() []cloudevents.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.events)
+}
+
+func TestPolicyChangesFromCompare(t *testing.T) {
+	v := &Validator{}
+	for _, tc := range []struct {
+		name  string
+		files []*github.CommitFile
+		want  []PolicyChange
+	}{{
+		name: "added, modified and removed",
+		files: []*github.CommitFile{
+			{Filename: github.Ptr(".github/chainguard/a.sts.yaml"), Status: github.Ptr("added")},
+			{Filename: github.Ptr(".github/chainguard/b.sts.yaml"), Status: github.Ptr("modified")},
+			{Filename: github.Ptr(".github/chainguard/c.sts.yaml"), Status: github.Ptr("removed")},
+		},
+		want: []PolicyChange{
+			{Path: ".github/chainguard/a.sts.yaml", Policy: "a", Action: PolicyCreated},
+			{Path: ".github/chainguard/b.sts.yaml", Policy: "b", Action: PolicyUpdated},
+			{Path: ".github/chainguard/c.sts.yaml", Policy: "c", Action: PolicyDeleted},
+		},
+	}, {
+		name: "rename records both sides",
+		files: []*github.CommitFile{{
+			Filename:         github.Ptr(".github/chainguard/new.sts.yaml"),
+			PreviousFilename: github.Ptr(".github/chainguard/old.sts.yaml"),
+			Status:           github.Ptr("renamed"),
+		}},
+		want: []PolicyChange{
+			{Path: ".github/chainguard/new.sts.yaml", Policy: "new", Action: PolicyCreated},
+			{Path: ".github/chainguard/old.sts.yaml", Policy: "old", Action: PolicyDeleted},
+		},
+	}, {
+		name: "non-policy files ignored",
+		files: []*github.CommitFile{
+			{Filename: github.Ptr("README.md"), Status: github.Ptr("added")},
+			{Filename: github.Ptr(".github/chainguard/README.md"), Status: github.Ptr("modified")},
+		},
+		want: nil,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := v.policyChangesFromCompare("some-service", tc.files)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("policyChangesFromCompare() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPathsToValidateExcludesDeletions(t *testing.T) {
+	changes := []PolicyChange{
+		{Path: ".github/chainguard/a.sts.yaml", Action: PolicyCreated},
+		{Path: ".github/chainguard/b.sts.yaml", Action: PolicyDeleted},
+		{Path: ".github/chainguard/c.sts.yaml", Action: PolicyUpdated},
+	}
+	want := []string{".github/chainguard/a.sts.yaml", ".github/chainguard/c.sts.yaml"}
+	if diff := cmp.Diff(want, pathsToValidate(changes)); diff != "" {
+		t.Errorf("pathsToValidate() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestValidatePoliciesPerFileVerdicts pins the property the audit trail depends
+// on: one broken policy must not taint the verdict of the others in the push.
+func TestValidatePoliciesPerFileVerdicts(t *testing.T) {
+	gh := githubTestServer(t, nil)
+	ctx := slogtest.Context(t)
+
+	results, err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{
+		".github/chainguard/test.sts.yaml",
+		".github/chainguard/missing.sts.yaml",
+	}, ".github")
+	if err == nil {
+		t.Fatal("expected an aggregate error for the unreadable policy")
+	}
+
+	if verr, ok := results[".github/chainguard/test.sts.yaml"]; !ok || verr != nil {
+		t.Errorf("valid policy: got (%v, present=%t), want (nil, present=true)", verr, ok)
+	}
+	if verr, ok := results[".github/chainguard/missing.sts.yaml"]; !ok || verr == nil {
+		t.Errorf("unreadable policy: got (%v, present=%t), want (non-nil, present=true)", verr, ok)
+	}
+}
+
+// githubTestServer serves the testdata tree as the GitHub API, routing check
+// run creations to onCheckRun when non-nil.
+func githubTestServer(t *testing.T, onCheckRun func(*github.CreateCheckRunOptions)) *github.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if onCheckRun != nil {
+			onCheckRun(opt)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+// TestPushEmitsPolicyEvents covers the audit trail end to end: one event per
+// policy, per-file verdicts, and an unknown (nil) verdict for a deletion, which
+// is never read at the head SHA and so cannot be called valid.
+func TestPushEmitsPolicyEvents(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+		CEClient:      ce,
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	push := github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: github.Ptr("foo")},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Ref:    github.Ptr("refs/heads/main"),
+		Before: github.Ptr("1234"),
+		After:  github.Ptr("5678"),
+		Sender: &github.User{Login: github.Ptr("mallory"), ID: github.Ptr(int64(99))},
+		Commits: []*github.HeadCommit{{
+			Added:   []string{".github/chainguard/test.sts.yaml", ".github/chainguard/missing.sts.yaml"},
+			Removed: []string{".github/chainguard/gone.sts.yaml"},
+		}},
+	}
+	body, err := json.Marshal(push)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	events := ce.sent()
+	if len(events) != 3 {
+		t.Fatalf("expected one event per policy change, got %d", len(events))
+	}
+
+	byPath := map[string]PolicyEvent{}
+	for _, e := range events {
+		if e.Type() != "dev.octo-sts.policy" {
+			t.Errorf("unexpected event type %q", e.Type())
+		}
+		var pe PolicyEvent
+		if err := json.Unmarshal(e.Data(), &pe); err != nil {
+			t.Fatal(err)
+		}
+		if pe.Org != "foo" || pe.Repo != "bar" {
+			t.Errorf("got org/repo %q/%q, want foo/bar", pe.Org, pe.Repo)
+		}
+		if pe.Actor != "mallory" {
+			t.Errorf("got actor %q, want mallory", pe.Actor)
+		}
+		if want := "foo/bar/" + pe.Change.Policy; e.Subject() != want {
+			t.Errorf("got subject %q, want %q", e.Subject(), want)
+		}
+		byPath[pe.Change.Path] = pe
+	}
+
+	valid, ok := byPath[".github/chainguard/test.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the valid policy")
+	}
+	if valid.Change.Action != PolicyCreated {
+		t.Errorf("got action %q, want created", valid.Change.Action)
+	}
+	if valid.Valid == nil || !*valid.Valid {
+		t.Errorf("valid policy: got Valid=%v, want true", valid.Valid)
+	}
+	if valid.Error != "" {
+		t.Errorf("valid policy carried another file's error: %q", valid.Error)
+	}
+
+	broken, ok := byPath[".github/chainguard/missing.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the unreadable policy")
+	}
+	if broken.Valid == nil || *broken.Valid {
+		t.Errorf("unreadable policy: got Valid=%v, want false", broken.Valid)
+	}
+	if broken.Error == "" {
+		t.Error("unreadable policy: expected an error to be recorded")
+	}
+
+	deleted, ok := byPath[".github/chainguard/gone.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the deleted policy")
+	}
+	if deleted.Change.Action != PolicyDeleted {
+		t.Errorf("got action %q, want deleted", deleted.Change.Action)
+	}
+	if deleted.Valid != nil {
+		t.Errorf("deletion: got Valid=%v, want nil (never validated)", deleted.Valid)
+	}
+}
+
+// TestPushNonDefaultBranchEmitsNothing keeps the audit trail scoped to policies
+// that are actually live.
+func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+		CEClient:      ce,
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: github.Ptr("foo")},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Ref:     github.Ptr("refs/heads/feature"),
+		Before:  github.Ptr("1234"),
+		After:   github.Ptr("5678"),
+		Commits: []*github.HeadCommit{{Added: []string{".github/chainguard/test.sts.yaml"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	if got := ce.sent(); len(got) != 0 {
+		t.Fatalf("expected no events for a non-default branch, got %d", len(got))
 	}
 }
