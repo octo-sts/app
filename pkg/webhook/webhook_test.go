@@ -2713,6 +2713,7 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 	}
 
 	byPath := map[string]PolicyEvent{}
+	seenIndex := map[int]bool{}
 	for _, e := range events {
 		if e.Type() != "dev.octo-sts.policy" {
 			t.Errorf("unexpected event type %q", e.Type())
@@ -2730,7 +2731,18 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 		if want := "foo/bar/" + pe.Change.Policy; e.Subject() != want {
 			t.Errorf("got subject %q, want %q", e.Subject(), want)
 		}
+		if pe.ChangeCount != 3 {
+			t.Errorf("got ChangeCount %d, want 3", pe.ChangeCount)
+		}
+		seenIndex[pe.ChangeIndex] = true
 		byPath[pe.Change.Path] = pe
+	}
+
+	// Indices must cover 0..n-1 so a consumer can spot a dropped event.
+	for i := range 3 {
+		if !seenIndex[i] {
+			t.Errorf("missing ChangeIndex %d", i)
+		}
 	}
 
 	valid, ok := byPath[".github/chainguard/test.sts.yaml"]
@@ -2844,5 +2856,27 @@ func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
 
 	if got := ce.sent(); len(got) != 0 {
 		t.Fatalf("expected no events for a non-default branch, got %d", len(got))
+	}
+}
+
+func TestPolicyName(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{".github/chainguard/foo.sts.yaml", "foo"},
+		{".github/chainguard/foo.bar.sts.yaml", "foo.bar"},
+		{octosts.OrgTrustedIssuersPath, OrgTrustedIssuersPolicyName},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := policyName(tc.path); got != tc.want {
+				t.Errorf("policyName(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+			// Every name must be non-empty, or the event subject ends up with a
+			// dangling separator.
+			if policyName(tc.path) == "" {
+				t.Error("policy name must not be empty")
+			}
+		})
 	}
 }

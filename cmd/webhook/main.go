@@ -46,14 +46,17 @@ func main() {
 		defer metrics.SetupTracer(ctx)()
 	}
 
+	// Deliberately not gated on baseCfg.Metrics, unlike the STS exchange
+	// stream: these events are the audit trail for trust policy changes, and
+	// turning off metrics must not silently turn off a security control.
 	var ceclient cloudevents.Client
-	if baseCfg.Metrics && webhookConfig.EventingIngress != "" {
-		ceclient, err = mce.NewClientHTTP("octo-sts", mce.WithTarget(ctx, webhookConfig.EventingIngress)...)
+	if webhookConfig.EventingIngress != "" {
+		ceclient, err = mce.NewClientHTTP("octo-sts-webhook", mce.WithTarget(ctx, webhookConfig.EventingIngress)...)
 		if err != nil {
 			log.Panicf("failed to create cloudevents client: %v", err)
 		}
-	} else if baseCfg.Metrics {
-		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
+	} else {
+		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; trust policy events will not be emitted")
 	}
 
 	// Only use the primary app ID and KMS key for the webhook transport.

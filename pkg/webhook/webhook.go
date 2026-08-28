@@ -70,6 +70,13 @@ type PolicyEvent struct {
 	Pusher         string       `json:"pusher"`
 	Forced         bool         `json:"forced"`
 	Change         PolicyChange `json:"change"`
+	// ChangeIndex and ChangeCount locate this event within its push. Delivery
+	// is per-event and best-effort, so a push can land partially; a consumer
+	// that groups by Commit can compare the rows it holds against ChangeCount
+	// to detect the gap. They also restore the grouping that emitting one
+	// event per policy otherwise loses, e.g. spotting a bulk policy rewrite.
+	ChangeIndex int `json:"change_index"`
+	ChangeCount int `json:"change_count"`
 	// Valid reports whether THIS policy parsed at Commit, and is nil when the
 	// policy was never read: deletions (the path no longer exists at Commit),
 	// a validation pass aborted by GitHub rate limiting, or a push that failed
@@ -89,12 +96,21 @@ const (
 	maxRetry   = 3
 )
 
+// OrgTrustedIssuersPolicyName is the Policy value used for the organization
+// trusted-issuer allowlist, which is not a named trust policy and so has no
+// name of its own. A sentinel keeps every event's subject well-formed rather
+// than leaving a trailing separator, and stays distinguishable from a real
+// policy because "." cannot appear in a *.sts.yaml basename stem here.
+const OrgTrustedIssuersPolicyName = ".trusted-token-issuers"
+
+// policyName extracts the policy identity from a validated path:
+// ".github/chainguard/foo.sts.yaml" -> "foo".
 func policyName(path string) string {
 	base := filepath.Base(path)
 	if strings.HasSuffix(base, ".sts.yaml") {
 		return strings.TrimSuffix(base, ".sts.yaml")
 	}
-	return ""
+	return OrgTrustedIssuersPolicyName
 }
 
 func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEvent) []PolicyChange {
@@ -574,7 +590,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEvent, owner, repo, sha string, installationID int64, changes []PolicyChange, validation map[string]error, pushErr error) {
 	log := clog.FromContext(ctx)
 
-	for _, change := range changes {
+	for i, change := range changes {
 		pe := PolicyEvent{
 			Org:            owner,
 			Repo:           repo,
@@ -587,6 +603,8 @@ func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEven
 			Pusher:         event.GetPusher().GetName(),
 			Forced:         event.GetForced(),
 			Change:         change,
+			ChangeIndex:    i,
+			ChangeCount:    len(changes),
 			Time:           time.Now(),
 		}
 		if verr, ok := validation[change.Path]; ok {
