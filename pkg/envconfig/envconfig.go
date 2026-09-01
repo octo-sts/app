@@ -41,6 +41,8 @@ type EnvConfig struct {
 	StickyStoreFirestoreProject    string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_PROJECT" required:"false"`
 	StickyStoreFirestoreCollection string        `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION" required:"false" default:"sticky-routes"`
 	StickyStoreFirestoreTTL        time.Duration `envconfig:"OCTOSTS_STICKY_STORE_FIRESTORE_TTL" required:"false" default:"1h"`
+	StickyStoreDynamodbTable       string        `envconfig:"OCTOSTS_STICKY_STORE_DYNAMODB_TABLE" required:"false"`
+	StickyStoreDynamodbTTL         time.Duration `envconfig:"OCTOSTS_STICKY_STORE_DYNAMODB_TTL" required:"false" default:"1h"`
 
 	// GitHubBaseURL overrides the GitHub API base URL for GitHub Enterprise
 	// Server deployments (e.g. "https://github.example.com/api/v3").
@@ -141,11 +143,18 @@ func BaseConfig() (*EnvConfig, error) {
 		return nil, fmt.Errorf("OCTOSTS_QUOTA_STALE (%s) must be positive", cfg.QuotaStaleAfter)
 	}
 
-	if cfg.StickyStore != "" && cfg.StickyStore != "firestore" && cfg.StickyStore != "memory" {
-		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE %q is not supported (valid: memory, firestore)", cfg.StickyStore)
-	}
-	if cfg.StickyStore == "firestore" && cfg.StickyStoreFirestoreTTL <= 0 {
-		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_FIRESTORE_TTL (%s) must be positive", cfg.StickyStoreFirestoreTTL)
+	switch cfg.StickyStore {
+	case "", "memory":
+	case "firestore":
+		if cfg.StickyStoreFirestoreTTL <= 0 {
+			return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_FIRESTORE_TTL (%s) must be positive", cfg.StickyStoreFirestoreTTL)
+		}
+	case "dynamodb":
+		if cfg.StickyStoreDynamodbTTL <= 0 {
+			return nil, fmt.Errorf("OCTOSTS_STICKY_STORE_DYNAMODB_TTL (%s) must be positive", cfg.StickyStoreDynamodbTTL)
+		}
+	default:
+		return nil, fmt.Errorf("OCTOSTS_STICKY_STORE %q is not supported (valid: memory, firestore, dynamodb)", cfg.StickyStore)
 	}
 
 	if cfg.GitHubBaseURL != "" {
