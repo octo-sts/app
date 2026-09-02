@@ -18,6 +18,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/octo-sts/app/pkg/maxsize"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
+	"golang.org/x/sync/singleflight"
 )
 
 // MaximumResponseSize is the maximum size of allowed responses from
@@ -30,6 +31,11 @@ const MaximumResponseSize = 100 * 1024 // 100KiB
 var (
 	// providers is an LRU cache of recently used providers.
 	providers, _ = lru.New2Q[string, VerifierProvider](100)
+
+	// discoveryFlight collapses concurrent Get calls for the same issuer
+	// into a single in-flight discovery, so N callers naming a slow or
+	// stalled issuer pay for one discovery instead of N.
+	discoveryFlight singleflight.Group
 )
 
 type VerifierProvider interface {
@@ -55,11 +61,14 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		},
 	})
 
-	// Verify the token before we trust anything about it.
-	provider, err = newProviderWithRetry(ctx, issuer)
+	// Concurrent Get calls for the same issuer collapse into one discovery.
+	v, err, _ := discoveryFlight.Do(issuer, func() (any, error) {
+		return newProviderWithRetry(ctx, issuer)
+	})
 	if err != nil {
 		return nil, fmt.Errorf("constructing %q provider: %w", issuer, err)
 	}
+	provider = v.(VerifierProvider)
 
 	// Once it is built, memoize the provider so that we hit the fast
 	// path above on subsequent requests for verification.

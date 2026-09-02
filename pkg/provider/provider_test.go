@@ -8,12 +8,51 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// A small delay widens the race window so concurrent Get calls are
+		// likely to overlap before the first completes.
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	const callers = 20
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := Get(context.Background(), server.URL)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: unexpected error: %v", i, err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected discovery to be single-flighted to 1 request, got %d", got)
+	}
+}
 
 func TestNewProviderWithRetry_Success(t *testing.T) {
 	// Create a test server that responds successfully
