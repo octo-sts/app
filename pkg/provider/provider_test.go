@@ -54,6 +54,97 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 	}
 }
 
+func TestGet_FollowerContextIsNotAffectedByLeaderCancellation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	// Leader has a short deadline that will expire while the server is
+	// deliberately held open. Follower has no deadline at all.
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	followerCtx := context.Background()
+
+	leaderDone := make(chan error, 1)
+	followerDone := make(chan error, 1)
+
+	go func() {
+		_, err := Get(leaderCtx, server.URL)
+		leaderDone <- err
+	}()
+	<-started // leader is deterministically in-flight before follower joins
+	go func() {
+		_, err := Get(followerCtx, server.URL)
+		followerDone <- err
+	}()
+
+	leaderErr := <-leaderDone
+	if !errors.Is(leaderErr, context.DeadlineExceeded) {
+		t.Fatalf("expected leader to fail with its own deadline exceeded, got: %v", leaderErr)
+	}
+
+	// Let the shared discovery complete for the follower's benefit.
+	close(release)
+	followerErr := <-followerDone
+
+	if followerErr != nil {
+		t.Fatalf("follower with no deadline of its own must not be affected by the leader's unrelated cancellation, got error: %v", followerErr)
+	}
+}
+
+func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	// Leader has no deadline, so the shared discovery keeps running past
+	// the follower's own short deadline below.
+	leaderCtx := context.Background()
+	followerCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		_, _ = Get(leaderCtx, server.URL)
+	}()
+	<-started // leader is deterministically in-flight before follower joins
+
+	start := time.Now()
+	_, err := Get(followerCtx, server.URL)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected follower to respect its own deadline, got: %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("follower should have returned promptly at its own ~30ms deadline, took %v", elapsed)
+	}
+}
+
 func TestNewProviderWithRetry_Success(t *testing.T) {
 	// Create a test server that responds successfully
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
