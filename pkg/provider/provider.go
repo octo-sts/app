@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -33,17 +32,22 @@ const MaximumResponseSize = 100 * 1024 // 100KiB
 // recovering issuer is not punished for long.
 var negativeCacheTTL = 5 * time.Second
 
+// negativeCacheCapacity bounds the number of distinct failing issuers
+// remembered at once, matching the providers cache below. issuer is
+// attacker-controlled (it comes from an unverified bearer token), so the
+// cache must be bounded rather than a plain unbounded map -- otherwise an
+// attacker supplying arbitrarily many distinct failing issuer strings
+// causes unbounded memory growth.
+const negativeCacheCapacity = 100
+
 var (
 	// providers is an LRU cache of recently used providers.
 	providers, _ = lru.New2Q[string, VerifierProvider](100)
 
 	// negativeCache remembers issuers whose discovery recently failed, so a
 	// stalling or failing issuer is not re-probed on every request during
-	// the failure window. The issuer comes from an unverified bearer token,
-	// so without this an attacker-chosen bad issuer can force full discovery
-	// on every single request naming it.
-	negativeCache   = map[string]negativeCacheEntry{}
-	negativeCacheMu sync.Mutex
+	// the failure window.
+	negativeCache, _ = lru.New2Q[string, negativeCacheEntry](negativeCacheCapacity)
 )
 
 type negativeCacheEntry struct {
@@ -97,10 +101,7 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 // getNegativeCache returns the cached error for issuer, if discovery failed
 // for it within the last negativeCacheTTL. An expired entry is not returned.
 func getNegativeCache(issuer string) (error, bool) {
-	negativeCacheMu.Lock()
-	defer negativeCacheMu.Unlock()
-
-	entry, ok := negativeCache[issuer]
+	entry, ok := negativeCache.Get(issuer)
 	if !ok || time.Now().After(entry.expiresAt) {
 		return nil, false
 	}
@@ -110,13 +111,10 @@ func getNegativeCache(issuer string) (error, bool) {
 // setNegativeCache remembers that discovery failed for issuer, for up to
 // negativeCacheTTL.
 func setNegativeCache(issuer string, err error) {
-	negativeCacheMu.Lock()
-	defer negativeCacheMu.Unlock()
-
-	negativeCache[issuer] = negativeCacheEntry{
+	negativeCache.Add(issuer, negativeCacheEntry{
 		err:       err,
 		expiresAt: time.Now().Add(negativeCacheTTL),
-	}
+	})
 }
 
 // newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic

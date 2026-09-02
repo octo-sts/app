@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -79,6 +80,31 @@ func TestGet_NegativeCacheExpiresAndRetriesRecoveredIssuer(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
 		t.Fatalf("expected negative-cache expiry to trigger a second discovery attempt, got %d", got)
+	}
+}
+
+func TestGet_NegativeCacheIsBoundedAgainstManyDistinctFailingIssuers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	// issuer is attacker-controlled (it comes from an unverified bearer
+	// token's issuer claim), so an attacker can supply arbitrarily many
+	// distinct failing issuer strings. The negative cache must not grow
+	// without bound in response.
+	const attackerIssuers = 500
+	for i := 0; i < attackerIssuers; i++ {
+		issuer := fmt.Sprintf("%s/evil-issuer-%d", server.URL, i)
+		if _, err := Get(ctx, issuer); err == nil {
+			t.Fatalf("expected issuer %d to fail", i)
+		}
+	}
+
+	if got := negativeCache.Len(); got > negativeCacheCapacity {
+		t.Fatalf("expected negative cache to stay bounded at %d entries, got %d", negativeCacheCapacity, got)
 	}
 }
 
