@@ -43,6 +43,12 @@ type TrustPolicy struct {
 	// See https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
 
+	// App pins exchanges to one configured app (name or numeric app ID).
+	App string `json:"app,omitempty"`
+	// App name regex pattern; exchanges route among matching apps.
+	AppPattern string         `json:"app_pattern,omitempty"`
+	appPattern *regexp.Regexp `json:"-"`
+
 	isCompiled bool `json:"-"`
 }
 
@@ -110,6 +116,22 @@ func (tp *TrustPolicy) Compile() error {
 			return fmt.Errorf("error compiling claim_pattern[%q]: %w", k, err)
 		}
 		tp.claimPattern[k] = r
+	}
+
+	// Check that we got oneof App[Pattern] or none.
+	switch {
+	case tp.App != "" && tp.AppPattern != "":
+		return errors.New("trust policy: only one of app or app_pattern can be set, got both")
+	case tp.AppPattern != "":
+		// Raw compile first: the (?:) wrapping legalizes garbage like ")(".
+		if _, err := regexp.Compile(tp.AppPattern); err != nil {
+			return err
+		}
+		r, err := regexp.Compile("^(?:" + tp.AppPattern + ")$")
+		if err != nil {
+			return err
+		}
+		tp.appPattern = r
 	}
 
 	// Mark the trust policy as compiled.
