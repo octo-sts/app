@@ -15,8 +15,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -43,6 +45,9 @@ import (
 
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
+	"github.com/octo-sts/app/pkg/routekey"
+	"github.com/octo-sts/app/pkg/stickystore"
+	"github.com/octo-sts/app/pkg/stickystore/memory"
 )
 
 type fakeInstallMgr struct {
@@ -1224,4 +1229,350 @@ func TestExtractUserAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func poolOf(m ghinstall.Manager) *ghinstall.OrgPool {
+	return &ghinstall.OrgPool{M: m, AppCount: 3}
+}
+
+func TestGetExchangeInstallAppPin(t *testing.T) {
+	ctx := context.Background()
+	pool := poolOf(&enumMgr{installs: []ghinstall.Installation{
+		{ID: 11, AppID: 101},
+		{ID: 12, AppID: 102},
+		{ID: 21, AppID: 201},
+	}})
+	appNames := map[string]int64{"ci-a": 101, "ci-b": 102, "deploy": 201}
+	appIDs := map[int64]bool{101: true, 102: true, 201: true}
+	checksWrite := github.InstallationPermissions{Checks: github.Ptr("write")}
+	stickyKey := routekey.Key("org/repo", "id", "subj")
+
+	compile := func(t *testing.T, tp *TrustPolicy) *TrustPolicy {
+		t.Helper()
+		tp.Issuer = "https://example.com"
+		tp.Subject = "subject"
+		if err := tp.Compile(); err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		return tp
+	}
+	exchange := func(t *testing.T, s *sts, pool *ghinstall.OrgPool, tp *TrustPolicy) (int64, error) {
+		t.Helper()
+		_, id, err := s.getExchangeInstall(ctx, pool, "org", "org/repo", "id", "subj", tp, nil, 999)
+		return id, err
+	}
+	seedSticky := func(t *testing.T, id int64) stickystore.Store {
+		t.Helper()
+		store := memory.New()
+		if err := store.Put(ctx, stickyKey, id, "org/repo", "id", "subj"); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	t.Run("no pin returns read installation", func(t *testing.T) {
+		id, err := exchange(t, &sts{}, pool, compile(t, &TrustPolicy{}))
+		if err != nil || id != 999 {
+			t.Fatalf("got (%d, %v), want (999, nil)", id, err)
+		}
+	})
+
+	t.Run("no pin checks:write uses sticky", func(t *testing.T) {
+		s := &sts{sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{Permissions: checksWrite})
+		first, err := exchange(t, s, pool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := exchange(t, s, pool, tp)
+		if err != nil || again != first {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, first)
+		}
+	})
+
+	t.Run("exact app pin", func(t *testing.T) {
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "deploy"}))
+		if err != nil || id != 21 {
+			t.Fatalf("got (%d, %v), want (21, nil)", id, err)
+		}
+	})
+
+	t.Run("numeric app pin", func(t *testing.T) {
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "102"}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want (12, nil)", id, err)
+		}
+	})
+
+	t.Run("unconfigured numeric app pin fails without enumeration", func(t *testing.T) {
+		mgr := &enumMgr{}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		_, err := exchange(t, s, poolOf(mgr), compile(t, &TrustPolicy{App: "999"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+		if got := mgr.freshCalls.Load(); got != 0 {
+			t.Errorf("GetAllFresh called %d times, want 0 (rejected before enumeration)", got)
+		}
+	})
+
+	t.Run("concurrent pin misses share one confirmation walk", func(t *testing.T) {
+		pinMisses.Purge()
+		gate := make(chan struct{})
+		mgr := &enumMgr{freshGate: gate}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		const n = 8
+		var wg sync.WaitGroup
+		errs := make([]error, n)
+		for i := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _, errs[i] = s.getExchangeInstall(ctx, poolOf(mgr), "flightorg", "flightorg/repo", "id", "subj", tp, nil, 999)
+			}()
+		}
+		// Generous settle time: a goroutine reaching the singleflight after
+		// the gated leader completes would start a second walk and flake the
+		// ==1 assertion.
+		time.Sleep(300 * time.Millisecond)
+		close(gate)
+		wg.Wait()
+		for i, err := range errs {
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Errorf("goroutine %d: got %v, want FailedPrecondition", i, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (coalesced)", got)
+		}
+	})
+
+	t.Run("cancelled caller still records the detached confirmation", func(t *testing.T) {
+		pinMisses.Purge()
+		gate := make(chan struct{})
+		mgr := &enumMgr{freshGate: gate}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, _, err := s.getExchangeInstall(cctx, poolOf(mgr), "detachorg", "detachorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.Canceled {
+			t.Fatalf("got %v, want Canceled", err)
+		}
+
+		missKey := pinMissKey("detachorg", map[int64]bool{201: true})
+		if _, confirmed := pinMisses.Get(missKey); confirmed {
+			t.Fatal("miss confirmed before the walk completed")
+		}
+
+		close(gate)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, confirmed := pinMisses.Get(missKey); confirmed {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("detached confirmation never recorded")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		if _, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "detachorg", "detachorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition from the recorded confirmation", err)
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1", got)
+		}
+	})
+
+	t.Run("unknown app", func(t *testing.T) {
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "ghost"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("pinned app not installed", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: map[string]int64{"ghost": 301}, IDs: map[int64]bool{301: true}}}
+		_, err := exchange(t, s, pool, compile(t, &TrustPolicy{App: "ghost"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("pattern spreads deterministically", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
+		first, err := exchange(t, s, pool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != 11 && first != 12 {
+			t.Fatalf("got %d, want a ci install", first)
+		}
+		for range 5 {
+			again, err := exchange(t, s, pool, tp)
+			if err != nil || again != first {
+				t.Fatalf("got (%d, %v), want stable %d", again, err, first)
+			}
+		}
+	})
+
+	t.Run("pattern alternation stays anchored", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: map[string]int64{"ci": 1, "deploy": 2, "ci-privileged": 3}}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci|deploy"})
+		eligible, err := s.eligibleApps(tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[int64]bool{1: true, 2: true}
+		if !maps.Equal(eligible, want) {
+			t.Errorf("eligibleApps() = %v, want %v", eligible, want)
+		}
+	})
+
+	t.Run("pattern matches nothing", func(t *testing.T) {
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{AppPattern: "nope-.*"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("checks:write sticky honored within pin set", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		first, err := exchange(t, s, pool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := exchange(t, s, pool, tp)
+		if err != nil || again != first {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, first)
+		}
+	})
+
+	t.Run("checks:write sticky outside pin set reassigns", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, pool, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != 11 && id != 12 {
+			t.Fatalf("got %d, want reassignment within ci apps", id)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != id {
+			t.Fatalf("sticky = (%d, %t), want (%d, true)", cached, ok, id)
+		}
+	})
+
+	t.Run("negative-cached pin recovered by fresh enumeration", func(t *testing.T) {
+		hidden := poolOf(&enumMgr{freshInstalls: []ghinstall.Installation{{ID: 21, AppID: 201}}})
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, hidden, compile(t, &TrustPolicy{App: "deploy"}))
+		if err != nil || id != 21 {
+			t.Fatalf("got (%d, %v), want (21, nil)", id, err)
+		}
+	})
+
+	t.Run("negative-cached sticky recovered by fresh enumeration", func(t *testing.T) {
+		store := seedSticky(t, 12)
+		hidden := poolOf(&enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want sticky (12, nil)", id, err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 12 {
+			t.Fatalf("sticky = (%d, %t), want preserved (12, true)", cached, ok)
+		}
+	})
+
+	t.Run("confirmed pin miss throttles fresh enumeration", func(t *testing.T) {
+		pinMisses.Purge()
+		mgr := &enumMgr{}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		for i := range 3 {
+			_, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "missorg", "missorg/repo", "id", "subj", tp, nil, 999)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("call %d: got %v, want FailedPrecondition", i, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (confirmed miss cached)", got)
+		}
+	})
+
+	t.Run("sticky proven ineligible reassigns despite partial enumeration", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		// Install 21 is enumerated (proving it ineligible for ci-.*), and an
+		// unrelated manager fails.
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
+			err:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 11 {
+			t.Fatalf("got (%d, %v), want reassignment (11, nil)", id, err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 11 {
+			t.Fatalf("sticky = (%d, %t), want (11, true)", cached, ok)
+		}
+	})
+
+	t.Run("fresh enumeration proving ineligibility outweighs its error", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		hidden := poolOf(&enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
+			freshErr:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 11 {
+			t.Fatalf("got (%d, %v), want reassignment (11, nil)", id, err)
+		}
+	})
+
+	t.Run("partial enumeration preserves sticky install", func(t *testing.T) {
+		store := seedSticky(t, 12)
+		// Install 12 holds the sticky mapping but is absent from the partial result.
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		if _, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})); err == nil {
+			t.Fatal("want enumeration error, got nil")
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 12 {
+			t.Fatalf("sticky = (%d, %t), want preserved (12, true)", cached, ok)
+		}
+	})
+
+	t.Run("partial enumeration still honors present sticky", func(t *testing.T) {
+		store := seedSticky(t, 11)
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 11 {
+			t.Fatalf("got (%d, %v), want (11, nil)", id, err)
+		}
+	})
+
+	t.Run("enumeration error with no candidates propagates", func(t *testing.T) {
+		errPool := poolOf(&enumMgr{err: errors.New("boom")})
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, errPool, compile(t, &TrustPolicy{App: "deploy"}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want raw enumeration error", err)
+		}
+	})
 }
