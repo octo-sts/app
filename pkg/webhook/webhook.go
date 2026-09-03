@@ -58,18 +58,52 @@ type PolicyChange struct {
 	Action PolicyAction `json:"action"`
 }
 
+// DetectionMethod records how a push's policy changes were derived. An audit
+// consumer needs this to know how much weight a record carries: a snapshot is
+// an authoritative before/after comparison of what is live, while the commit
+// and compare paths mirror the diffs GitHub volunteers and can therefore be
+// incomplete if history is rewritten under them.
+type DetectionMethod string
+
+const (
+	// DetectionCommits derived changes from the push payload's commit list.
+	DetectionCommits DetectionMethod = "commits"
+	// DetectionCompare derived changes from the Compare API, used when the
+	// payload's commit list is truncated.
+	DetectionCompare DetectionMethod = "compare"
+	// DetectionSnapshot derived changes by diffing the policy directory at the
+	// pushed SHA against the ref's previous SHA. Used for forced pushes, where
+	// the commit list does not describe the net effect on the branch.
+	DetectionSnapshot DetectionMethod = "snapshot"
+	// DetectionDegraded means change detection could not be completed and the
+	// accompanying changes, if any, may be incomplete. Always accompanied by a
+	// push-level event with no change attached, so the gap is visible in the
+	// stream rather than silently absent from it.
+	DetectionDegraded DetectionMethod = "degraded"
+)
+
 type PolicyEvent struct {
-	Org            string       `json:"org"`
-	Repo           string       `json:"repo"`
-	Ref            string       `json:"ref"`
-	Commit         string       `json:"commit"`
-	Before         string       `json:"before"`
-	InstallationID int64        `json:"installation_id"`
-	Actor          string       `json:"actor"`
-	ActorID        int64        `json:"actor_id"`
-	Pusher         string       `json:"pusher"`
-	Forced         bool         `json:"forced"`
-	Change         PolicyChange `json:"change"`
+	Org            string `json:"org"`
+	Repo           string `json:"repo"`
+	Ref            string `json:"ref"`
+	Commit         string `json:"commit"`
+	Before         string `json:"before"`
+	InstallationID int64  `json:"installation_id"`
+	Actor          string `json:"actor"`
+	ActorID        int64  `json:"actor_id"`
+	Pusher         string `json:"pusher"`
+	Forced         bool   `json:"forced"`
+	// Change is the policy this event describes, and is absent on a push-level
+	// event — currently only the marker emitted when Detection is
+	// DetectionDegraded. ChangeIndex and ChangeCount are meaningful only when
+	// Change is present.
+	Change *PolicyChange `json:"change,omitempty"`
+	// Detection records how Change was derived, and DetectionError explains a
+	// DetectionDegraded result. A consumer treating this stream as an audit
+	// trail should surface anything that is not DetectionSnapshot or
+	// DetectionCommits as reduced assurance.
+	Detection      DetectionMethod `json:"detection"`
+	DetectionError string          `json:"detection_error,omitempty"`
 	// ChangeIndex and ChangeCount locate this event within its push. Delivery
 	// is per-event and best-effort, so a push can land partially; a consumer
 	// that groups by Commit can compare the rows it holds against ChangeCount
@@ -90,11 +124,6 @@ type PolicyEvent struct {
 	PushError string    `json:"push_error,omitempty"`
 	Time      time.Time `json:"time"`
 }
-
-const (
-	retryDelay = 10 * time.Millisecond
-	maxRetry   = 3
-)
 
 // OrgTrustedIssuersPolicyName is the Policy value used for the organization
 // trusted-issuer allowlist, which is not a named trust policy and so has no
@@ -190,6 +219,87 @@ func (e *Validator) policyChangesFromCompare(repo string, files []*github.Commit
 	return changes
 }
 
+// policyDir is the directory holding trust policies and the org trusted-issuer
+// allowlist. Both live here, so one listing covers every validated path.
+const policyDir = ".github/chainguard"
+
+// policySnapshot lists every trust policy visible at ref, mapped to its blob
+// SHA so that two snapshots can be compared by content.
+//
+// A ref that cannot be resolved is an error rather than an empty snapshot: the
+// GitHub contents API answers 404 both for "this ref has no policy directory"
+// and for "this ref no longer exists", and conflating the two would report a
+// repository's entire policy set as deleted.
+func (e *Validator) policySnapshot(ctx context.Context, client *github.Client, owner, repo, ref string) (map[string]string, error) {
+	// Resolve the ref first so the 404 below can only mean a missing directory.
+	if _, _, err := client.Repositories.GetCommit(ctx, owner, repo, ref, &github.ListOptions{PerPage: 1}); err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", ref, err)
+	}
+
+	out := make(map[string]string)
+	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: ref})
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			// The ref resolved, so this is genuinely a repository with no
+			// policy directory: an empty snapshot, not an unknown one.
+			return out, nil
+		}
+		return nil, fmt.Errorf("listing %s at %s: %w", policyDir, ref, err)
+	}
+	for _, f := range dir {
+		if f.GetType() != "file" || !isValidatedPath(repo, f.GetPath(), e.policyRepo()) {
+			continue
+		}
+		out[f.GetPath()] = f.GetSHA()
+	}
+	return out, nil
+}
+
+// policyChangesFromSnapshot derives policy changes by comparing the policies
+// live at before with those live at after.
+//
+// This is the only detection path that survives a history rewrite. The commit
+// and compare paths both describe the commits a push carries, which for a
+// forced push does not describe its effect on the branch: a rewind that
+// restores a deleted policy carries no commits at all and three-dot-compares
+// as empty, so those paths would report nothing while the policy became live
+// again. Comparing state instead of commits reports the restoration.
+func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *github.Client, owner, repo, before, after string) ([]PolicyChange, error) {
+	// A push that creates the ref has no prior state to compare against.
+	beforeSnap := map[string]string{}
+	if before != "" && before != zeroHash {
+		var err error
+		if beforeSnap, err = e.policySnapshot(ctx, client, owner, repo, before); err != nil {
+			return nil, err
+		}
+	}
+	afterSnap, err := e.policySnapshot(ctx, client, owner, repo, after)
+	if err != nil {
+		return nil, err
+	}
+
+	var changes []PolicyChange //nolint:prealloc // most pushes change no policies
+	add := func(path string, action PolicyAction) {
+		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: action})
+	}
+	for path, sha := range afterSnap {
+		switch prev, existed := beforeSnap[path]; {
+		case !existed:
+			add(path, PolicyCreated)
+		case prev != sha:
+			add(path, PolicyUpdated)
+		}
+	}
+	for path := range beforeSnap {
+		if _, ok := afterSnap[path]; !ok {
+			add(path, PolicyDeleted)
+		}
+	}
+
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes, nil
+}
+
 // pathsToValidate returns the paths that still exist at the head SHA, and so
 // can be read and parsed. Deletions are excluded: validation reads content at
 // the head SHA, where a deleted path 404s, which would turn every policy
@@ -218,7 +328,8 @@ type Validator struct {
 	// Defaults to ".github" when empty.
 	OrgPolicyRepo string
 
-	CEClient cloudevents.Client
+	// Emitter publishes trust policy audit events. Nil disables auditing.
+	Emitter *PolicyEmitter
 
 	// clients caches one client per installation ID so the transport's token is
 	// reused (~1h) instead of re-minted per event. Keyed on installation ID
@@ -544,14 +655,41 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// the payload directly to avoid a Compare API call. When truncated, the
 	// payload's commit list silently omits changes, so a large push would
 	// under-report both the files to validate and the policies to audit.
+	//
+	// A forced push is handled ahead of both: it can rewrite the branch to a
+	// state the commits it carries do not describe, so neither payload nor
+	// compare reports its net effect.
+	isDefaultBranch := event.GetRef() == "refs/heads/"+event.GetRepo().GetDefaultBranch()
+
 	var changes []PolicyChange
-	if len(event.Commits) < 20 {
+	detection := DetectionCommits
+	var detectionErr string
+
+	switch {
+	case event.GetForced() && isDefaultBranch:
+		snapshot, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
+		if serr != nil {
+			// Most often the pre-push SHA is no longer reachable, which GitHub
+			// is free to garbage collect after a rewind. Fall back to the
+			// commit list so validation still runs, and record that the audit
+			// view of this push is incomplete.
+			log.Warnf("policy snapshot failed, falling back to commit list: %v", serr)
+			detection, detectionErr = DetectionDegraded, serr.Error()
+			changes = e.policyChangesFromPushEvent(repo, event)
+			break
+		}
+		detection = DetectionSnapshot
+		changes = snapshot
+
+	case len(event.Commits) < 20:
 		changes = e.policyChangesFromPushEvent(repo, event)
-	} else {
+
+	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
 			return nil, err
 		}
+		detection = DetectionCompare
 		changes = e.policyChangesFromCompare(repo, resp.Files)
 	}
 
@@ -562,10 +700,14 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// validation is populated by handleSHA below; the deferred closure reads it
 	// after the fact, so a push that returns early leaves it nil and every
 	// policy is reported with an unknown verdict rather than a clean one.
+	//
+	// A degraded push is emitted even with no changes to show: the absence of
+	// events is exactly what a suppressed audit looks like, so the marker has
+	// to be published for the gap to be visible.
 	var validation map[string]error
-	if e.CEClient != nil && len(changes) > 0 && event.GetRef() == "refs/heads/"+event.GetRepo().GetDefaultBranch() {
+	if e.Emitter != nil && isDefaultBranch && (len(changes) > 0 || detection == DetectionDegraded) {
 		defer func() {
-			e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, changes, validation, err)
+			e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, changes, detection, detectionErr, validation, err)
 		}()
 	}
 
@@ -581,58 +723,76 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 }
 
 // emitPolicyEvents publishes one audit event per trust policy touched by a push
-// to the default branch.
+// to the default branch, preceded by a push-level marker when change detection
+// degraded.
 //
 // validation carries the per-file verdicts from handleSHA and may be nil or
 // partial: a policy missing from it was never read, and is reported with a nil
 // Valid so consumers can tell "unknown" from "valid". pushErr is a failure that
 // stopped validation from running at all.
-func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEvent, owner, repo, sha string, installationID int64, changes []PolicyChange, validation map[string]error, pushErr error) {
-	log := clog.FromContext(ctx)
+func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEvent, owner, repo, sha string, installationID int64, changes []PolicyChange, detection DetectionMethod, detectionErr string, validation map[string]error, pushErr error) {
+	base := PolicyEvent{
+		Org:            owner,
+		Repo:           repo,
+		Ref:            event.GetRef(),
+		Commit:         sha,
+		Before:         event.GetBefore(),
+		InstallationID: installationID,
+		Actor:          event.GetSender().GetLogin(),
+		ActorID:        event.GetSender().GetID(),
+		Pusher:         event.GetPusher().GetName(),
+		Forced:         event.GetForced(),
+		Detection:      detection,
+		DetectionError: detectionErr,
+		ChangeCount:    len(changes),
+	}
+	if pushErr != nil {
+		base.PushError = pushErr.Error()
+	}
+
+	// The marker carries no change: it says only that this push's change list
+	// cannot be trusted to be complete, which is a statement about the push.
+	if detection == DetectionDegraded {
+		marker := base
+		marker.Time = time.Now()
+		e.sendPolicyEvent(ctx, event, owner, repo, sha, installationID, marker)
+	}
 
 	for i, change := range changes {
-		pe := PolicyEvent{
-			Org:            owner,
-			Repo:           repo,
-			Ref:            event.GetRef(),
-			Commit:         sha,
-			Before:         event.GetBefore(),
-			InstallationID: installationID,
-			Actor:          event.GetSender().GetLogin(),
-			ActorID:        event.GetSender().GetID(),
-			Pusher:         event.GetPusher().GetName(),
-			Forced:         event.GetForced(),
-			Change:         change,
-			ChangeIndex:    i,
-			ChangeCount:    len(changes),
-			Time:           time.Now(),
-		}
+		pe := base
+		pe.Change = &change
+		pe.ChangeIndex = i
+		pe.Time = time.Now()
 		if verr, ok := validation[change.Path]; ok {
 			pe.Valid = github.Ptr(verr == nil)
 			if verr != nil {
 				pe.Error = verr.Error()
 			}
 		}
-		if pushErr != nil {
-			pe.PushError = pushErr.Error()
-		}
-
-		ce := cloudevents.NewEvent()
-		ce.SetType("dev.octo-sts.policy")
-		ce.SetSource(fmt.Sprintf("https://github.com/%s/%s", owner, repo))
-		ce.SetSubject(event.GetRepo().GetFullName() + "/" + change.Policy)
-		ce.SetTime(pe.Time)
-		ce.SetExtension("githubinstallationid", strconv.FormatInt(installationID, 10))
-		ce.SetExtension("githubcommit", sha)
-		if err := ce.SetData(cloudevents.ApplicationJSON, pe); err != nil {
-			log.Errorf("failed to set cloudevents data: %v", err)
-			continue
-		}
-		rctx := cloudevents.ContextWithRetriesExponentialBackoff(context.WithoutCancel(ctx), retryDelay, maxRetry)
-		if res := e.CEClient.Send(rctx, ce); cloudevents.IsUndelivered(res) || cloudevents.IsNACK(res) {
-			log.Errorf("failed to deliver policy event: %v", res)
-		}
+		e.sendPolicyEvent(ctx, event, owner, repo, sha, installationID, pe)
 	}
+}
+
+// sendPolicyEvent wraps one PolicyEvent as a CloudEvent and hands it to the
+// emitter, which delivers it asynchronously.
+func (e *Validator) sendPolicyEvent(ctx context.Context, event *github.PushEvent, owner, repo, sha string, installationID int64, pe PolicyEvent) {
+	subject := event.GetRepo().GetFullName()
+	if pe.Change != nil {
+		subject += "/" + pe.Change.Policy
+	}
+
+	ce := cloudevents.NewEvent()
+	ce.SetType("dev.octo-sts.policy")
+	ce.SetSource(fmt.Sprintf("https://github.com/%s/%s", owner, repo))
+	ce.SetSubject(subject)
+	ce.SetTime(pe.Time)
+	ce.SetExtension("githubinstallationid", strconv.FormatInt(installationID, 10))
+	ce.SetExtension("githubcommit", sha)
+	if err := ce.SetData(cloudevents.ApplicationJSON, pe); err != nil {
+		clog.FromContext(ctx).Errorf("failed to set cloudevents data: %v", err)
+		return
+	}
+	e.Emitter.Enqueue(ctx, ce)
 }
 
 func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullRequestEvent) (*github.CheckRun, error) {

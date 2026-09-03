@@ -2510,6 +2510,19 @@ func (f *fakeCEClient) sent() []cloudevents.Event {
 	return slices.Clone(f.events)
 }
 
+// drainEvents shuts the emitter down and returns everything that reached ce.
+// Delivery is asynchronous, so assertions have to run against a settled queue;
+// draining rather than sleeping also exercises the shutdown path.
+func drainEvents(t *testing.T, p *PolicyEmitter, ce *fakeCEClient) []cloudevents.Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Shutdown(ctx); err != nil {
+		t.Fatalf("emitter did not drain: %v", err)
+	}
+	return ce.sent()
+}
+
 func TestPolicyChangesFromCompare(t *testing.T) {
 	v := &Validator{}
 	for _, tc := range []struct {
@@ -2660,11 +2673,12 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 	tr.BaseURL = gh.URL
 
 	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
 	secret := []byte("hunter2")
 	v := &Validator{
 		Transport:     tr,
 		WebhookSecret: [][]byte{secret},
-		CEClient:      ce,
+		Emitter:       emitter,
 	}
 	srv := httptest.NewServer(v)
 	defer srv.Close()
@@ -2707,7 +2721,7 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 		t.Fatalf("expected 200, got\n%s", string(out))
 	}
 
-	events := ce.sent()
+	events := drainEvents(t, emitter, ce)
 	if len(events) != 3 {
 		t.Fatalf("expected one event per policy change, got %d", len(events))
 	}
@@ -2733,6 +2747,9 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 		}
 		if pe.ChangeCount != 3 {
 			t.Errorf("got ChangeCount %d, want 3", pe.ChangeCount)
+		}
+		if pe.Detection != DetectionCommits {
+			t.Errorf("got detection %q, want %q", pe.Detection, DetectionCommits)
 		}
 		seenIndex[pe.ChangeIndex] = true
 		byPath[pe.Change.Path] = pe
@@ -2812,11 +2829,12 @@ func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
 	tr.BaseURL = gh.URL
 
 	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
 	secret := []byte("hunter2")
 	v := &Validator{
 		Transport:     tr,
 		WebhookSecret: [][]byte{secret},
-		CEClient:      ce,
+		Emitter:       emitter,
 	}
 	srv := httptest.NewServer(v)
 	defer srv.Close()
@@ -2854,7 +2872,7 @@ func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
 		t.Fatalf("expected 200, got\n%s", string(out))
 	}
 
-	if got := ce.sent(); len(got) != 0 {
+	if got := drainEvents(t, emitter, ce); len(got) != 0 {
 		t.Fatalf("expected no events for a non-default branch, got %d", len(got))
 	}
 }
@@ -2878,5 +2896,321 @@ func TestPolicyName(t *testing.T) {
 				t.Error("policy name must not be empty")
 			}
 		})
+	}
+}
+
+// policyTreeServer serves the two calls policySnapshot makes — a commit lookup
+// to prove the ref resolves, then a listing of the policy directory — from an
+// in-memory view of each ref. A ref absent from trees resolves but has no
+// policy directory; a ref listed in unresolvable 404s the commit lookup, which
+// is how a rewound-away SHA behaves once GitHub has collected it.
+func policyTreeServer(t *testing.T, trees map[string][]string, unresolvable ...string) *github.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		if slices.Contains(unresolvable, r.PathValue("ref")) {
+			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		paths, ok := trees[r.URL.Query().Get("ref")]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		entries := make([]map[string]string, 0, len(paths))
+		for _, p := range paths {
+			// "path:sha" so a test can hold a path steady while its content moves.
+			name, sha, _ := strings.Cut(p, ":")
+			entries = append(entries, map[string]string{
+				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
+			})
+		}
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			t.Error(err)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestPolicyChangesFromSnapshot(t *testing.T) {
+	const (
+		added   = ".github/chainguard/added.sts.yaml"
+		kept    = ".github/chainguard/kept.sts.yaml"
+		edited  = ".github/chainguard/edited.sts.yaml"
+		removed = ".github/chainguard/removed.sts.yaml"
+	)
+
+	for _, tc := range []struct {
+		name          string
+		before, after []string
+		beforeRef     string
+		unresolvable  []string
+		want          []PolicyChange
+		wantErr       bool
+	}{{
+		name:      "restores a policy deleted before the rewind",
+		beforeRef: "before",
+		before:    []string{},
+		after:     []string{added + ":sha1"},
+		want:      []PolicyChange{{Path: added, Policy: "added", Action: PolicyCreated}},
+	}, {
+		name:      "content change at a steady path is an update",
+		beforeRef: "before",
+		before:    []string{edited + ":old"},
+		after:     []string{edited + ":new"},
+		want:      []PolicyChange{{Path: edited, Policy: "edited", Action: PolicyUpdated}},
+	}, {
+		name:      "identical blobs report nothing",
+		beforeRef: "before",
+		before:    []string{kept + ":same"},
+		after:     []string{kept + ":same"},
+		want:      nil,
+	}, {
+		name:      "policy gone at after is a deletion",
+		beforeRef: "before",
+		before:    []string{removed + ":sha1"},
+		after:     []string{},
+		want:      []PolicyChange{{Path: removed, Policy: "removed", Action: PolicyDeleted}},
+	}, {
+		name:      "a created ref has no prior state",
+		beforeRef: zeroHash,
+		after:     []string{added + ":sha1"},
+		want:      []PolicyChange{{Path: added, Policy: "added", Action: PolicyCreated}},
+	}, {
+		// The whole point of resolving the ref first: without it a collected
+		// SHA would 404 and read as "no policies", turning every live policy
+		// into a spurious deletion.
+		name:         "an unreachable before is an error, not an empty tree",
+		beforeRef:    "before",
+		after:        []string{kept + ":sha1"},
+		unresolvable: []string{"before"},
+		wantErr:      true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			trees := map[string][]string{"after": tc.after}
+			if tc.before != nil {
+				trees["before"] = tc.before
+			}
+			client := policyTreeServer(t, trees, tc.unresolvable...)
+
+			v := &Validator{}
+			got, err := v.policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", tc.beforeRef, "after")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got changes %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("unexpected changes (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// forcedPushServer stands up the GitHub endpoints a forced push to the default
+// branch exercises: the token mint and policy file reads come from testdata,
+// while the policy directory listing is driven per-ref by trees.
+func forcedPushServer(t *testing.T, trees map[string][]string, unresolvable ...string) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		if slices.Contains(unresolvable, r.PathValue("ref")) {
+			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/"+policyDir, func(w http.ResponseWriter, r *http.Request) {
+		paths, ok := trees[r.URL.Query().Get("ref")]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		entries := make([]map[string]string, 0, len(paths))
+		for _, p := range paths {
+			name, sha, _ := strings.Cut(p, ":")
+			entries = append(entries, map[string]string{
+				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
+			})
+		}
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			t.Error(err)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// sendForcedPush posts a forced push of an empty commit list to the default
+// branch — the shape a pure rewind (git reset --hard <ancestor>; push -f) has.
+func sendForcedPush(t *testing.T, v *Validator, secret []byte) {
+	t.Helper()
+
+	srv := httptest.NewServer(v)
+	t.Cleanup(srv.Close)
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: github.Ptr("foo")},
+			Name:          github.Ptr("bar"),
+			FullName:      github.Ptr("foo/bar"),
+			DefaultBranch: github.Ptr("main"),
+		},
+		Ref:     github.Ptr("refs/heads/main"),
+		Before:  github.Ptr("before"),
+		After:   github.Ptr("after"),
+		Forced:  github.Ptr(true),
+		Sender:  &github.User{Login: github.Ptr("mallory"), ID: github.Ptr(int64(99))},
+		Commits: []*github.HeadCommit{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+}
+
+func forcedPushValidator(t *testing.T, gh *httptest.Server, ce *fakeCEClient) (*Validator, []byte, *PolicyEmitter) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	return &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}, secret, emitter
+}
+
+// TestForcedPushRewindEmitsRestoredPolicy covers the suppression primitive a
+// commit-derived audit trail has: deleting a policy is recorded, then a rewind
+// force-push makes it live again while carrying no commits at all. Detection
+// has to compare state, not commits, or the stream's last word on the policy
+// stays "deleted" while the policy is back in force.
+func TestForcedPushRewindEmitsRestoredPolicy(t *testing.T) {
+	const restored = ".github/chainguard/test.sts.yaml"
+
+	gh := forcedPushServer(t, map[string][]string{
+		"before": {},
+		"after":  {restored + ":sha1"},
+	})
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected the restored policy to be reported, got %d events", len(events))
+	}
+
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change == nil {
+		t.Fatal("expected a change to be attached")
+	}
+	if pe.Change.Path != restored || pe.Change.Action != PolicyCreated {
+		t.Errorf("got %s %q, want %s created", pe.Change.Action, pe.Change.Path, restored)
+	}
+	if pe.Detection != DetectionSnapshot {
+		t.Errorf("got detection %q, want %q", pe.Detection, DetectionSnapshot)
+	}
+	if !pe.Forced {
+		t.Error("expected the event to record that the push was forced")
+	}
+	// The restored policy is live, so its verdict has to be authoritative
+	// rather than the unknown a deletion would carry.
+	if pe.Valid == nil || !*pe.Valid {
+		t.Errorf("got Valid=%v, want true", pe.Valid)
+	}
+}
+
+// TestForcedPushDegradedEmitsMarker covers the case where the pre-push SHA has
+// been collected and the snapshot cannot be taken. Silence is what suppression
+// looks like, so the gap has to be published rather than merely logged.
+func TestForcedPushDegradedEmitsMarker(t *testing.T) {
+	gh := forcedPushServer(t, map[string][]string{
+		"after": {".github/chainguard/test.sts.yaml:sha1"},
+	}, "before")
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected a detection marker, got %d events", len(events))
+	}
+
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change != nil {
+		t.Errorf("marker should carry no change, got %+v", pe.Change)
+	}
+	if pe.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", pe.Detection, DetectionDegraded)
+	}
+	if pe.DetectionError == "" {
+		t.Error("expected the marker to explain why detection degraded")
+	}
+	// A marker with no policy attached still has to be attributable.
+	if want := "foo/bar"; events[0].Subject() != want {
+		t.Errorf("got subject %q, want %q", events[0].Subject(), want)
+	}
+	if pe.Actor != "mallory" {
+		t.Errorf("got actor %q, want mallory", pe.Actor)
 	}
 }
