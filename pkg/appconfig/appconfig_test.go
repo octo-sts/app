@@ -5,6 +5,7 @@ package appconfig
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -368,6 +369,29 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "duplicate app_name across orgs",
+			cfg: Config{Orgs: []OrgConfig{
+				{Name: "org1", Apps: []AppConfig{{AppID: 1, AppName: "ci", KMSKey: "k1"}}},
+				{Name: "org2", Apps: []AppConfig{{AppID: 2, AppName: "ci", KMSKey: "k2"}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "numeric app_name",
+			cfg: Config{Orgs: []OrgConfig{
+				{Name: "org", Apps: []AppConfig{{AppID: 1, AppName: "102", KMSKey: "k"}}},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "unique app_names",
+			cfg: Config{Orgs: []OrgConfig{
+				{Name: "org1", Apps: []AppConfig{{AppID: 1, AppName: "ci", KMSKey: "k1"}}},
+				{Name: "org2", Apps: []AppConfig{{AppID: 2, AppName: "deploy", KMSKey: "k2"}}},
+			}},
+			wantErr: false,
+		},
+		{
 			name: "no credential source",
 			cfg: Config{Orgs: []OrgConfig{
 				{Name: "org", Apps: []AppConfig{{AppID: 1}}},
@@ -413,5 +437,19 @@ func TestValidate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestAppNames(t *testing.T) {
+	cfg := Config{Orgs: []OrgConfig{
+		{Name: "org1", Apps: []AppConfig{
+			{AppID: 1, AppName: "ci", KMSKey: "k"},
+			{AppID: 2, KMSKey: "k"},
+		}},
+		{Name: "org2", Apps: []AppConfig{{AppID: 3, AppName: "deploy", KMSKey: "k"}}},
+	}}
+	want := map[string]int64{"ci": 1, "deploy": 3}
+	if got := cfg.AppNames(); !maps.Equal(got, want) {
+		t.Errorf("AppNames() = %v, want %v", got, want)
 	}
 }

@@ -10,27 +10,26 @@
           "enum": [
             "enforce",
             "audit"
-          ],
-          "description": "Mode selects enforcement behavior. \"enforce\" (the default) rejects\ntokens whose issuer is not permitted. \"audit\" permits them and records\nwhat would have been rejected, for staged rollout."
+          ]
         },
         "issuers": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "Issuers is the set of permitted issuer URLs, matched exactly."
+          "description": "Issuers is matched byte-exactly."
         },
         "issuer_patterns": {
           "items": {
             "type": "string"
           },
           "type": "array",
-          "description": "IssuerPatterns are regular expressions matched against the token\nissuer. Patterns are anchored and must match the entire URL."
+          "description": "IssuerPatterns are anchored regexps matching the entire issuer URL."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "OrgTrustedIssuers is an organization-wide allowlist of OIDC issuers, read from .github/chainguard/trusted-token-issuers.yaml in the organization's .github repository."
+      "description": "OrgTrustedIssuers is an org-wide allowlist of OIDC issuers read from OrgTrustedIssuersPath; when present, only issuers it permits may federate."
     }
   }
 }

@@ -42,3 +42,15 @@ func TestKeyIsNonEmpty(t *testing.T) {
 		t.Error("Key returned empty string")
 	}
 }
+
+func TestIndexStableAndInRange(t *testing.T) {
+	first := Index("org/repo", "bot", "sub:1", 3)
+	if first < 0 || first >= 3 {
+		t.Fatalf("Index() = %d, want within [0, 3)", first)
+	}
+	for range 5 {
+		if again := Index("org/repo", "bot", "sub:1", 3); again != first {
+			t.Errorf("same inputs produced different indexes: %d vs %d", again, first)
+		}
+	}
+}

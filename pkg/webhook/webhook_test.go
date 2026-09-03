@@ -69,6 +69,61 @@ func TestValidatePolicy(t *testing.T) {
 	}
 }
 
+// prefetchGitHub returns a client serving the prefetched testdata API tree.
+func prefetchGitHub(t *testing.T) *github.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Logf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	gh, err := github.NewClient(
+		github.WithHTTPClient(srv.Client()),
+		github.WithEnterpriseURLs(srv.URL, srv.URL),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gh
+}
+
+func TestValidatePolicyCompileFailure(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github")
+	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
+		t.Fatalf("validatePolicies = %v, want compile error about app/app_pattern", err)
+	}
+}
+
+func TestValidateOrgPolicyCompiles(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	if err := validatePolicies(ctx, gh, "foo", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github"); err != nil {
+		t.Fatalf("validatePolicies = %v, want nil (org policy with repositories compiles)", err)
+	}
+}
+
+func TestValidateOrgPolicyCompileFailure(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	err := validatePolicies(ctx, gh, "foo", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github")
+	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
+		t.Fatalf("validatePolicies = %v, want org-arm compile error about app/app_pattern", err)
+	}
+}
+
 func TestOrgFilter(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "should not be called", http.StatusUnauthorized)

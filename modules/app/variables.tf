@@ -48,12 +48,30 @@ variable "images" {
 }
 
 variable "github_apps" {
-  description = "The GitHub Apps, each with an app_id, key_version for KMS signing, and org_name for multi-org routing."
+  description = "The GitHub Apps, each with an app_id, key_version for KMS signing, org_name for multi-org routing, and an optional app_name referenced by trust policy app/app_pattern selectors."
   type = list(object({
     app_id      = number
     key_version = number
     org_name    = optional(string, "")
+    app_name    = optional(string, "")
   }))
+
+  validation {
+    # parseint mirrors the strconv.ParseInt check in appconfig.Validate;
+    # tonumber would diverge (it also accepts floats like "1.5").
+    condition     = alltrue([for app in var.github_apps : app.app_name == "" || !can(parseint(app.app_name, 10))])
+    error_message = "app_name must not be numeric: numeric trust policy app selectors are reserved for app IDs."
+  }
+
+  validation {
+    condition     = length([for app in var.github_apps : app.app_name if app.app_name != ""]) == length(distinct([for app in var.github_apps : app.app_name if app.app_name != ""]))
+    error_message = "app_name values must be unique across all apps."
+  }
+
+  validation {
+    condition     = !anytrue([for app in var.github_apps : app.app_name != ""]) || alltrue([for app in var.github_apps : app.org_name != ""])
+    error_message = "app_name is only served through the YAML config, which renders in multi-org mode: set org_name on every app (use \"*\" for a single fallback pool). In flat mode, trust policies can still pin by numeric app ID."
+  }
 }
 
 variable "notification_channels" {
