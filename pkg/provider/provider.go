@@ -27,10 +27,33 @@ import (
 //   - Chainguard: needs around 2KiB
 const MaximumResponseSize = 100 * 1024 // 100KiB
 
+// negativeCacheTTL bounds how long a failed discovery is remembered before
+// the issuer is probed again. It must stay short enough that a genuinely
+// recovering issuer is not punished for long.
+var negativeCacheTTL = 5 * time.Second
+
+// negativeCacheCapacity bounds the number of distinct failing issuers
+// remembered at once, matching the providers cache below. issuer is
+// attacker-controlled (it comes from an unverified bearer token), so the
+// cache must be bounded rather than a plain unbounded map -- otherwise an
+// attacker supplying arbitrarily many distinct failing issuer strings
+// causes unbounded memory growth.
+const negativeCacheCapacity = 100
+
 var (
 	// providers is an LRU cache of recently used providers.
 	providers, _ = lru.New2Q[string, VerifierProvider](100)
+
+	// negativeCache remembers issuers whose discovery recently failed, so a
+	// stalling or failing issuer is not re-probed on every request during
+	// the failure window.
+	negativeCache, _ = lru.New2Q[string, negativeCacheEntry](negativeCacheCapacity)
 )
+
+type negativeCacheEntry struct {
+	err       error
+	expiresAt time.Time
+}
 
 type VerifierProvider interface {
 	Verifier(config *oidc.Config) *oidc.IDTokenVerifier
@@ -42,6 +65,11 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	if v, ok := providers.Get(issuer); ok {
 		clog.InfoContext(ctx, "found provider in cache")
 		return v, nil
+	}
+
+	if err, ok := getNegativeCache(issuer); ok {
+		clog.InfoContext(ctx, "found issuer in negative cache", "error", err)
+		return nil, err
 	}
 
 	ctx = oidc.ClientContext(ctx, &http.Client{
@@ -58,7 +86,9 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	// Verify the token before we trust anything about it.
 	provider, err = newProviderWithRetry(ctx, issuer)
 	if err != nil {
-		return nil, fmt.Errorf("constructing %q provider: %w", issuer, err)
+		wrapped := fmt.Errorf("constructing %q provider: %w", issuer, err)
+		setNegativeCache(issuer, wrapped)
+		return nil, wrapped
 	}
 
 	// Once it is built, memoize the provider so that we hit the fast
@@ -66,6 +96,25 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	providers.Add(issuer, provider)
 
 	return provider, nil
+}
+
+// getNegativeCache returns the cached error for issuer, if discovery failed
+// for it within the last negativeCacheTTL. An expired entry is not returned.
+func getNegativeCache(issuer string) (error, bool) {
+	entry, ok := negativeCache.Get(issuer)
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.err, true
+}
+
+// setNegativeCache remembers that discovery failed for issuer, for up to
+// negativeCacheTTL.
+func setNegativeCache(issuer string, err error) {
+	negativeCache.Add(issuer, negativeCacheEntry{
+		err:       err,
+		expiresAt: time.Now().Add(negativeCacheTTL),
+	})
 }
 
 // newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic

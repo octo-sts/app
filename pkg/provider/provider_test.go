@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -14,6 +15,98 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+func TestGet_NegativeCacheAvoidsRepeatedProbesForFailingIssuer(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// 404 is a permanent error (isPermanentError), so this fails fast
+		// with no retries.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected first call to fail")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected 1 discovery attempt after first call, got %d", got)
+	}
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected second call to fail")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected second call within negative-cache TTL to be served from cache (still 1 discovery attempt), got %d", got)
+	}
+}
+
+func TestGet_NegativeCacheExpiresAndRetriesRecoveredIssuer(t *testing.T) {
+	origTTL := negativeCacheTTL
+	negativeCacheTTL = 20 * time.Millisecond
+	t.Cleanup(func() { negativeCacheTTL = origTTL })
+
+	var failing atomic.Bool
+	failing.Store(true)
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		if failing.Load() {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected first call to fail")
+	}
+
+	// The issuer recovers, and enough time passes for the negative-cache
+	// entry to expire.
+	failing.Store(false)
+	time.Sleep(40 * time.Millisecond)
+
+	if _, err := Get(ctx, server.URL); err != nil {
+		t.Fatalf("expected call after negative-cache expiry to retry the now-recovered issuer, got error: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected negative-cache expiry to trigger a second discovery attempt, got %d", got)
+	}
+}
+
+func TestGet_NegativeCacheIsBoundedAgainstManyDistinctFailingIssuers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	// issuer is attacker-controlled (it comes from an unverified bearer
+	// token's issuer claim), so an attacker can supply arbitrarily many
+	// distinct failing issuer strings. The negative cache must not grow
+	// without bound in response.
+	const attackerIssuers = 500
+	for i := 0; i < attackerIssuers; i++ {
+		issuer := fmt.Sprintf("%s/evil-issuer-%d", server.URL, i)
+		if _, err := Get(ctx, issuer); err == nil {
+			t.Fatalf("expected issuer %d to fail", i)
+		}
+	}
+
+	if got := negativeCache.Len(); got > negativeCacheCapacity {
+		t.Fatalf("expected negative cache to stay bounded at %d entries, got %d", negativeCacheCapacity, got)
+	}
+}
 
 func TestNewProviderWithRetry_Success(t *testing.T) {
 	// Create a test server that responds successfully
