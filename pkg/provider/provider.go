@@ -18,6 +18,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/octo-sts/app/pkg/maxsize"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
+	"golang.org/x/sync/singleflight"
 )
 
 // MaximumResponseSize is the maximum size of allowed responses from
@@ -27,9 +28,22 @@ import (
 //   - Chainguard: needs around 2KiB
 const MaximumResponseSize = 100 * 1024 // 100KiB
 
+// discoveryTimeout bounds a single shared discovery, independent of any one
+// caller's own context. Discovery is single-flighted across concurrent
+// callers (see discoveryFlight below), so it must not be tied to any single
+// caller's deadline: an unrelated caller's short timeout must not abort
+// discovery for other callers sharing the same issuer, and a genuinely
+// stalled issuer must not hold the shared call open forever either.
+const discoveryTimeout = 20 * time.Second
+
 var (
 	// providers is an LRU cache of recently used providers.
 	providers, _ = lru.New2Q[string, VerifierProvider](100)
+
+	// discoveryFlight collapses concurrent Get calls for the same issuer
+	// into a single in-flight discovery, so N callers naming a slow or
+	// stalled issuer pay for one discovery instead of N.
+	discoveryFlight singleflight.Group
 )
 
 type VerifierProvider interface {
@@ -44,21 +58,39 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		return v, nil
 	}
 
-	ctx = oidc.ClientContext(ctx, &http.Client{
-		Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			// Validate redirect destination using same rules as original issuer
-			if !oidcvalidate.IsValidIssuer(req.URL.String()) {
-				return fmt.Errorf("redirect destination %q failed issuer validation", req.URL.String())
-			}
-			return nil
-		},
+	// Concurrent Get calls for the same issuer collapse into one discovery,
+	// so the shared discovery runs on its own context bounded only by
+	// discoveryTimeout -- not on any single caller's context. Using DoChan
+	// (rather than Do) means the shared call also keeps running in its own
+	// goroutine even if the caller that happens to trigger it stops
+	// waiting, so other callers sharing the issuer are unaffected either
+	// way.
+	ch := discoveryFlight.DoChan(issuer, func() (any, error) {
+		discoveryCtx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+		defer cancel()
+		discoveryCtx = oidc.ClientContext(discoveryCtx, &http.Client{
+			Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				// Validate redirect destination using same rules as original issuer
+				if !oidcvalidate.IsValidIssuer(req.URL.String()) {
+					return fmt.Errorf("redirect destination %q failed issuer validation", req.URL.String())
+				}
+				return nil
+			},
+		})
+		return newProviderWithRetry(discoveryCtx, issuer)
 	})
 
-	// Verify the token before we trust anything about it.
-	provider, err = newProviderWithRetry(ctx, issuer)
-	if err != nil {
-		return nil, fmt.Errorf("constructing %q provider: %w", issuer, err)
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, fmt.Errorf("constructing %q provider: %w", issuer, res.Err)
+		}
+		provider = res.Val.(VerifierProvider)
+	case <-ctx.Done():
+		// This caller's own context expired while waiting; the shared
+		// discovery keeps running in the background for any other callers.
+		return nil, ctx.Err()
 	}
 
 	// Once it is built, memoize the provider so that we hit the fast
