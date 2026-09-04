@@ -10,7 +10,10 @@ import (
 
 	gofirestore "cloud.google.com/go/firestore"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	godynamodb "github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/octo-sts/app/pkg/envconfig"
+	"github.com/octo-sts/app/pkg/stickystore/dynamodb"
 	"github.com/octo-sts/app/pkg/stickystore/firestore"
 	"github.com/octo-sts/app/pkg/stickystore/memory"
 )
@@ -26,9 +29,25 @@ func New(ctx context.Context, cfg *envconfig.EnvConfig) (Store, io.Closer, error
 		return memory.New(), io.NopCloser(nil), nil
 	case "firestore":
 		return newFirestore(ctx, cfg)
+	case "dynamodb":
+		return newDynamodb(ctx, cfg)
 	default:
 		return nil, nil, fmt.Errorf("stickystore: unsupported backend %q", cfg.StickyStore)
 	}
+}
+
+func newDynamodb(ctx context.Context, cfg *envconfig.EnvConfig) (Store, io.Closer, error) {
+	if cfg.StickyStoreDynamodbTable == "" {
+		return nil, nil, fmt.Errorf("stickystore: OCTOSTS_STICKY_STORE_DYNAMODB_TABLE must be set")
+	}
+
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("stickystore: loading AWS config for dynamodb: %w", err)
+	}
+	client := godynamodb.NewFromConfig(awsCfg)
+
+	return dynamodb.New(client, cfg.StickyStoreDynamodbTable, cfg.StickyStoreDynamodbTTL), io.NopCloser(nil), nil
 }
 
 func newFirestore(ctx context.Context, cfg *envconfig.EnvConfig) (Store, io.Closer, error) {
