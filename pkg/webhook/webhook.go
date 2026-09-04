@@ -11,6 +11,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -80,6 +81,25 @@ var prActionsThatChangeFiles = sets.New("opened", "synchronize", "reopened")
 // installationClientCacheSize matches the app's other LRUs (e.g. ghinstall,
 // octosts); entries are tiny and least-recently-used installations evict first.
 const installationClientCacheSize = 200
+
+// repoFromAPIURL extracts the owner and repository name from a GitHub API
+// repository URL such as https://api.github.com/repos/{owner}/{repo} (or the
+// GitHub Enterprise Server .../api/v3/repos/{owner}/{repo} variant).
+// check_suite payloads identify a pull request's base repository by API URL
+// only — the nested repo object carries no owner login.
+func repoFromAPIURL(apiURL string) (owner, repo string, ok bool) {
+	u, err := url.Parse(apiURL)
+	if err != nil {
+		return "", "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == "repos" {
+			return parts[i+1], parts[i+2], true
+		}
+	}
+	return "", "", false
+}
 
 func isBotSender(sender *github.User) bool {
 	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
@@ -521,8 +541,26 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	}
 
 	for _, pr := range cs.GetCheckSuite().PullRequests {
-		resp, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pr.GetNumber(), &github.ListOptions{})
+		// A PR raised from a fork lives in the base repository and its number
+		// is only meaningful there. When this event fires in the fork, listing
+		// files against the event repo 404s, so resolve the PR's home from the
+		// base repo API URL carried in the payload.
+		prOwner, prRepo := owner, repo
+		if o, r, ok := repoFromAPIURL(pr.GetBase().GetRepo().GetURL()); ok {
+			prOwner, prRepo = o, r
+		}
+		resp, _, err := client.PullRequests.ListFiles(ctx, prOwner, prRepo, pr.GetNumber(), &github.ListOptions{})
 		if err != nil {
+			// The installation may still be unable to see the PR's home (e.g.
+			// the base repo belongs to another owner where this app is not
+			// installed). There is nothing to validate from this side — the
+			// base repo's own check_suite covers the PR — so skip it rather
+			// than fail the whole event with a 5xx.
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+				log.Warnf("skipping inaccessible PR %s/%s#%d: %v", prOwner, prRepo, pr.GetNumber(), err)
+				continue
+			}
 			return nil, err
 		}
 		for _, file := range resp {
