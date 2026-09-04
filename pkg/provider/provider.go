@@ -13,7 +13,6 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/coreos/go-oidc/v3/oidc"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/octo-sts/app/pkg/maxsize"
@@ -45,7 +44,7 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	}
 
 	ctx = oidc.ClientContext(ctx, &http.Client{
-		Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
+		Transport: maxsize.NewRoundTripper(MaximumResponseSize, discoveryTransport(issuer)),
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 			// Validate redirect destination using same rules as original issuer
 			if !oidcvalidate.IsValidIssuer(req.URL.String()) {
