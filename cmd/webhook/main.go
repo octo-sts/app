@@ -16,6 +16,7 @@ import (
 
 	"github.com/chainguard-dev/clog"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	mce "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics/cloudevents"
 	envConfig "github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/kms"
@@ -42,6 +43,29 @@ func main() {
 
 		// Setup tracing.
 		defer metrics.SetupTracer(ctx)()
+	}
+
+	// Deliberately not gated on baseCfg.Metrics, unlike the STS exchange
+	// stream: these events are the detection signal for trust policy changes, and
+	// turning off metrics must not silently turn off a security control.
+	var emitter *webhook.PolicyEmitter
+	if webhookConfig.EventingIngress != "" {
+		ceclient, err := mce.NewClientHTTP("octo-sts-webhook", mce.WithTarget(ctx, webhookConfig.EventingIngress)...)
+		if err != nil {
+			log.Panicf("failed to create cloudevents client: %v", err)
+		}
+		emitter = webhook.NewPolicyEmitter(ceclient)
+		// Runs on the panic unwind below, giving queued detection events a chance
+		// to land rather than dying with the process.
+		defer func() {
+			sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			defer scancel()
+			if err := emitter.Shutdown(sctx); err != nil {
+				clog.FromContext(ctx).Errorf("policy emitter did not drain: %v", err)
+			}
+		}()
+	} else {
+		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; trust policy events will not be emitted")
 	}
 
 	// Only use the primary app ID and KMS key for the webhook transport.
@@ -108,6 +132,7 @@ func main() {
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 		OrgPolicyRepo: webhookConfig.OrgPolicyRepo,
+		Emitter:       emitter,
 	})
 	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
