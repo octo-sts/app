@@ -34,6 +34,39 @@ func TestCompile(t *testing.T) {
 		},
 		wantErr: false,
 	}, {
+		name: "valid app",
+		tp: &TrustPolicy{
+			Issuer:  "https://example.com",
+			Subject: "subject",
+			App:     "ci-bot",
+		},
+		wantErr: false,
+	}, {
+		name: "valid app pattern",
+		tp: &TrustPolicy{
+			Issuer:     "https://example.com",
+			Subject:    "subject",
+			AppPattern: "ci-.*",
+		},
+		wantErr: false,
+	}, {
+		name: "multiple apps",
+		tp: &TrustPolicy{
+			Issuer:     "https://example.com",
+			Subject:    "subject",
+			App:        "ci-bot",
+			AppPattern: ".*",
+		},
+		wantErr: true,
+	}, {
+		name: "invalid app pattern",
+		tp: &TrustPolicy{
+			Issuer:     "https://example.com",
+			Subject:    "subject",
+			AppPattern: ")(",
+		},
+		wantErr: true,
+	}, {
 		name: "multiple issuers",
 		tp: &TrustPolicy{
 			Issuer:        "https://example.com",

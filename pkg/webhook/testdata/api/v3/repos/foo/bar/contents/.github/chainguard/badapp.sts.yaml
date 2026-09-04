@@ -1,0 +1,7 @@
+{
+  "name": "badapp.sts.yaml",
+  "path": ".github/chainguard/badapp.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vL2JhcjpyZWY6cmVmcy9oZWFkcy9tYWluCmFwcDogY2ktYm90CmFwcF9wYXR0ZXJuOiBjaS0uKgo=",
+  "encoding": "base64"
+}

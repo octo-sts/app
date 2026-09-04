@@ -66,14 +66,15 @@ func main() {
 
 	var router *ghinstall.OrgRouter
 	var totalApps int
+	var apps octosts.AppSet
 	var kmsClosers []io.Closer
 	if baseCfg.AppConfigFile != "" {
-		router, totalApps, kmsClosers, err = buildRouterFromYAML(ctx, baseCfg, quotaStore, quotaCfg)
+		router, totalApps, apps, kmsClosers, err = buildRouterFromYAML(ctx, baseCfg, quotaStore, quotaCfg)
 		if err != nil {
 			log.Panicf("failed to build router from YAML config: %v", err)
 		}
 	} else {
-		router, totalApps, kmsClosers, err = buildRouterFromEnv(ctx, baseCfg, quotaStore, quotaCfg)
+		router, totalApps, apps, kmsClosers, err = buildRouterFromEnv(ctx, baseCfg, quotaStore, quotaCfg)
 		if err != nil {
 			log.Panicf("failed to build router from env vars: %v", err)
 		}
@@ -111,7 +112,7 @@ func main() {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; exchange events will not be emitted")
 	}
 
-	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo))
+	pboidc.RegisterSecurityTokenServiceServer(d.Server, octosts.NewSecurityTokenServiceServer(router, sticky, apps, ceclient, appCfg.Domain, baseCfg.Metrics, baseCfg.GitHubBaseURL, appCfg.OrgPolicyRepo))
 	if err := d.RegisterHandler(ctx, pboidc.RegisterSecurityTokenServiceHandlerFromEndpoint); err != nil {
 		log.Panicf("failed to register gateway endpoint: %v", err)
 	}
@@ -157,14 +158,14 @@ func buildPool(managers []ghinstall.Manager, quotaCfg *ghinstall.QuotaConfig) *g
 // the capacity-aware picker sees the full per-installation rate-limit
 // state regardless of which org's pool issued the request. The returned
 // closers release per-app KMS clients and must be closed at shutdown.
-func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quotaStore *ghinstall.QuotaStore, quotaCfg *ghinstall.QuotaConfig) (*ghinstall.OrgRouter, int, []io.Closer, error) {
+func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quotaStore *ghinstall.QuotaStore, quotaCfg *ghinstall.QuotaConfig) (*ghinstall.OrgRouter, int, octosts.AppSet, []io.Closer, error) {
 	cfg, err := appconfig.Load(appconfig.WithConfigFilePath(baseCfg.AppConfigFile))
 	if err != nil {
-		return nil, 0, nil, err
+		return nil, 0, octosts.AppSet{}, nil, err
 	}
 
 	if err := cfg.Validate(); err != nil {
-		return nil, 0, nil, err
+		return nil, 0, octosts.AppSet{}, nil, err
 	}
 
 	var closers []io.Closer
@@ -177,17 +178,17 @@ func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quot
 			if app.KMSKey != "" {
 				kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, app.KMSKey)
 				if err != nil {
-					return nil, 0, closers, fmt.Errorf("could not create kms client for app %d: %w", app.AppID, err)
+					return nil, 0, octosts.AppSet{}, closers, fmt.Errorf("could not create kms client for app %d: %w", app.AppID, err)
 				}
 				closers = append(closers, kmsClient)
 			}
 			atr, err := ghtransport.NewFromAppConfig(ctx, app, baseCfg, kmsClient, quotaStore)
 			if err != nil {
-				return nil, 0, closers, err
+				return nil, 0, octosts.AppSet{}, closers, err
 			}
 			m, err := ghinstall.NewWithBaseURL(atr, baseCfg.GitHubBaseURL)
 			if err != nil {
-				return nil, 0, closers, err
+				return nil, 0, octosts.AppSet{}, closers, err
 			}
 			managers = append(managers, m)
 		}
@@ -195,15 +196,18 @@ func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quot
 		totalApps += len(managers)
 	}
 
-	return ghinstall.NewOrgRouter(pools), totalApps, closers, nil
+	return ghinstall.NewOrgRouter(pools), totalApps, octosts.AppSet{Names: cfg.AppNames(), IDs: cfg.AppIDs()}, closers, nil
 }
 
 // buildRouterFromEnv creates an OrgRouter from legacy environment variables.
 // All apps are placed in a wildcard pool that serves any org. The returned
 // closers release per-app KMS clients and must be closed at shutdown.
-func buildRouterFromEnv(ctx context.Context, baseCfg *envConfig.EnvConfig, quotaStore *ghinstall.QuotaStore, quotaCfg *ghinstall.QuotaConfig) (*ghinstall.OrgRouter, int, []io.Closer, error) {
+func buildRouterFromEnv(ctx context.Context, baseCfg *envConfig.EnvConfig, quotaStore *ghinstall.QuotaStore, quotaCfg *ghinstall.QuotaConfig) (*ghinstall.OrgRouter, int, octosts.AppSet, []io.Closer, error) {
 	var closers []io.Closer
 	managers := make([]ghinstall.Manager, 0, len(baseCfg.AppIDs))
+	// KMS-skipped apps are deliberately excluded: they can never mint tokens,
+	// so a numeric pin naming one should fail as unconfigured.
+	appIDs := make(map[int64]bool, len(baseCfg.AppIDs))
 	for i, appID := range baseCfg.AppIDs {
 		var kmsKey string
 		var kmsClient kms.KMS
@@ -216,25 +220,26 @@ func buildRouterFromEnv(ctx context.Context, baseCfg *envConfig.EnvConfig, quota
 			var err error
 			kmsClient, err = kms.NewKMS(ctx, baseCfg.KMSProvider, kmsKey)
 			if err != nil {
-				return nil, 0, closers, fmt.Errorf("could not create kms client for app %d: %w", appID, err)
+				return nil, 0, octosts.AppSet{}, closers, fmt.Errorf("could not create kms client for app %d: %w", appID, err)
 			}
 			closers = append(closers, kmsClient)
 		}
 		atr, err := ghtransport.New(ctx, appID, kmsKey, baseCfg, kmsClient, quotaStore)
 		if err != nil {
-			return nil, 0, closers, err
+			return nil, 0, octosts.AppSet{}, closers, err
 		}
 		m, err := ghinstall.NewWithBaseURL(atr, baseCfg.GitHubBaseURL)
 		if err != nil {
-			return nil, 0, closers, err
+			return nil, 0, octosts.AppSet{}, closers, err
 		}
 		managers = append(managers, m)
+		appIDs[appID] = true
 	}
 	if len(managers) == 0 {
-		return nil, 0, closers, fmt.Errorf("no apps with valid KMS keys configured")
+		return nil, 0, octosts.AppSet{}, closers, fmt.Errorf("no apps with valid KMS keys configured")
 	}
 
 	return ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
 		ghinstall.WildcardOrg: buildPool(managers, quotaCfg),
-	}), len(managers), closers, nil
+	}), len(managers), octosts.AppSet{IDs: appIDs}, closers, nil
 }

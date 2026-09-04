@@ -73,8 +73,9 @@ locals {
   apps_by_org = {
     for org in local.org_names : org => [
       for app in var.github_apps : {
-        app_id  = app.app_id
-        kms_key = app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""
+        app_id   = app.app_id
+        app_name = app.app_name
+        kms_key  = app.key_version > 0 ? "${google_kms_crypto_key.app-keys[tostring(app.app_id)].id}/cryptoKeyVersions/${app.key_version}" : ""
       } if lower(app.org_name) == org
     ]
   }
@@ -83,10 +84,13 @@ locals {
   app_config_yaml = local.multi_org_enabled ? yamlencode({
     orgs = [for org in local.org_names : {
       name = org
-      apps = [for app in local.apps_by_org[org] : {
-        app_id  = app.app_id
-        kms_key = app.kms_key
-      } if app.kms_key != ""]
+      apps = [for app in local.apps_by_org[org] : merge(
+        {
+          app_id  = app.app_id
+          kms_key = app.kms_key
+        },
+        app.app_name != "" ? { app_name = app.app_name } : {}
+      ) if app.kms_key != ""]
     }]
   }) : ""
 
