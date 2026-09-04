@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
+	"github.com/octo-sts/app/pkg/oidcvalidate"
 )
 
 type EnvConfig struct {
@@ -46,6 +47,17 @@ type EnvConfig struct {
 	// Server deployments (e.g. "https://github.example.com/api/v3").
 	// When empty, the default https://api.github.com is used.
 	GitHubBaseURL string `envconfig:"GITHUB_BASE_URL" required:"false"`
+
+	// AllowedIssuers, when non-empty, is the set of issuers this deployment
+	// will perform OIDC discovery against. Matching is exact, as it is for the
+	// org-level issuers list, so a trailing slash makes a different issuer.
+	//
+	// The bearer token names its own issuer and is unverified at the point
+	// discovery runs, so an unset list lets any caller choose the host this
+	// deployment connects to. Setting it confines that choice to issuers the
+	// operator has named. Leave it unset to keep accepting any issuer the
+	// trust policies allow.
+	AllowedIssuers []string `envconfig:"OCTOSTS_ALLOWED_ISSUERS" required:"false"`
 }
 
 type EnvConfigApp struct {
@@ -155,6 +167,14 @@ func BaseConfig() (*EnvConfig, error) {
 		}
 		if u.Scheme != "https" {
 			return nil, fmt.Errorf("GITHUB_BASE_URL must use https scheme, got %q", u.Scheme)
+		}
+	}
+
+	// Reject an entry that no issuer can ever equal, since it would silently
+	// contribute nothing to a list whose purpose is to be exhaustive.
+	for i, iss := range cfg.AllowedIssuers {
+		if !oidcvalidate.IsValidIssuer(iss) {
+			return nil, fmt.Errorf("OCTOSTS_ALLOWED_ISSUERS[%d] is not a valid issuer: %q", i, iss)
 		}
 	}
 
