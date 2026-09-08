@@ -409,6 +409,10 @@ Matching is exact, as it is for the org-level `issuers` list, so a trailing
 slash makes a different issuer. Each entry is validated at startup and the
 process refuses to start if one could never match a valid issuer.
 
+Entries should be separated by commas without whitespace. Including whitespace
+will cause the app to fail to start up with a warning that
+OCTOSTS_ALLOWED_ISSUERS contains an entry that is not a valid issuer.
+
 Leave it unset to keep accepting any issuer your trust policies allow. Most
 deployments federate a small, fixed set of identity providers and can name them
 all; a deployment serving organizations that bring their own issuers, or one

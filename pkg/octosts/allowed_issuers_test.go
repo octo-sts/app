@@ -16,7 +16,6 @@ import (
 	v1 "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/go-jose/go-jose/v4"
 	josejwt "github.com/go-jose/go-jose/v4/jwt"
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
@@ -86,8 +85,8 @@ func TestExchangeChecksAllowlistBeforeDiscovery(t *testing.T) {
 	if err == nil {
 		t.Fatal("Exchange() succeeded, wanted a refusal")
 	}
-	if got := status.Code(err); got != codes.InvalidArgument {
-		t.Errorf("Exchange() code = %v, wanted %v", got, codes.InvalidArgument)
+	if got, want := status.Convert(err).Message(), "issuer is not allowed"; got != want {
+		t.Errorf("Exchange() message = %q, wanted %q", got, want)
 	}
 	if got := hits.Load(); got != 0 {
 		t.Errorf("issuer received %d requests, wanted 0: discovery ran before the allowlist check", got)
