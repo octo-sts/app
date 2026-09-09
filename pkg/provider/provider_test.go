@@ -172,6 +172,34 @@ func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
 	}
 }
 
+func TestGet_FailedFlightIsRetryableOnNextCall(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			// 404 is a permanent error (isPermanentError), so this fails
+			// fast with no internal retry.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	if _, err := Get(context.Background(), server.URL); err == nil {
+		t.Fatal("expected the first call to fail")
+	}
+
+	if _, err := Get(context.Background(), server.URL); err != nil {
+		t.Fatalf("expected a completed failed flight to be retryable on the next call, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected the second call to trigger a fresh discovery attempt, got %d total attempts", got)
+	}
+}
+
 func TestNewProviderWithRetry_Success(t *testing.T) {
 	// Create a test server that responds successfully
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
