@@ -78,7 +78,15 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 				return nil
 			},
 		})
-		return newProviderWithRetry(discoveryCtx, issuer)
+		p, err := newProviderWithRetry(discoveryCtx, issuer)
+		if err != nil {
+			return nil, err
+		}
+		// Memoize here, inside the shared flight, so a successful
+		// discovery is cached exactly once regardless of whether the
+		// caller that triggered it is still waiting for the result.
+		providers.Add(issuer, p)
+		return p, nil
 	})
 
 	select {
@@ -89,13 +97,10 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		provider = res.Val.(VerifierProvider)
 	case <-ctx.Done():
 		// This caller's own context expired while waiting; the shared
-		// discovery keeps running in the background for any other callers.
+		// discovery keeps running in the background for any other callers,
+		// and memoizes its own result if it succeeds.
 		return nil, ctx.Err()
 	}
-
-	// Once it is built, memoize the provider so that we hit the fast
-	// path above on subsequent requests for verification.
-	providers.Add(issuer, provider)
 
 	return provider, nil
 }

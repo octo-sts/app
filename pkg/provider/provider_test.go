@@ -105,6 +105,33 @@ func TestGet_FollowerContextIsNotAffectedByLeaderCancellation(t *testing.T) {
 	}
 }
 
+func TestGet_LoneCallerTimeoutStillMemoizesBackgroundSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Slower than the caller's deadline below, but well within
+		// discoveryTimeout, so the shared discovery succeeds after the
+		// caller has already given up.
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := Get(ctx, server.URL); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the lone caller to time out, got: %v", err)
+	}
+
+	// Give the background discovery time to finish after the caller left.
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := providers.Get(server.URL); !ok {
+		t.Fatal("expected the background discovery's success to be memoized even though the only caller timed out waiting for it")
+	}
+}
+
 func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
