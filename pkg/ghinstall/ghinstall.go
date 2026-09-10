@@ -467,27 +467,50 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 		return nil, 0, false
 	}
 
-	type cand struct {
-		atr       *ghinstallation.AppsTransport
-		installID int64
-		remaining int
-	}
-
-	var candidates []cand
+	insts := make([]Installation, 0, len(managers))
 	for _, m := range managers {
 		atr, id, err := m.Get(ctx, owner, scope, identity)
 		if err != nil {
 			continue
 		}
-		rem, _, ok := q.Store.Get(id)
-		if !ok {
+		// Bail on the first quota-missing candidate before probing further
+		// managers: each uncached probe is a ListInstallations walk with
+		// per-page KMS-signed JWTs.
+		if _, _, ok := q.Store.Get(id); !ok {
 			return nil, 0, false
 		}
-		candidates = append(candidates, cand{atr, id, rem})
+		insts = append(insts, Installation{Transport: atr, ID: id})
 	}
 
-	if len(candidates) == 0 {
+	inst, ok := PickByQuota(ctx, insts, q)
+	if !ok {
 		return nil, 0, false
+	}
+	return inst.Transport, inst.ID, true
+}
+
+// PickByQuota selects the installation with the most remaining rate-limit
+// headroom within the highest non-empty tier (comfortable, tight,
+// last-resort). Returns ok=false when quota selection cannot proceed — nil
+// config, no candidates, or any candidate lacking quota data — so callers
+// fall back to their own cold-start strategy and the store warms evenly.
+func PickByQuota(ctx context.Context, insts []Installation, q *QuotaConfig) (Installation, bool) {
+	if q == nil || q.Store == nil || len(insts) == 0 {
+		return Installation{}, false
+	}
+
+	type cand struct {
+		inst      Installation
+		remaining int
+	}
+
+	candidates := make([]cand, 0, len(insts))
+	for _, inst := range insts {
+		rem, _, ok := q.Store.Get(inst.ID)
+		if !ok {
+			return Installation{}, false
+		}
+		candidates = append(candidates, cand{inst, rem})
 	}
 
 	pickFromPool := func(pool []cand) cand {
@@ -522,11 +545,8 @@ func pickByQuota(ctx context.Context, managers []Manager, owner, scope, identity
 		pool = lastResort
 		tier = "last_resort"
 	}
-	if len(pool) == 0 {
-		return nil, 0, false
-	}
 
 	chosen := pickFromPool(pool)
-	clog.DebugContextf(ctx, "ghinstall: quota-aware pick install=%d tier=%s remaining=%d", chosen.installID, tier, chosen.remaining)
-	return chosen.atr, chosen.installID, true
+	clog.DebugContextf(ctx, "ghinstall: quota-aware pick install=%d tier=%s remaining=%d", chosen.inst.ID, tier, chosen.remaining)
+	return chosen.inst, true
 }

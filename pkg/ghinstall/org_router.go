@@ -19,6 +19,10 @@ const WildcardOrg = "*"
 type OrgPool struct {
 	M        Manager
 	AppCount int
+	// Quota enables capacity-aware selection for callers that pick among
+	// enumerated installations themselves (e.g. trust policy app pins).
+	// May be nil, disabling quota-aware picking.
+	Quota *QuotaConfig
 }
 
 // OrgRouter maps GitHub organization names to their dedicated app pools.

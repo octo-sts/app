@@ -150,7 +150,7 @@ func buildPool(managers []ghinstall.Manager, quotaCfg *ghinstall.QuotaConfig) *g
 	} else {
 		m = ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 	}
-	return &ghinstall.OrgPool{M: m, AppCount: len(managers)}
+	return &ghinstall.OrgPool{M: m, AppCount: len(managers), Quota: quotaCfg}
 }
 
 // buildRouterFromYAML loads the YAML config file and builds an OrgRouter
