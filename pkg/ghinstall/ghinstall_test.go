@@ -589,10 +589,10 @@ func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallatio
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		DialTLS: func(network, addr string) (net.Conn, error) {
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "https://"), tlsConfig)
 		},
-		Dial: func(network, addr string) (net.Conn, error) {
+		DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "http://"), tlsConfig)
 		},
 	}

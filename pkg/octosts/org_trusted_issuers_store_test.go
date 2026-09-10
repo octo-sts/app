@@ -1417,7 +1417,7 @@ func TestExchangeEnforcesOrgAllowlist(t *testing.T) {
 
 			_, err := s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    tc.owner + "/repo",
+				Scopes:   []string{tc.owner + "/repo"},
 			})
 			if tc.wantCode == codes.OK {
 				if err != nil {
@@ -1467,7 +1467,7 @@ func TestExchangeAllowlistIsCached(t *testing.T) {
 	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	for i := range 2 {
-		if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "org/repo"}); err != nil {
+		if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}}); err != nil {
 			t.Fatalf("Exchange() attempt %d = %v", i+1, err)
 		}
 	}
@@ -1525,7 +1525,7 @@ func TestExchangeRecordsAuditDecisionOnEvent(t *testing.T) {
 	ctx := newExchangeContext(t)
 	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1), ceclient: ce, metrics: true}
 
-	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "orgaudit/repo"}); err != nil {
+	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"orgaudit/repo"}}); err != nil {
 		t.Fatalf("Exchange() = %v, want success (audit mode never denies)", err)
 	}
 
@@ -1598,7 +1598,7 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 
 	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "orgallow/repo",
+		Scopes:   []string{"orgallow/repo"},
 	}); err == nil {
 		t.Fatal("Exchange() = nil, want an error for an owner with no installation")
 	}

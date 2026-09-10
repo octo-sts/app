@@ -248,7 +248,7 @@ func TestExchange(t *testing.T) {
 			name: "repo",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			},
 			want: &github.InstallationTokenOptions{
 				Repositories: []string{"repo"},
@@ -261,7 +261,7 @@ func TestExchange(t *testing.T) {
 			name: "org",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "org",
+				Scopes:   []string{"org"},
 			},
 			want: &github.InstallationTokenOptions{
 				Permissions: &github.InstallationPermissions{
@@ -338,7 +338,7 @@ func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
 
 	tok, err := sts.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org",
+		Scopes:   []string{"org"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v", err)
@@ -410,21 +410,21 @@ func TestExchangeValidation(t *testing.T) {
 			name: "empty scope",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "",
+				Scope:    "", //nolint:staticcheck // exercises deprecated Scope fallback (case 0)
 			},
 		},
 		{
 			name: "empty identity",
 			req: &v1.ExchangeRequest{
 				Identity: "",
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			},
 		},
 		{
 			name: "both empty",
 			req: &v1.ExchangeRequest{
 				Identity: "",
-				Scope:    "",
+				Scope:    "", //nolint:staticcheck // exercises deprecated Scope fallback (case 0)
 			},
 		},
 		{
@@ -570,7 +570,7 @@ func TestExchangeRateLimit(t *testing.T) {
 			s := &sts{router: router}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			})
 			if err == nil {
 				t.Fatal("expected error, got nil")
@@ -692,7 +692,7 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	// Trust policy lives on the rrm server.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v — policy read did not use rrm transport", err)
@@ -754,7 +754,7 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	// working transport. Exchange should succeed.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v — rate-limit retry did not recover", err)
@@ -814,7 +814,7 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	s := &sts{router: router}
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil — all apps are rate-limited")
@@ -1021,7 +1021,7 @@ func TestExchangeOrgNotConfigured(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "other-org/repo",
+		Scopes:   []string{"other-org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error for unconfigured org")
@@ -1087,7 +1087,7 @@ func TestExchangeOrgIsolation(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange for org failed: %v", err)
@@ -1100,7 +1100,7 @@ func TestExchangeOrgIsolation(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "other-org/repo",
+		Scopes:   []string{"other-org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error for other-org (no contents), got nil")
@@ -1138,10 +1138,10 @@ func newAppsTransport(t *testing.T, h http.Handler) *ghinstallation.AppsTranspor
 	// that uses this transport to go through this server, regardless of the URL.
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		DialTLS: func(network, addr string) (net.Conn, error) {
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "https://"), tlsConfig)
 		},
-		Dial: func(network, addr string) (net.Conn, error) {
+		DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "http://"), tlsConfig)
 		},
 	}
