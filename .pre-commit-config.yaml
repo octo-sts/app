@@ -11,7 +11,7 @@ exclude: |
   )$
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -20,39 +20,39 @@ repos:
       - id: check-added-large-files
       - id: check-merge-conflict
 
-  - repo: https://github.com/dnephin/pre-commit-golang
-    rev: v0.5.1
+  - repo: https://github.com/TekWizely/pre-commit-golang
+    rev: f298c082154b2cb239fac06a4f452368e66e66dd # frozen: v1.0.0-rc.4
     hooks:
       - id: go-fmt
       - id: go-imports
       - id: go-mod-tidy
 
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.11.4
+    rev: 8f3b0c7ed018e57905fbd873c697e0b1ede605a5 # frozen: v2.11.4
     hooks:
       - id: golangci-lint-full
 
   - repo: https://github.com/antonbabenko/pre-commit-terraform
-    rev: v1.99.5
+    rev: c0f51014b8ec51c4455a7dac40697be15e285668 # frozen: v1.99.5
     hooks:
       - id: terraform_fmt
         name: terraform-fmt
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v6.0.0
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # frozen: v6.0.0
     hooks:
       - id: no-commit-to-branch
         name: no-commit-to-main
         args: ['--branch', 'main']
 
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.12
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca # frozen: v1.7.12
     hooks:
       - id: actionlint
         name: lint-github-actions
 
   - repo: https://github.com/golangci/misspell
-    rev: v0.6.0
+    rev: 528d713e620bdf4b41849db93cb489c4fef9f5c5 # frozen: v0.6.0
     hooks:
       - id: misspell
         exclude: |
