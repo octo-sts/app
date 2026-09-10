@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/chainguard-dev/clog"
@@ -24,8 +25,24 @@ import (
 	"github.com/octo-sts/app/pkg/webhook"
 )
 
+// Shutdown is bounded so both phases fit inside the grace period a platform
+// allows between SIGTERM and SIGKILL. Cloud Run's default is the tighter of
+// the two at 10s (Kubernetes allows 30s), and overrunning it means a hard kill
+// that drops whatever is still queued — so the budget targets the tighter one.
+// The server drains first, letting in-flight webhooks finish and enqueue their
+// events, then the emitter drains what it holds.
+const (
+	serverDrainTimeout  = 3 * time.Second
+	emitterDrainTimeout = 6 * time.Second
+)
+
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	// Cloud Run and Kubernetes both stop a container by sending SIGTERM, so it
+	// has to be caught for any of the shutdown work below to happen at all:
+	// Go's default disposition for SIGTERM terminates the process outright,
+	// running no deferred functions and dropping any queued events on the
+	// floor. SIGINT is caught too, for parity when run locally.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	ctx = clog.WithLogger(ctx, clog.New(slog.Default().Handler()))
 
@@ -55,15 +72,6 @@ func main() {
 			log.Panicf("failed to create cloudevents client: %v", err)
 		}
 		emitter = webhook.NewPolicyEmitter(ceclient)
-		// Runs on the panic unwind below, giving queued detection events a chance
-		// to land rather than dying with the process.
-		defer func() {
-			sctx, scancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-			defer scancel()
-			if err := emitter.Shutdown(sctx); err != nil {
-				clog.FromContext(ctx).Errorf("policy emitter did not drain: %v", err)
-			}
-		}()
 	} else {
 		clog.FromContext(ctx).Warn("EVENT_INGRESS_URI unset; trust policy events will not be emitted")
 	}
@@ -142,5 +150,37 @@ func main() {
 		ReadHeaderTimeout: 10 * time.Second,
 		Handler:           mux,
 	}
-	log.Panic(srv.ListenAndServe())
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
+		// The listener failed on its own; nothing to drain gracefully from.
+		log.Panic(err)
+	case <-ctx.Done():
+		clog.FromContext(ctx).Info("shutdown signal received, draining")
+	}
+
+	// From here the signal context is already cancelled, so every deadline
+	// below has to be built on a context that outlives it.
+	base := context.WithoutCancel(ctx)
+
+	// Stop taking new deliveries and let in-flight webhooks finish, so their
+	// events reach the queue before it closes. If a handler outlives this
+	// deadline it keeps running, and its Enqueue lands after the queue has
+	// closed — which the emitter drops and counts rather than panicking on.
+	sctx, scancel := context.WithTimeout(base, serverDrainTimeout)
+	defer scancel()
+	if err := srv.Shutdown(sctx); err != nil {
+		clog.FromContext(ctx).Errorf("http server did not shut down cleanly: %v", err)
+	}
+
+	if emitter != nil {
+		ectx, ecancel := context.WithTimeout(base, emitterDrainTimeout)
+		defer ecancel()
+		if err := emitter.Shutdown(ectx); err != nil {
+			clog.FromContext(ctx).Errorf("policy emitter did not drain: %v", err)
+		}
+	}
 }

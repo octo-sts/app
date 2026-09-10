@@ -3054,7 +3054,7 @@ func TestPolicyChangesFromSnapshot(t *testing.T) {
 			client := policyTreeServer(t, trees, tc.unresolvable...)
 
 			v := &Validator{}
-			got, err := v.policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", tc.beforeRef, "after")
+			got, _, err := v.policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", tc.beforeRef, "after")
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("expected an error, got changes %+v", got)
@@ -3227,8 +3227,10 @@ func TestForcedPushRewindEmitsRestoredPolicy(t *testing.T) {
 }
 
 // TestForcedPushDegradedEmitsMarker covers the case where the pre-push SHA has
-// been collected and the snapshot cannot be taken. Silence is what suppression
-// looks like, so the gap has to be published rather than merely logged.
+// been collected and the diff cannot be computed. Silence is what suppression
+// looks like, so the gap has to be published rather than merely logged — and
+// because only the *previous* SHA is unresolvable, the listing at the pushed
+// SHA still says which policies the rewind left in force.
 func TestForcedPushDegradedEmitsMarker(t *testing.T) {
 	gh := forcedPushServer(t, map[string][]string{
 		"after": {".github/chainguard/test.sts.yaml:sha1"},
@@ -3238,29 +3240,60 @@ func TestForcedPushDegradedEmitsMarker(t *testing.T) {
 	sendForcedPush(t, v, secret)
 
 	events := drainEvents(t, emitter, ce)
-	if len(events) != 1 {
-		t.Fatalf("expected a detection marker, got %d events", len(events))
+	if len(events) != 2 {
+		t.Fatalf("expected a marker and a live policy record, got %d events", len(events))
 	}
 
-	var pe PolicyEvent
-	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+	var marker, record PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &marker); err != nil {
 		t.Fatal(err)
 	}
-	if pe.Change != nil {
-		t.Errorf("marker should carry no change, got %+v", pe.Change)
+	if err := json.Unmarshal(events[1].Data(), &record); err != nil {
+		t.Fatal(err)
 	}
-	if pe.Detection != DetectionDegraded {
-		t.Errorf("got detection %q, want %q", pe.Detection, DetectionDegraded)
+
+	// The marker states that the change list cannot be trusted to be complete,
+	// which is a statement about the push rather than about any one policy.
+	if marker.Change != nil {
+		t.Errorf("marker should carry no change, got %+v", marker.Change)
 	}
-	if pe.DetectionError == "" {
+	if marker.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", marker.Detection, DetectionDegraded)
+	}
+	if marker.DetectionError == "" {
 		t.Error("expected the marker to explain why detection degraded")
 	}
 	// A marker with no policy attached still has to be attributable.
 	if want := "foo/bar"; events[0].Subject() != want {
 		t.Errorf("got subject %q, want %q", events[0].Subject(), want)
 	}
-	if pe.Actor != "mallory" {
-		t.Errorf("got actor %q, want mallory", pe.Actor)
+	if marker.Actor != "mallory" {
+		t.Errorf("got actor %q, want mallory", marker.Actor)
+	}
+
+	// The record names a policy that is live after the rewind. Its action is
+	// "present", not "created": without the prior state there is no honest way
+	// to say whether this push changed it.
+	if record.Change == nil {
+		t.Fatal("expected a per-policy record for the policy live after the rewind")
+	}
+	if got, want := record.Change.Path, ".github/chainguard/test.sts.yaml"; got != want {
+		t.Errorf("got path %q, want %q", got, want)
+	}
+	if record.Change.Action != PolicyPresent {
+		t.Errorf("got action %q, want %q", record.Change.Action, PolicyPresent)
+	}
+	if record.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", record.Detection, DetectionDegraded)
+	}
+	// The check-run gate is the point of listing the live state: the policy
+	// was read and has an authoritative verdict, rather than the unknown the
+	// commit-list fallback would have left behind.
+	if record.Valid == nil || !*record.Valid {
+		t.Errorf("got Valid=%v, want true — the live policy should still be validated", record.Valid)
+	}
+	if want := "foo/bar/test"; events[1].Subject() != want {
+		t.Errorf("got subject %q, want %q", events[1].Subject(), want)
 	}
 }
 
@@ -3476,5 +3509,35 @@ func TestRateLimitedPushReportsNoVerdict(t *testing.T) {
 		if pe.Change == nil || pe.Change.Action != PolicyCreated {
 			t.Errorf("got %+v, want the creation to be reported regardless", pe.Change)
 		}
+	}
+}
+
+// TestForcedPushDegradedBothRefsUnresolvable covers the far end of the
+// degraded path: when even the pushed SHA cannot be listed there is no live
+// state to report, so the marker is all that can honestly be published and the
+// commit list is the only thing left to validate against.
+func TestForcedPushDegradedBothRefsUnresolvable(t *testing.T) {
+	gh := forcedPushServer(t, map[string][]string{}, "before", "after")
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected only the detection marker, got %d events", len(events))
+	}
+
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change != nil {
+		t.Errorf("nothing could be listed, so no policy record is warranted: %+v", pe.Change)
+	}
+	if pe.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", pe.Detection, DetectionDegraded)
+	}
+	if pe.DetectionError == "" {
+		t.Error("expected the marker to explain why detection degraded")
 	}
 }

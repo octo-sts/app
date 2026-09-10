@@ -45,11 +45,25 @@ const (
 // take policy validation down with it. Drops are counted and logged so the
 // gap is visible rather than silent.
 type PolicyEmitter struct {
-	client    cloudevents.Client
-	queue     chan policyEmission
-	wg        sync.WaitGroup
-	dropped   atomic.Int64
-	closeOnce sync.Once
+	client  cloudevents.Client
+	queue   chan policyEmission
+	wg      sync.WaitGroup
+	dropped atomic.Int64
+
+	// mu guards closed against queue. Enqueue holds it for reading, so it is
+	// held by any number of senders at once but never at the same time as the
+	// close in Shutdown — which is what makes "check closed, then send" safe.
+	// A bare flag or a done channel would leave the gap between the check and
+	// the send open, and a send on a closed channel panics: the select's
+	// default case only covers full-but-open.
+	mu     sync.RWMutex
+	closed bool
+
+	// drainCancel interrupts in-flight sends once Shutdown's deadline expires,
+	// so a worker stuck on an unresponsive sink cannot hold the process past
+	// the grace period its platform allows.
+	drainCancel context.CancelFunc
+	sendCtx     context.Context
 }
 
 type policyEmission struct {
@@ -64,9 +78,15 @@ func NewPolicyEmitter(client cloudevents.Client) *PolicyEmitter {
 }
 
 func newPolicyEmitter(client cloudevents.Client, workers, queueSize int) *PolicyEmitter {
+	// Deliberately rooted in Background: the request that produces an event has
+	// long since been answered by the time a worker sends it, so its context is
+	// gone. Shutdown owns the cancel and always calls it.
+	sendCtx, cancel := context.WithCancel(context.Background()) //nolint:gosec // G118: cancel is held on the emitter and called by Shutdown
 	p := &PolicyEmitter{
-		client: client,
-		queue:  make(chan policyEmission, queueSize),
+		client:      client,
+		queue:       make(chan policyEmission, queueSize),
+		sendCtx:     sendCtx,
+		drainCancel: cancel,
 	}
 	p.wg.Add(workers)
 	for range workers {
@@ -78,9 +98,7 @@ func newPolicyEmitter(client cloudevents.Client, workers, queueSize int) *Policy
 func (p *PolicyEmitter) run() {
 	defer p.wg.Done()
 	for item := range p.queue {
-		// Deliberately rooted in Background: the request that produced this
-		// event has long since been answered, so its context is gone.
-		ctx, cancel := context.WithTimeout(context.Background(), policyEmitTimeout)
+		ctx, cancel := context.WithTimeout(p.sendCtx, policyEmitTimeout)
 		rctx := cloudevents.ContextWithRetriesExponentialBackoff(ctx, retryDelay, maxRetry)
 		if res := p.client.Send(rctx, item.event); cloudevents.IsUndelivered(res) || cloudevents.IsNACK(res) {
 			item.log.Errorf("failed to deliver policy event for %q: %v", item.event.Subject(), res)
@@ -89,9 +107,23 @@ func (p *PolicyEmitter) run() {
 	}
 }
 
-// Enqueue submits an event for delivery, dropping it if the queue is full.
+// Enqueue submits an event for delivery, dropping it if the queue is full or
+// the emitter has been shut down. It never blocks and is safe to call at any
+// point in the emitter's life, including concurrently with Shutdown.
 func (p *PolicyEmitter) Enqueue(ctx context.Context, ce cloudevents.Event) {
 	log := clog.FromContext(ctx)
+
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.closed {
+		// Reachable only if a request is still in flight once shutdown has
+		// begun. Dropping is the right answer — the queue is on its way out —
+		// but it must be counted, and it must not be a panic.
+		log.Errorf("policy emitter shut down: dropped event for %q (%d dropped since start)",
+			ce.Subject(), p.dropped.Add(1))
+		return
+	}
+
 	select {
 	case p.queue <- policyEmission{event: ce, log: log}:
 	default:
@@ -104,9 +136,22 @@ func (p *PolicyEmitter) Enqueue(ctx context.Context, ce cloudevents.Event) {
 func (p *PolicyEmitter) Dropped() int64 { return p.dropped.Load() }
 
 // Shutdown stops accepting events and waits for the queue to drain, or for ctx
-// to expire. It is safe to call more than once.
+// to expire. It is safe to call more than once, and safe to call while other
+// goroutines are still enqueueing.
 func (p *PolicyEmitter) Shutdown(ctx context.Context) error {
-	p.closeOnce.Do(func() { close(p.queue) })
+	// Releases sendCtx on every path. On the deadline path this is also what
+	// cuts the in-flight sends: the caller's deadline is usually a platform
+	// grace period, after which the process is killed regardless, and a
+	// cancelled send at least lets the worker log the failure rather than
+	// vanishing mid-request.
+	defer p.drainCancel()
+
+	p.mu.Lock()
+	if !p.closed {
+		p.closed = true
+		close(p.queue)
+	}
+	p.mu.Unlock()
 
 	done := make(chan struct{})
 	go func() {

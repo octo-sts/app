@@ -5,6 +5,7 @@ package webhook
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,6 +36,32 @@ func (b *blockingCEClient) Send(ctx context.Context, e cloudevents.Event) protoc
 	}
 	<-b.release
 	return b.fakeCEClient.Send(ctx, e)
+}
+
+// ctxAwareCEClient blocks in Send until its context is cancelled, standing in
+// for an ingress that has accepted the connection and then stopped responding.
+type ctxAwareCEClient struct {
+	started   chan struct{}
+	cancelled chan struct{}
+	once      sync.Once
+	fakeCEClient
+}
+
+func newCtxAwareCEClient() *ctxAwareCEClient {
+	return &ctxAwareCEClient{
+		started:   make(chan struct{}, 1),
+		cancelled: make(chan struct{}),
+	}
+}
+
+func (c *ctxAwareCEClient) Send(ctx context.Context, _ cloudevents.Event) protocol.Result {
+	select {
+	case c.started <- struct{}{}:
+	default:
+	}
+	<-ctx.Done()
+	c.once.Do(func() { close(c.cancelled) })
+	return ctx.Err()
 }
 
 func testEvent(t *testing.T, subject string) cloudevents.Event {
@@ -135,5 +162,111 @@ func TestPolicyEmitterShutdownRespectsDeadline(t *testing.T) {
 	defer cancel()
 	if err := p.Shutdown(sctx); err == nil {
 		t.Error("expected Shutdown to give up on a wedged sink")
+	}
+}
+
+// TestPolicyEmitterEnqueueAfterShutdown pins the guard around the queue.
+//
+// A send on a closed channel panics, and the select's default case does not
+// cover that — it only covers full-but-open. Today's main shuts the server
+// down before the emitter so this ordering should not arise, but a panic in a
+// webhook handler is a poor way to discover that a future change reordered
+// them, and it would take down live policy validation to lose an event that
+// was already destined to be dropped.
+func TestPolicyEmitterEnqueueAfterShutdown(t *testing.T) {
+	ctx := slogtest.Context(t)
+	client := &fakeCEClient{}
+	p := newPolicyEmitter(client, 1, 4)
+
+	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Shutdown(sctx); err != nil {
+		t.Fatalf("emitter did not drain: %v", err)
+	}
+
+	// The assertion is that this returns at all rather than panicking.
+	p.Enqueue(ctx, testEvent(t, "foo/bar/late"))
+
+	if got := len(client.sent()); got != 0 {
+		t.Errorf("got %d delivered after shutdown, want 0", got)
+	}
+	// Silently discarding a detection event would defeat the point, so the
+	// drop is counted like any other.
+	if got := p.Dropped(); got != 1 {
+		t.Errorf("got %d dropped, want 1", got)
+	}
+}
+
+// TestPolicyEmitterEnqueueRacesShutdown covers the same guard under the
+// interleaving that actually threatens it: an in-flight request enqueueing at
+// the moment shutdown closes the queue. Run with -race.
+func TestPolicyEmitterEnqueueRacesShutdown(t *testing.T) {
+	ctx := slogtest.Context(t)
+	client := &fakeCEClient{}
+	p := newPolicyEmitter(client, 2, 64)
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for range 25 {
+				p.Enqueue(ctx, testEvent(t, "foo/bar/racy"))
+			}
+		}()
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := p.Shutdown(sctx); err != nil {
+			t.Errorf("emitter did not drain: %v", err)
+		}
+	}()
+
+	close(start)
+	wg.Wait()
+
+	// Every event is either delivered or counted as dropped; none may vanish.
+	if got, want := int64(len(client.sent()))+p.Dropped(), int64(200); got != want {
+		t.Errorf("accounted for %d events, want %d", got, want)
+	}
+}
+
+// TestPolicyEmitterShutdownCancelsInFlightSends makes the shutdown deadline
+// real rather than advisory.
+//
+// The per-event budget is longer than the drain budget, so without cancelling
+// the send a worker wedged on an unresponsive sink would keep running past the
+// deadline until the platform killed the process outright.
+func TestPolicyEmitterShutdownCancelsInFlightSends(t *testing.T) {
+	ctx := slogtest.Context(t)
+	client := newCtxAwareCEClient()
+	p := newPolicyEmitter(client, 1, 4)
+
+	p.Enqueue(ctx, testEvent(t, "foo/bar/stuck"))
+	select {
+	case <-client.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("worker never picked up the event")
+	}
+
+	sctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := p.Shutdown(sctx); err == nil {
+		t.Error("expected Shutdown to report that it gave up")
+	}
+
+	// The send must be cut short by the drain deadline, not left to run out
+	// the full per-event timeout.
+	select {
+	case <-client.cancelled:
+	case <-time.After(10 * time.Second):
+		t.Error("in-flight send was not cancelled when the drain deadline expired")
 	}
 }

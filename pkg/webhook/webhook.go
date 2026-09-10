@@ -50,6 +50,12 @@ const (
 	PolicyCreated PolicyAction = "created"
 	PolicyUpdated PolicyAction = "updated"
 	PolicyDeleted PolicyAction = "deleted"
+	// PolicyPresent means the policy is live at the pushed commit but this
+	// push's effect on it is unknown. It is only produced when a forced push
+	// leaves the previous SHA unresolvable, so there is no prior state to
+	// compare against and no honest way to say whether the policy was created,
+	// updated, or left alone. Always accompanied by DetectionDegraded.
+	PolicyPresent PolicyAction = "present"
 )
 
 type PolicyChange struct {
@@ -78,7 +84,9 @@ const (
 	// DetectionDegraded means change detection could not be completed and the
 	// accompanying changes, if any, may be incomplete. Always accompanied by a
 	// push-level event with no change attached, so the gap is visible in the
-	// stream rather than silently absent from it.
+	// stream rather than silently absent from it. Any policy records alongside
+	// it carry PolicyPresent: they say what is live at the pushed commit, not
+	// what this push did.
 	DetectionDegraded DetectionMethod = "degraded"
 )
 
@@ -277,7 +285,8 @@ func (e *Validator) policySnapshot(ctx context.Context, client *github.Client, o
 }
 
 // policyChangesFromSnapshot derives policy changes by comparing the policies
-// live at before with those live at after.
+// live at before with those live at after. It also returns the snapshot taken
+// at after, which stays usable when only before fails to resolve.
 //
 // This is the only detection path that survives a history rewrite. The commit
 // and compare paths both describe the commits a push carries, which for a
@@ -285,18 +294,22 @@ func (e *Validator) policySnapshot(ctx context.Context, client *github.Client, o
 // restores a deleted policy carries no commits at all and three-dot-compares
 // as empty, so those paths would report nothing while the policy became live
 // again. Comparing state instead of commits reports the restoration.
-func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *github.Client, owner, repo, before, after string) ([]PolicyChange, error) {
+func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *github.Client, owner, repo, before, after string) ([]PolicyChange, map[string]string, error) {
+	// after is the SHA this push just placed on the branch, so it resolves
+	// whenever the push itself was real. before is the one GitHub is free to
+	// garbage collect after a rewind, so take after first: that way a failure
+	// to resolve before still leaves the caller a live listing to fall back on.
+	afterSnap, err := e.policySnapshot(ctx, client, owner, repo, after)
+	if err != nil {
+		return nil, nil, err
+	}
+
 	// A push that creates the ref has no prior state to compare against.
 	beforeSnap := map[string]string{}
 	if before != "" && before != zeroHash {
-		var err error
 		if beforeSnap, err = e.policySnapshot(ctx, client, owner, repo, before); err != nil {
-			return nil, err
+			return nil, afterSnap, err
 		}
-	}
-	afterSnap, err := e.policySnapshot(ctx, client, owner, repo, after)
-	if err != nil {
-		return nil, err
 	}
 
 	var changes []PolicyChange //nolint:prealloc // most pushes change no policies
@@ -318,7 +331,23 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 	}
 
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
-	return changes, nil
+	return changes, afterSnap, nil
+}
+
+// policiesPresent reports every policy in a snapshot as PolicyPresent.
+//
+// Used when a forced push leaves the previous SHA unresolvable. The diff
+// cannot be computed, but the live listing still answers "which policies are
+// in force at this commit" — enough to keep the check-run gate and to put a
+// per-policy record in the stream, instead of only a content-free marker that
+// says a rewind happened and nothing about what it left behind.
+func policiesPresent(snap map[string]string) []PolicyChange {
+	changes := make([]PolicyChange, 0, len(snap))
+	for path := range snap {
+		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: PolicyPresent})
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
+	return changes
 }
 
 // pathsToValidate returns the paths that still exist at the head SHA, and so
@@ -709,14 +738,23 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 
 	switch {
 	case event.GetForced() && isDefaultBranch:
-		snapshot, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
+		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
 		if serr != nil {
 			// Most often the pre-push SHA is no longer reachable, which GitHub
-			// is free to garbage collect after a rewind. Fall back to the
-			// commit list so validation still runs, and record that the audit
-			// view of this push is incomplete.
-			log.Warnf("policy snapshot failed, falling back to commit list: %v", serr)
+			// is free to garbage collect after a rewind, so the diff cannot be
+			// computed. Record that the audit view of this push is incomplete.
+			log.Warnf("policy snapshot failed, falling back: %v", serr)
 			detection, detectionErr = DetectionDegraded, serr.Error()
+
+			// Only before failed to resolve; the listing at the pushed SHA is
+			// still good. Report what is live rather than the commit list,
+			// which for the rewind that caused this is empty — that would
+			// leave the resurfaced policy unvalidated and unrecorded, the very
+			// gap the snapshot path exists to close.
+			if live != nil {
+				changes = policiesPresent(live)
+				break
+			}
 			changes = e.policyChangesFromPushEvent(repo, event)
 			break
 		}
