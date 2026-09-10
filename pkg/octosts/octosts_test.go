@@ -1419,6 +1419,82 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
+	t.Run("pattern pin prefers quota headroom", func(t *testing.T) {
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		qstore.Update(11, 100, 15000)
+		qstore.Update(12, 12000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		id, err := exchange(t, s, qpool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want headroom pick (12, nil)", id, err)
+		}
+	})
+
+	t.Run("sticky pin ignores quota for deterministic assignment", func(t *testing.T) {
+		idx := routekey.Index("org/repo", "id", "subj", 2)
+		expected := []int64{11, 12}[idx]
+		other := []int64{12, 11}[idx]
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		// Quota argmax favors the OTHER install; sticky assignment must stay
+		// deterministic so concurrent replicas agree.
+		qstore.Update(expected, 100, 15000)
+		qstore.Update(other, 14000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		id, err := exchange(t, s, qpool, tp)
+		if err != nil || id != expected {
+			t.Fatalf("got (%d, %v), want deterministic (%d, nil) despite quota favoring %d", id, err, expected, other)
+		}
+		again, err := exchange(t, s, qpool, tp)
+		if err != nil || again != expected {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, expected)
+		}
+	})
+
+	t.Run("checks:write pin stays deterministic without a sticky store", func(t *testing.T) {
+		idx := routekey.Index("org/repo", "id", "subj", 2)
+		expected := []int64{11, 12}[idx]
+		other := []int64{12, 11}[idx]
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		qstore.Update(expected, 100, 15000)
+		qstore.Update(other, 14000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		// No sticky store configured: determinism must hold anyway so
+		// check-run ownership stays on one app.
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		for range 3 {
+			id, err := exchange(t, s, qpool, tp)
+			if err != nil || id != expected {
+				t.Fatalf("got (%d, %v), want deterministic (%d, nil) despite quota favoring %d", id, err, expected, other)
+			}
+		}
+	})
+
+	t.Run("pattern pin falls back deterministically without full quota data", func(t *testing.T) {
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		// Install 12 has no quota data: all-or-nothing disables quota picking.
+		qstore.Update(11, 12000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
+		first, err := exchange(t, s, qpool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != 11 && first != 12 {
+			t.Fatalf("got %d, want a ci install", first)
+		}
+		for range 3 {
+			again, err := exchange(t, s, qpool, tp)
+			if err != nil || again != first {
+				t.Fatalf("got (%d, %v), want stable %d", again, err, first)
+			}
+		}
+	})
+
 	t.Run("pattern alternation stays anchored", func(t *testing.T) {
 		s := &sts{apps: AppSet{Names: map[string]int64{"ci": 1, "deploy": 2, "ci-privileged": 3}}}
 		tp := compile(t, &TrustPolicy{AppPattern: "ci|deploy"})

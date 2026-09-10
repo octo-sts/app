@@ -69,9 +69,11 @@ var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, t
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
 // pinMisses throttles repeated GetAllFresh confirmations of app-pin misses,
-// which bypass the negative install cache and hit GitHub's API. The TTL
-// matches ghinstall's negative-cache TTL.
-var pinMisses = expirablelru.NewLRU[string, struct{}](256, nil, time.Minute*5)
+// which bypass the negative install cache and hit GitHub's API. The TTL is
+// deliberately shorter than ghinstall's 5-minute negative-cache TTL so that
+// install-then-retry recovers within a minute, at a bounded cost of one
+// confirmation walk per owner+pin per minute per replica.
+var pinMisses = expirablelru.NewLRU[string, struct{}](256, nil, time.Minute*1)
 
 // pinConfirmTimeout bounds a shared pin-miss confirmation walk once its
 // leader detaches from the triggering request's cancellation.
@@ -305,12 +307,12 @@ func (s *sts) getExchangeInstall(ctx context.Context, pool *ghinstall.OrgPool, o
 	if err != nil {
 		return nil, 0, err
 	}
-	sticky := s.sticky != nil && hasChecksWrite(tp.Permissions)
+	checksWrite := hasChecksWrite(tp.Permissions)
 	if eligible != nil {
-		return s.getPinnedInstall(ctx, pool, owner, scope, identity, subject, sticky, eligible)
+		return s.getPinnedInstall(ctx, pool, owner, scope, identity, subject, checksWrite, eligible)
 	}
 
-	if !sticky {
+	if s.sticky == nil || !checksWrite {
 		return readAtr, readID, nil
 	}
 
@@ -367,12 +369,14 @@ func (s *sts) eligibleApps(tp *TrustPolicy) (map[int64]bool, error) {
 }
 
 // getPinnedInstall picks among owner's installations of the eligible apps.
-// Sticky policies keep sticky routing within the eligible set; others spread
-// deterministically by route key. Absence conclusions (no candidates, cached
-// sticky install missing) are confirmed with GetAllFresh — GetAll's negative
-// cache can hide a newly installed app behind a nil error — and confirmed
-// absences are cached to throttle the fresh walks.
-func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, owner, scope, identity, subject string, sticky bool, eligible map[int64]bool) (*ghinstallation.AppsTransport, int64, error) {
+// checks:write policies pick deterministically by route key so check-run
+// ownership stays stable with or without a sticky store (and stick within
+// the eligible set when one is configured); other policies use capacity-aware
+// selection. Absence conclusions (no candidates, cached sticky install
+// missing) are confirmed with GetAllFresh — GetAll's negative cache can hide
+// a newly installed app behind a nil error — and confirmed absences are
+// cached to throttle the fresh walks.
+func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, owner, scope, identity, subject string, checksWrite bool, eligible map[int64]bool) (*ghinstallation.AppsTransport, int64, error) {
 	insts, enumErr := pool.M.GetAll(ctx, owner)
 	candidates := eligibleInstalls(insts, eligible)
 	fresh := false
@@ -403,6 +407,7 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 	}
 
 	key := routekey.Key(scope, identity, subject)
+	sticky := s.sticky != nil && checksWrite
 	if sticky {
 		if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
 			inst, present, eligibleOK := locate(insts, eligible, cachedID)
@@ -447,7 +452,20 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 		}
 	}
 
+	// checks:write picks stay deterministic regardless of sticky persistence:
+	// with a store, concurrent replicas must agree on a first assignment
+	// (per-process quota stores would diverge and the last putSticky would
+	// orphan the other app's check runs); without one, determinism is the
+	// only thing keeping a caller's check runs on one app. Other pins persist
+	// nothing and re-pick every exchange, so they use the same capacity-aware
+	// selection as unpinned routing, falling back to the deterministic spread
+	// until quota data exists.
 	pick := candidates[routekey.Index(scope, identity, subject, len(candidates))]
+	if !checksWrite {
+		if qp, ok := ghinstall.PickByQuota(ctx, candidates, pool.Quota); ok {
+			pick = qp
+		}
+	}
 	if sticky {
 		s.putSticky(ctx, key, pick.ID, scope, identity, subject)
 	}
