@@ -39,7 +39,7 @@ require (
 	github.com/prometheus/client_model v0.6.3
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/oauth2 v0.36.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	google.golang.org/api v0.297.0
 	google.golang.org/grpc v1.83.2
 	k8s.io/apimachinery v0.37.0
