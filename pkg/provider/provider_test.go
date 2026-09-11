@@ -6,6 +6,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -172,12 +173,44 @@ func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
 	}
 }
 
-func TestGet_FailedFlightIsRetryableOnNextCall(t *testing.T) {
+func TestGet_NegativeCacheAvoidsRepeatedProbesForFailingIssuer(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// 404 is a permanent error (isPermanentError), so this fails fast
+		// with no retries.
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected first call to fail")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected 1 discovery attempt after first call, got %d", got)
+	}
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected second call to fail")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected second call within negative-cache TTL to be served from cache (still 1 discovery attempt), got %d", got)
+	}
+}
+
+func TestGet_NegativeCacheExpiresAndRetriesRecoveredIssuer(t *testing.T) {
+	origTTL := negativeCacheTTL
+	negativeCacheTTL = 20 * time.Millisecond
+	t.Cleanup(func() { negativeCacheTTL = origTTL })
+
+	var failing atomic.Bool
+	failing.Store(true)
 	var hits int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if atomic.AddInt32(&hits, 1) == 1 {
-			// 404 is a permanent error (isPermanentError), so this fails
-			// fast with no internal retry.
+		atomic.AddInt32(&hits, 1)
+		if failing.Load() {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -188,15 +221,122 @@ func TestGet_FailedFlightIsRetryableOnNextCall(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := Get(context.Background(), server.URL); err == nil {
-		t.Fatal("expected the first call to fail")
+	ctx := context.Background()
+
+	if _, err := Get(ctx, server.URL); err == nil {
+		t.Fatal("expected first call to fail")
 	}
 
-	if _, err := Get(context.Background(), server.URL); err != nil {
-		t.Fatalf("expected a completed failed flight to be retryable on the next call, got: %v", err)
+	// The issuer recovers, and enough time passes for the negative-cache
+	// entry to expire.
+	failing.Store(false)
+	time.Sleep(40 * time.Millisecond)
+
+	if _, err := Get(ctx, server.URL); err != nil {
+		t.Fatalf("expected call after negative-cache expiry to retry the now-recovered issuer, got error: %v", err)
 	}
 	if got := atomic.LoadInt32(&hits); got != 2 {
-		t.Fatalf("expected the second call to trigger a fresh discovery attempt, got %d total attempts", got)
+		t.Fatalf("expected negative-cache expiry to trigger a second discovery attempt, got %d", got)
+	}
+}
+
+func TestGet_NegativeCacheIsBoundedAgainstManyDistinctFailingIssuers(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	ctx := context.Background()
+
+	// issuer is attacker-controlled (it comes from an unverified bearer
+	// token's issuer claim), so an attacker can supply arbitrarily many
+	// distinct failing issuer strings. The negative cache must not grow
+	// without bound in response.
+	const attackerIssuers = 500
+	for i := 0; i < attackerIssuers; i++ {
+		issuer := fmt.Sprintf("%s/evil-issuer-%d", server.URL, i)
+		if _, err := Get(ctx, issuer); err == nil {
+			t.Fatalf("expected issuer %d to fail", i)
+		}
+	}
+
+	if got := negativeCache.Len(); got > negativeCacheCapacity {
+		t.Fatalf("expected negative cache to stay bounded at %d entries, got %d", negativeCacheCapacity, got)
+	}
+}
+
+func TestGet_CallerCancellationNeverReachesNegativeCache(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	// A caller gives up while the shared discovery is still running
+	// against an otherwise healthy issuer -- the same signature an
+	// attacker gets by naming a healthy issuer and disconnecting.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := Get(ctx, server.URL); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the caller to time out waiting, got: %v", err)
+	}
+	<-started // the shared discovery did reach the server
+
+	// The issuer is healthy and the shared discovery is still running in
+	// the background; letting it finish must not have been poisoned by
+	// the caller that gave up on it.
+	close(release)
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := Get(context.Background(), server.URL); err != nil {
+		t.Fatalf("expected a fresh caller to succeed against the healthy issuer, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected only the original shared discovery attempt (memoized on success), got %d hits", got)
+	}
+}
+
+func TestGet_SharedFlightTimeoutIsNegativeCached(t *testing.T) {
+	origTimeout := discoveryTimeout
+	discoveryTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { discoveryTimeout = origTimeout })
+
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// Much slower than discoveryTimeout, so the shared flight's own
+		// context expires -- a caller-independent signal, since this
+		// caller has no deadline of its own.
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	if _, err := Get(context.Background(), server.URL); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the shared flight's own timeout to surface, got: %v", err)
+	}
+
+	// A second call within the negative-cache TTL must be served from
+	// cache rather than triggering another slow discovery attempt.
+	if _, err := Get(context.Background(), server.URL); err == nil {
+		t.Fatal("expected the second call to still fail while negative-cached")
+	}
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected the shared-flight timeout to be negative-cached (still 1 discovery attempt), got %d", got)
 	}
 }
 
