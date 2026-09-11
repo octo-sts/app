@@ -351,9 +351,27 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 
 	// GitHub push payloads include up to 20 commits. When not truncated,
 	// use the payload directly to avoid a Compare API call.
-	if len(event.Commits) < 20 {
+	switch {
+	case len(event.Commits) < 20:
 		files = e.filesFromPushEvent(repo, event)
-	} else {
+	case event.GetBefore() == zeroHash:
+		// A new-ref push: the Compare API rejects the zero "before" SHA with
+		// a 404, and the truncated payload may omit policy files, so scan the
+		// policy directory at the pushed SHA instead. A missing directory
+		// means there are no policies to validate.
+		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
+		if err != nil {
+			if resp == nil || resp.StatusCode != http.StatusNotFound {
+				return nil, err
+			}
+			log.Infof("no policy directory at %s, skipping validation", sha)
+		}
+		for _, file := range dirContents {
+			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
+				files = append(files, file.GetPath())
+			}
+		}
+	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
 			return nil, err
@@ -366,6 +384,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (*g
 			}
 		}
 	}
+
 	if len(files) == 0 {
 		return nil, nil
 	}
