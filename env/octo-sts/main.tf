@@ -72,8 +72,14 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_apps                = var.github_apps
-  notification_channels      = local.notification_channels
-  sticky_store               = "firestore"
-  sticky_store_firestore_ttl = "1h"
+  github_apps           = var.github_apps
+  notification_channels = local.notification_channels
+  sticky_store          = "firestore"
+  # Reads refresh expire_at, so this TTL only reaps IDLE mappings; it must
+  # exceed the longest exchange cadence of any checks:write consumer, or the
+  # mapping dies between exchanges and identity re-rolls. Long-lived bots
+  # (e.g. self-hosted Renovate on a daily schedule) need identity stability
+  # across runs: 1h silently re-rolled them every run. 30 days keeps any
+  # consumer that exchanges at least monthly pinned forever.
+  sticky_store_firestore_ttl = "720h"
 }
