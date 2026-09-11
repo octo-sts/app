@@ -62,6 +62,7 @@ type EnvConfigWebhook struct {
 	WebhookSecret string `envconfig:"GITHUB_WEBHOOK_SECRET" required:"true"`
 	// If set, only process events from these organizations (comma separated).
 	OrganizationFilter string `envconfig:"GITHUB_WEBHOOK_ORGANIZATION_FILTER"`
+	EventingIngress    string `envconfig:"EVENT_INGRESS_URI" required:"false"`
 	// OrgPolicyRepo is the repository name (without owner) that holds org-scoped
 	// trust policies and the org trusted-issuer allowlist. Defaults to ".github".
 	// Must not be empty; setting ORG_POLICY_REPO="" is rejected at startup.
