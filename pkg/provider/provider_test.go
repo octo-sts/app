@@ -8,12 +8,197 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
+
+func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		// A small delay widens the race window so concurrent Get calls are
+		// likely to overlap before the first completes.
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	const callers = 20
+	var wg sync.WaitGroup
+	errs := make([]error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, err := Get(context.Background(), server.URL)
+			errs[i] = err
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("caller %d: unexpected error: %v", i, err)
+		}
+	}
+
+	if got := atomic.LoadInt32(&hits); got != 1 {
+		t.Fatalf("expected discovery to be single-flighted to 1 request, got %d", got)
+	}
+}
+
+func TestGet_FollowerContextIsNotAffectedByLeaderCancellation(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var requestCount int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&requestCount, 1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	// Leader has a short deadline that will expire while the server is
+	// deliberately held open. Follower has no deadline at all.
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	followerCtx := context.Background()
+
+	leaderDone := make(chan error, 1)
+	followerDone := make(chan error, 1)
+
+	go func() {
+		_, err := Get(leaderCtx, server.URL)
+		leaderDone <- err
+	}()
+	<-started // leader is deterministically in-flight before follower joins
+	go func() {
+		_, err := Get(followerCtx, server.URL)
+		followerDone <- err
+	}()
+
+	leaderErr := <-leaderDone
+	if !errors.Is(leaderErr, context.DeadlineExceeded) {
+		t.Fatalf("expected leader to fail with its own deadline exceeded, got: %v", leaderErr)
+	}
+
+	// Let the shared discovery complete for the follower's benefit.
+	close(release)
+	followerErr := <-followerDone
+
+	if followerErr != nil {
+		t.Fatalf("follower with no deadline of its own must not be affected by the leader's unrelated cancellation, got error: %v", followerErr)
+	}
+}
+
+func TestGet_LoneCallerTimeoutStillMemoizesBackgroundSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Slower than the caller's deadline below, but well within
+		// discoveryTimeout, so the shared discovery succeeds after the
+		// caller has already given up.
+		time.Sleep(50 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if _, err := Get(ctx, server.URL); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected the lone caller to time out, got: %v", err)
+	}
+
+	// Give the background discovery time to finish after the caller left.
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok := providers.Get(server.URL); !ok {
+		t.Fatal("expected the background discovery's success to be memoized even though the only caller timed out waiting for it")
+	}
+}
+
+func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+	defer close(release)
+
+	// Leader has no deadline, so the shared discovery keeps running past
+	// the follower's own short deadline below.
+	leaderCtx := context.Background()
+	followerCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	go func() {
+		_, _ = Get(leaderCtx, server.URL)
+	}()
+	<-started // leader is deterministically in-flight before follower joins
+
+	start := time.Now()
+	_, err := Get(followerCtx, server.URL)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected follower to respect its own deadline, got: %v", err)
+	}
+	if elapsed > 200*time.Millisecond {
+		t.Fatalf("follower should have returned promptly at its own ~30ms deadline, took %v", elapsed)
+	}
+}
+
+func TestGet_FailedFlightIsRetryableOnNextCall(t *testing.T) {
+	var hits int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 1 {
+			// 404 is a permanent error (isPermanentError), so this fails
+			// fast with no internal retry.
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		issuerURL := "http://" + r.Host
+		w.Write([]byte(`{"issuer":"` + issuerURL + `","authorization_endpoint":"` + issuerURL + `/auth","token_endpoint":"` + issuerURL + `/token","jwks_uri":"` + issuerURL + `/jwks"}`))
+	}))
+	defer server.Close()
+
+	if _, err := Get(context.Background(), server.URL); err == nil {
+		t.Fatal("expected the first call to fail")
+	}
+
+	if _, err := Get(context.Background(), server.URL); err != nil {
+		t.Fatalf("expected a completed failed flight to be retryable on the next call, got: %v", err)
+	}
+	if got := atomic.LoadInt32(&hits); got != 2 {
+		t.Fatalf("expected the second call to trigger a fresh discovery attempt, got %d total attempts", got)
+	}
+}
 
 func TestNewProviderWithRetry_Success(t *testing.T) {
 	// Create a test server that responds successfully
