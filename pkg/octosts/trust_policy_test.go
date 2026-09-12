@@ -137,6 +137,70 @@ func TestCompile(t *testing.T) {
 	}
 }
 
+// TestPatternAnchoringWithAlternation locks in full anchoring for patterns
+// containing a top-level "|": "^"+p+"$" would parse as "(^A)|(B$)", letting
+// "main|develop" match the subject "main-attacker" as a prefix (or
+// "attacker-develop" as a suffix). See compileAnchored.
+func TestPatternAnchoringWithAlternation(t *testing.T) {
+	tp := &TrustPolicy{
+		Issuer:         "https://example.com",
+		SubjectPattern: "main|develop",
+		ClaimPattern: map[string]string{
+			"ref": "refs/heads/main|refs/tags/v1",
+		},
+	}
+	if err := tp.Compile(); err != nil {
+		t.Fatalf("Compile() = %v", err)
+	}
+
+	token := func(sub string) *oidc.IDToken {
+		return &oidc.IDToken{
+			Issuer:   "https://example.com",
+			Subject:  sub,
+			Audience: []string{"octo-sts.dev"},
+		}
+	}
+
+	for _, sub := range []string{"main", "develop"} {
+		tok := token(sub)
+		withClaims(tok, []byte(`{"ref":"refs/heads/main"}`))
+		if _, err := tp.CheckToken(tok, "octo-sts.dev"); err != nil {
+			t.Errorf("CheckToken(%q) = %v, wanted match", sub, err)
+		}
+	}
+
+	// Prefix/suffix leakage through the unanchored alternatives.
+	for _, sub := range []string{"main-attacker", "attacker-develop", "xmainx"} {
+		tok := token(sub)
+		withClaims(tok, []byte(`{"ref":"refs/heads/main"}`))
+		if _, err := tp.CheckToken(tok, "octo-sts.dev"); err == nil {
+			t.Errorf("CheckToken(%q) matched, wanted rejection", sub)
+		}
+	}
+
+	// Claim patterns must be anchored the same way: a branch named
+	// "x/refs/tags/v1" yields this ref, which must not match the
+	// "refs/tags/v1" alternative as a suffix.
+	tok := token("main")
+	withClaims(tok, []byte(`{"ref":"refs/heads/x/refs/tags/v1"}`))
+	if _, err := tp.CheckToken(tok, "octo-sts.dev"); err == nil {
+		t.Error("CheckToken with suffix-matching ref claim matched, wanted rejection")
+	}
+}
+
+// TestCompileRejectsGroupEscape verifies a pattern with an unbalanced ")" is
+// rejected outright rather than silently rewritten by the "(?:" wrapper into
+// "^(?:foo)|()$", whose "()$" alternative matches everything.
+func TestCompileRejectsGroupEscape(t *testing.T) {
+	tp := &TrustPolicy{
+		Issuer:         "https://example.com",
+		SubjectPattern: `foo)|(`,
+	}
+	if err := tp.Compile(); err == nil {
+		t.Error("Compile() = nil, wanted error for unbalanced group")
+	}
+}
+
 func TestCheckToken(t *testing.T) {
 	tests := []struct {
 		name    string
