@@ -4,6 +4,7 @@
 package octosts
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -17,12 +18,15 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v88/github"
+	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 
 	"golang.org/x/sync/singleflight"
@@ -68,12 +72,18 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
+// Pin confirmation caches share one size and TTL. The TTL is deliberately
+// shorter than ghinstall's 5-minute negative-cache TTL so that
+// install-then-retry recovers within a minute. Unchanged observations reuse
+// confirmations until expiry; newly observed installations trigger a refresh.
+const (
+	pinCacheSize  = 256
+	pinConfirmTTL = time.Minute
+)
+
 // pinMisses throttles repeated GetAllFresh confirmations of app-pin misses,
-// which bypass the negative install cache and hit GitHub's API. The TTL is
-// deliberately shorter than ghinstall's 5-minute negative-cache TTL so that
-// install-then-retry recovers within a minute, at a bounded cost of one
-// confirmation walk per owner+pin per minute per replica.
-var pinMisses = expirablelru.NewLRU[string, struct{}](256, nil, time.Minute*1)
+// which bypass the negative install cache and hit GitHub's API.
+var pinMisses = expirablelru.NewLRU[string, struct{}](pinCacheSize, nil, pinConfirmTTL)
 
 // pinConfirmTimeout bounds a shared pin-miss confirmation walk once its
 // leader detaches from the triggering request's cancellation.
@@ -106,7 +116,19 @@ type sts struct {
 	// pinFreshFlight collapses concurrent pin-miss confirmation walks for the
 	// same owner into one GetAllFresh. Its zero value is ready to use.
 	pinFreshFlight singleflight.Group
+
+	// pinCandidates caches confirmed candidate sets within this
+	// service, so their transports cannot cross service configurations. It is
+	// initialized lazily for callers that need a fresh confirmation.
+	pinCandidatesOnce sync.Once
+	pinCandidates     *expirablelru.LRU[string, pinCandidateSnapshot]
 }
+
+// pinFallbacks rotates non-checks:write pattern picks while quota data is
+// incomplete, mirroring roundRobin's cold-start counter. One counter per
+// (owner, eligible set) so unrelated pins cannot phase-lock each other;
+// bounded like the other pin caches — eviction merely restarts a rotation.
+var pinFallbacks, _ = lru.New[string, *atomic.Uint64](pinCacheSize)
 
 func (s *sts) policyRepo() string {
 	if s.orgPolicyRepo != "" {
@@ -303,7 +325,7 @@ func hasChecksWrite(perms github.InstallationPermissions) bool {
 // precedence order: the policy's app pin, the persisted sticky installation
 // for checks:write policies, then the installation that read the policy.
 func (s *sts) getExchangeInstall(ctx context.Context, pool *ghinstall.OrgPool, owner, scope, identity, subject string, tp *TrustPolicy, readAtr *ghinstallation.AppsTransport, readID int64) (*ghinstallation.AppsTransport, int64, error) {
-	eligible, err := s.eligibleApps(tp)
+	eligible, err := s.eligibleApps(pool, owner, tp)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -341,27 +363,35 @@ func (s *sts) putSticky(ctx context.Context, key string, id int64, scope, identi
 	}
 }
 
-// eligibleApps resolves the policy's app pin to configured app IDs.
+// eligibleApps resolves the policy's app pin to configured app IDs in the
+// selected owner's pool. Configured membership includes apps whose lookup
+// currently fails, so incomplete installation results cannot narrow the pin.
 // Returns nil when the policy does not restrict apps.
-func (s *sts) eligibleApps(tp *TrustPolicy) (map[int64]bool, error) {
+func (s *sts) eligibleApps(pool *ghinstall.OrgPool, owner string, tp *TrustPolicy) (map[int64]bool, error) {
 	switch {
 	case tp.App != "":
-		if id, ok := s.apps.Names[tp.App]; ok {
-			return map[int64]bool{id: true}, nil
+		id, configured := s.apps.Names[tp.App]
+		if !configured {
+			var err error
+			id, err = strconv.ParseInt(tp.App, 10, 64)
+			configured = err == nil && s.apps.IDs[id]
 		}
-		if id, err := strconv.ParseInt(tp.App, 10, 64); err == nil && s.apps.IDs[id] {
-			return map[int64]bool{id: true}, nil
+		if !configured {
+			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app %q is not a configured app", tp.App)
 		}
-		return nil, status.Errorf(codes.FailedPrecondition, "trust policy app %q is not a configured app", tp.App)
+		if pool.AppIDs != nil && !pool.AppIDs[id] {
+			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app %q is not configured for %q", tp.App, owner)
+		}
+		return map[int64]bool{id: true}, nil
 	case tp.appPattern != nil:
 		eligible := make(map[int64]bool)
 		for name, id := range s.apps.Names {
-			if tp.appPattern.MatchString(name) {
+			if (pool.AppIDs == nil || pool.AppIDs[id]) && tp.appPattern.MatchString(name) {
 				eligible[id] = true
 			}
 		}
 		if len(eligible) == 0 {
-			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app_pattern %q matches no configured apps", tp.AppPattern)
+			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app_pattern %q matches no configured apps for %q", tp.AppPattern, owner)
 		}
 		return eligible, nil
 	}
@@ -369,6 +399,7 @@ func (s *sts) eligibleApps(tp *TrustPolicy) (map[int64]bool, error) {
 }
 
 // getPinnedInstall picks among owner's installations of the eligible apps.
+// eligible must already be scoped to the selected pool by eligibleApps.
 // checks:write policies pick deterministically by route key so check-run
 // ownership stays stable with or without a sticky store (and stick within
 // the eligible set when one is configured); other policies use capacity-aware
@@ -384,10 +415,9 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 		if enumErr != nil {
 			return nil, 0, enumErr
 		}
-		missErr := status.Errorf(codes.FailedPrecondition, "no installation for %q matches the trust policy app pin", owner)
 		missKey := pinMissKey(owner, eligible)
 		if _, confirmed := pinMisses.Get(missKey); confirmed {
-			return nil, 0, missErr
+			return nil, 0, pinMissErr(owner, eligible, nil)
 		}
 		recordMiss := func(insts []ghinstall.Installation, err error) {
 			if err == nil && len(eligibleInstalls(insts, eligible)) == 0 {
@@ -401,8 +431,7 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 			if enumErr != nil {
 				return nil, 0, enumErr
 			}
-			pinMisses.Add(missKey, struct{}{})
-			return nil, 0, missErr
+			return nil, 0, pinMissErr(owner, eligible, nil)
 		}
 	}
 
@@ -421,7 +450,7 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 				if enumErr != nil {
 					return nil, 0, enumErr
 				}
-				absKey := fmt.Sprintf("%s|inst|%d", owner, cachedID)
+				absKey := stickyAbsenceKey(owner, cachedID)
 				_, confirmed := pinMisses.Get(absKey)
 				if !confirmed && !fresh {
 					recordAbsent := func(freshInsts []ghinstall.Installation, err error) {
@@ -440,36 +469,125 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 					if !present && freshErr != nil {
 						return nil, 0, freshErr
 					}
-					if fc := eligibleInstalls(freshInsts, eligible); len(fc) > 0 {
-						candidates = fc
-					}
+					// Use the fresh result, including an empty set, so an
+					// older snapshot cannot override this confirmation.
+					candidates, enumErr = eligibleInstalls(freshInsts, eligible), freshErr
+					fresh = true
 				}
 				if !present && !confirmed {
 					pinMisses.Add(absKey, struct{}{})
 				}
 			}
-			clog.FromContext(ctx).Infof("sticky install %d not in pinned app set for %s, reassigning", cachedID, owner)
+			clog.FromContext(ctx).Infof("sticky install %d not in pinned app set for %s", cachedID, owner)
 		}
 	}
 
-	// checks:write picks stay deterministic regardless of sticky persistence:
-	// with a store, concurrent replicas must agree on a first assignment
-	// (per-process quota stores would diverge and the last putSticky would
-	// orphan the other app's check runs); without one, determinism is the
-	// only thing keeping a caller's check runs on one app. Other pins persist
-	// nothing and re-pick every exchange, so they use the same capacity-aware
-	// selection as unpinned routing, falling back to the deterministic spread
-	// until quota data exists.
-	pick := candidates[routekey.Index(scope, identity, subject, len(candidates))]
-	if !checksWrite {
-		if qp, ok := ghinstall.PickByQuota(ctx, candidates, pool.Quota); ok {
-			pick = qp
+	if checksWrite && (fresh || len(candidates) < len(eligible)) {
+		var err error
+		if candidates, err = s.confirmStableCandidates(ctx, pool, owner, eligible, candidates, fresh, enumErr); err != nil {
+			return nil, 0, err
 		}
+		if len(candidates) == 0 {
+			return nil, 0, pinMissErr(owner, eligible, nil)
+		}
+	}
+
+	var pick ghinstall.Installation
+	if checksWrite {
+		// Configuration order must not change check-run ownership. candidates
+		// is a private slice, so sorting cannot mutate a manager or cache entry.
+		slices.SortFunc(candidates, func(a, b ghinstall.Installation) int {
+			if order := cmp.Compare(a.AppID, b.AppID); order != 0 {
+				return order
+			}
+			return cmp.Compare(a.ID, b.ID)
+		})
+		pick = candidates[routekey.Index(scope, identity, subject, len(candidates))]
+	} else if qp, ok := ghinstall.PickByQuota(ctx, candidates, pool.Quota); ok {
+		pick = qp
+	} else {
+		k := pinMissKey(owner, eligible)
+		ctr, ok := pinFallbacks.Get(k)
+		if !ok {
+			ctr = new(atomic.Uint64)
+			pinFallbacks.Add(k, ctr)
+		}
+		pick = candidates[ctr.Add(1)%uint64(len(candidates))]
 	}
 	if sticky {
 		s.putSticky(ctx, key, pick.ID, scope, identity, subject)
 	}
 	return pick.Transport, pick.ID, nil
+}
+
+// pinCandidateSnapshot keeps the authoritative candidates separate from the
+// installation identities observed before and during confirmation. Remembering
+// both observations lets new installations trigger a refresh without repeatedly
+// confirming an unchanged stale list that the fresh walk already corrected.
+type pinCandidateSnapshot struct {
+	candidates []ghinstall.Installation
+	observed   map[int64]int64 // installation ID -> App ID
+}
+
+func newPinCandidateSnapshot(candidates, observed []ghinstall.Installation) pinCandidateSnapshot {
+	snapshot := pinCandidateSnapshot{
+		candidates: slices.Clone(candidates),
+		observed:   make(map[int64]int64, len(candidates)+len(observed)),
+	}
+	for _, inst := range observed {
+		snapshot.observed[inst.ID] = inst.AppID
+	}
+	for _, inst := range candidates {
+		snapshot.observed[inst.ID] = inst.AppID
+	}
+	return snapshot
+}
+
+// confirmStableCandidates enforces set stability for checks:write picks:
+// hashing a subset flips ownership when it heals, and replicas holding
+// divergent partial views would persist different assignments. An enumeration
+// error with missing eligible apps fails closed; error-free incompleteness
+// can be a negative-cache omission, so it is confirmed fresh before hashing.
+// Cached confirmations are reused until expiry or a new installation is
+// observed. Retaining confirmed candidates also prevents a delayed caller's
+// older enumeration from overriding a completed confirmation.
+func (s *sts) confirmStableCandidates(ctx context.Context, pool *ghinstall.OrgPool, owner string, eligible map[int64]bool, candidates []ghinstall.Installation, fresh bool, enumErr error) ([]ghinstall.Installation, error) {
+	if enumErr != nil && len(candidates) < len(eligible) {
+		return nil, enumErr
+	}
+	s.pinCandidatesOnce.Do(func() {
+		s.pinCandidates = expirablelru.NewLRU[string, pinCandidateSnapshot](pinCacheSize, nil, pinConfirmTTL)
+	})
+	incKey := pinMissKey(owner, eligible)
+	if fresh {
+		s.pinCandidates.Add(incKey, newPinCandidateSnapshot(candidates, nil))
+		return candidates, nil
+	}
+	if cached, ok := s.pinCandidates.Get(incKey); ok {
+		known := true
+		for _, inst := range candidates {
+			if appID, ok := cached.observed[inst.ID]; !ok || appID != inst.AppID {
+				known = false
+				break
+			}
+		}
+		if known {
+			return slices.Clone(cached.candidates), nil
+		}
+	}
+	observed := candidates
+	recordCandidates := func(insts []ghinstall.Installation, err error) {
+		freshEligible := eligibleInstalls(insts, eligible)
+		if err == nil || len(freshEligible) == len(eligible) {
+			s.pinCandidates.Add(incKey, newPinCandidateSnapshot(freshEligible, observed))
+		}
+	}
+	freshInsts, freshErr := s.getAllFreshShared(ctx, pool, owner, recordCandidates)
+	candidates = eligibleInstalls(freshInsts, eligible)
+	if freshErr != nil && len(candidates) < len(eligible) {
+		return nil, freshErr
+	}
+	return candidates, nil
 }
 
 // getAllFreshShared collapses concurrent GetAllFresh confirmation walks for
@@ -478,9 +596,9 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 // result pairs installations with the enumeration error, preserving
 // partial-enumeration semantics. A shared walk may have started before a
 // waiter's own cache observation, so a confirmation can lag reality by up to
-// the walk's duration. record, when non-nil, receives the flight's result
-// even if this caller's context ends first, so a completed walk is recorded
-// rather than discarded.
+// the walk's duration. record, when non-nil, receives the flight's result on
+// every path — normal completion and caller cancellation — so recording
+// logic lives in one place and a completed walk is never discarded.
 func (s *sts) getAllFreshShared(ctx context.Context, pool *ghinstall.OrgPool, owner string, record func([]ghinstall.Installation, error)) ([]ghinstall.Installation, error) {
 	ch := s.pinFreshFlight.DoChan(owner, func() (any, error) {
 		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pinConfirmTimeout)
@@ -500,6 +618,9 @@ func (s *sts) getAllFreshShared(ctx context.Context, pool *ghinstall.OrgPool, ow
 		return nil, status.FromContextError(ctx.Err()).Err()
 	case res := <-ch:
 		insts, _ := res.Val.([]ghinstall.Installation)
+		if record != nil {
+			record(insts, res.Err)
+		}
 		return insts, res.Err
 	}
 }
@@ -513,6 +634,27 @@ func eligibleInstalls(insts []ghinstall.Installation, eligible map[int64]bool) [
 		}
 	}
 	return out
+}
+
+// pinMissErr names the eligible apps that have no installation for owner.
+func pinMissErr(owner string, eligible map[int64]bool, candidates []ghinstall.Installation) error {
+	present := make(map[int64]bool, len(candidates))
+	for _, c := range candidates {
+		present[c.AppID] = true
+	}
+	missing := make([]int64, 0, len(eligible))
+	for id := range eligible {
+		if !present[id] {
+			missing = append(missing, id)
+		}
+	}
+	slices.Sort(missing)
+	return status.Errorf(codes.FailedPrecondition, "no installation for %q matches the trust policy app pin (missing apps %v)", owner, missing)
+}
+
+// stickyAbsenceKey identifies a confirmed-absent installation for owner.
+func stickyAbsenceKey(owner string, installID int64) string {
+	return fmt.Sprintf("%s|inst|%d", owner, installID)
 }
 
 // pinMissKey identifies a confirmed (owner, eligible apps) pin miss.

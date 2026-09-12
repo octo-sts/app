@@ -1401,22 +1401,27 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
-	t.Run("pattern spreads deterministically", func(t *testing.T) {
-		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
-		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
-		first, err := exchange(t, s, pool, tp)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if first != 11 && first != 12 {
-			t.Fatalf("got %d, want a ci install", first)
-		}
-		for range 5 {
-			again, err := exchange(t, s, pool, tp)
-			if err != nil || again != first {
-				t.Fatalf("got (%d, %v), want stable %d", again, err, first)
+	assertRotates := func(t *testing.T, s *sts, pool *ghinstall.OrgPool, tp *TrustPolicy) {
+		t.Helper()
+		seen := map[int64]bool{}
+		for range 4 {
+			id, err := exchange(t, s, pool, tp)
+			if err != nil {
+				t.Fatal(err)
 			}
+			if id != 11 && id != 12 {
+				t.Fatalf("got %d, want a ci install", id)
+			}
+			seen[id] = true
 		}
+		if !seen[11] || !seen[12] {
+			t.Fatalf("picks welded to %v, want rotation across both ci installs", seen)
+		}
+	}
+
+	t.Run("pattern pin rotates across candidates without quota data", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		assertRotates(t, s, pool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
 	})
 
 	t.Run("pattern pin prefers quota headroom", func(t *testing.T) {
@@ -1473,24 +1478,103 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
-	t.Run("pattern pin falls back deterministically without full quota data", func(t *testing.T) {
+	t.Run("pattern pin rotates when quota data is incomplete", func(t *testing.T) {
 		qstore := ghinstall.NewQuotaStore(time.Minute)
 		// Install 12 has no quota data: all-or-nothing disables quota picking.
 		qstore.Update(11, 12000, 15000)
 		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
 		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
-		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
-		first, err := exchange(t, s, qpool, tp)
-		if err != nil {
-			t.Fatal(err)
+		assertRotates(t, s, qpool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
+	})
+
+	t.Run("storeless checks:write pin rejects partial candidate sets", func(t *testing.T) {
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		_, err := exchange(t, s, partial, tp)
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the raw enumeration error (a partial set is not a stable routing set)", err)
 		}
-		if first != 11 && first != 12 {
-			t.Fatalf("got %d, want a ci install", first)
+	})
+
+	t.Run("storeless checks:write pin heals negative-cache omissions before hashing", func(t *testing.T) {
+		pinMisses.Purge()
+		// GetAll omits install 12 behind a nil error; the fresh confirm must
+		// complete the set before the ownership hash.
+		mgr := &enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
 		}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		expected := []int64{11, 12}[routekey.Index("healorg/repo", "id", "subj", 2)]
+		_, id, err := s.getExchangeInstall(ctx, poolOf(mgr), "healorg", "healorg/repo", "id", "subj", tp, nil, 999)
+		if err != nil || id != expected {
+			t.Fatalf("got (%d, %v), want (%d, nil) hashed over the healed set", id, err, expected)
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1", got)
+		}
+	})
+
+	t.Run("storeless checks:write pin throttles confirmed-incomplete sets", func(t *testing.T) {
+		pinMisses.Purge()
+		// The fresh walk confirms the pattern genuinely matches only one
+		// installed app: hash the confirmed set and stop re-walking.
+		mgr := &enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}},
+		}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		for i := range 3 {
+			_, id, err := s.getExchangeInstall(ctx, poolOf(mgr), "incorg", "incorg/repo", "id", "subj", tp, nil, 999)
+			if err != nil || id != 11 {
+				t.Fatalf("call %d: got (%d, %v), want (11, nil)", i, id, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (confirmed incompleteness cached)", got)
+		}
+	})
+
+	t.Run("pattern rotation is isolated per candidate set", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		exactTP := compile(t, &TrustPolicy{App: "deploy"})
+		patternTP := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
+		seen := map[int64]bool{}
+		for range 10 {
+			// The interleaved singleton pin must not phase-lock the
+			// pattern's rotation.
+			if _, err := exchange(t, s, pool, exactTP); err != nil {
+				t.Fatal(err)
+			}
+			id, err := exchange(t, s, pool, patternTP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen[id] = true
+		}
+		if !seen[11] || !seen[12] {
+			t.Fatalf("pattern picks welded to %v under interleaving, want rotation across both", seen)
+		}
+	})
+
+	t.Run("storeless checks:write pin tolerates partial enumeration when the eligible set is complete", func(t *testing.T) {
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
+			err:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		expected := []int64{11, 12}[routekey.Index("org/repo", "id", "subj", 2)]
 		for range 3 {
-			again, err := exchange(t, s, qpool, tp)
-			if err != nil || again != first {
-				t.Fatalf("got (%d, %v), want stable %d", again, err, first)
+			id, err := exchange(t, s, partial, tp)
+			if err != nil || id != expected {
+				t.Fatalf("got (%d, %v), want deterministic (%d, nil): a complete eligible set cannot flip", id, err, expected)
 			}
 		}
 	})
@@ -1498,7 +1582,7 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 	t.Run("pattern alternation stays anchored", func(t *testing.T) {
 		s := &sts{apps: AppSet{Names: map[string]int64{"ci": 1, "deploy": 2, "ci-privileged": 3}}}
 		tp := compile(t, &TrustPolicy{AppPattern: "ci|deploy"})
-		eligible, err := s.eligibleApps(tp)
+		eligible, err := s.eligibleApps(pool, "org", tp)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1583,35 +1667,42 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
-	t.Run("sticky proven ineligible reassigns despite partial enumeration", func(t *testing.T) {
+	t.Run("sticky proven ineligible fails closed on partial enumeration", func(t *testing.T) {
 		store := seedSticky(t, 21)
-		// Install 21 is enumerated (proving it ineligible for ci-.*), and an
-		// unrelated manager fails.
+		// Install 21 is enumerated (proving it ineligible for ci-.*), but an
+		// unrelated manager failed: reassigning over the partial set could
+		// diverge from a replica holding the complete set.
 		partial := poolOf(&enumMgr{
 			installs: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
 			err:      errors.New("unrelated manager failed"),
 		})
 		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
-		id, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
-		if err != nil || id != 11 {
-			t.Fatalf("got (%d, %v), want reassignment (11, nil)", id, err)
+		_, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the raw enumeration error (no reassignment over a partial set)", err)
 		}
-		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 11 {
-			t.Fatalf("sticky = (%d, %t), want (11, true)", cached, ok)
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 21 {
+			t.Fatalf("sticky = (%d, %t), want preserved (21, true)", cached, ok)
 		}
 	})
 
-	t.Run("fresh enumeration proving ineligibility outweighs its error", func(t *testing.T) {
+	t.Run("fresh partial proof of ineligibility fails closed", func(t *testing.T) {
 		store := seedSticky(t, 21)
+		// The fresh walk proves 21 ineligible but is itself partial: its
+		// error now travels with the swapped candidate set, so the pick
+		// fails closed instead of hashing a subset.
 		hidden := poolOf(&enumMgr{
 			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
 			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
 			freshErr:      errors.New("unrelated manager failed"),
 		})
 		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
-		id, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
-		if err != nil || id != 11 {
-			t.Fatalf("got (%d, %v), want reassignment (11, nil)", id, err)
+		_, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the fresh walk's error (no reassignment over a partial set)", err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 21 {
+			t.Fatalf("sticky = (%d, %t), want preserved (21, true)", cached, ok)
 		}
 	})
 
