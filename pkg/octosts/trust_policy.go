@@ -55,6 +55,22 @@ type OrgTrustPolicy struct {
 	Repositories []string `json:"repositories,omitempty"`
 }
 
+// compileAnchored compiles pattern so it must match the ENTIRE input.
+//
+// The non-capturing group is required: "|" binds looser than the anchors, so
+// "^"+pattern+"$" parses as "(^A)|(B$)", leaving each alternative unanchored on
+// one side — "main|develop" would match the subject "main-attacker". Pattern is
+// compiled ALONE first because the group hides an unbalanced ")": without this,
+// "foo)|(" wraps to "^(?:foo)|()$", whose "()$" alternative matches everything.
+// This mirrors the allowlist compilation in org_trusted_issuers.go, which the
+// two paths must not diverge from.
+func compileAnchored(pattern string) (*regexp.Regexp, error) {
+	if _, err := regexp.Compile(pattern); err != nil {
+		return nil, err
+	}
+	return regexp.Compile("^(?:" + pattern + ")$")
+}
+
 // Compile checks the trust policy for validity, and prepares internal state
 // for validating tokens.
 func (tp *TrustPolicy) Compile() error {
@@ -69,7 +85,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Issuer == "" && tp.IssuerPattern == "":
 		return errors.New("trust policy: one of issuer or issuer_pattern must be set, got neither")
 	case tp.IssuerPattern != "":
-		r, err := regexp.Compile("^" + tp.IssuerPattern + "$")
+		r, err := compileAnchored(tp.IssuerPattern)
 		if err != nil {
 			return err
 		}
@@ -83,7 +99,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Subject == "" && tp.SubjectPattern == "":
 		return errors.New("trust policy: one of subject or subject_pattern must be set, got neither")
 	case tp.SubjectPattern != "":
-		r, err := regexp.Compile("^" + tp.SubjectPattern + "$")
+		r, err := compileAnchored(tp.SubjectPattern)
 		if err != nil {
 			return err
 		}
@@ -95,7 +111,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Audience != "" && tp.AudiencePattern != "":
 		return errors.New("trust policy: only one of audience or audience_pattern can be set, got both")
 	case tp.AudiencePattern != "":
-		r, err := regexp.Compile("^" + tp.AudiencePattern + "$")
+		r, err := compileAnchored(tp.AudiencePattern)
 		if err != nil {
 			return err
 		}
@@ -105,7 +121,7 @@ func (tp *TrustPolicy) Compile() error {
 	// Compile the claim patterns.
 	tp.claimPattern = make(map[string]*regexp.Regexp, len(tp.ClaimPattern))
 	for k, v := range tp.ClaimPattern {
-		r, err := regexp.Compile("^" + v + "$")
+		r, err := compileAnchored(v)
 		if err != nil {
 			return fmt.Errorf("error compiling claim_pattern[%q]: %w", k, err)
 		}
