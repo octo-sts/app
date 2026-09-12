@@ -140,17 +140,17 @@ func main() {
 	<-ctx.Done()
 }
 
-// buildPool builds an OrgPool from a slice of managers, choosing
+// buildPool builds an OrgPool from managers and their configured app IDs, choosing
 // quota-aware round-robin when multiple apps are present and plain
 // round-robin otherwise (no quota data to consult with a single app).
-func buildPool(managers []ghinstall.Manager, quotaCfg *ghinstall.QuotaConfig) *ghinstall.OrgPool {
+func buildPool(managers []ghinstall.Manager, appIDs map[int64]bool, quotaCfg *ghinstall.QuotaConfig) *ghinstall.OrgPool {
 	var m ghinstall.Manager
 	if len(managers) == 1 {
 		m = ghinstall.NewRoundRobin(managers)
 	} else {
 		m = ghinstall.NewRoundRobinWithQuota(managers, quotaCfg)
 	}
-	return &ghinstall.OrgPool{M: m, AppCount: len(managers), Quota: quotaCfg}
+	return &ghinstall.OrgPool{M: m, AppCount: len(managers), AppIDs: appIDs, Quota: quotaCfg}
 }
 
 // buildRouterFromYAML loads the YAML config file and builds an OrgRouter
@@ -173,6 +173,7 @@ func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quot
 	totalApps := 0
 	for _, org := range cfg.Orgs {
 		managers := make([]ghinstall.Manager, 0, len(org.Apps))
+		appIDs := make(map[int64]bool, len(org.Apps))
 		for _, app := range org.Apps {
 			var kmsClient kms.KMS
 			if app.KMSKey != "" {
@@ -191,8 +192,9 @@ func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quot
 				return nil, 0, octosts.AppSet{}, closers, err
 			}
 			managers = append(managers, m)
+			appIDs[app.AppID] = true
 		}
-		pools[org.Name] = buildPool(managers, quotaCfg)
+		pools[org.Name] = buildPool(managers, appIDs, quotaCfg)
 		totalApps += len(managers)
 	}
 
@@ -239,7 +241,9 @@ func buildRouterFromEnv(ctx context.Context, baseCfg *envConfig.EnvConfig, quota
 		return nil, 0, octosts.AppSet{}, closers, fmt.Errorf("no apps with valid KMS keys configured")
 	}
 
+	// appIDs is aliased into both the pool and the AppSet; both treat it as
+	// read-only after construction.
 	return ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
-		ghinstall.WildcardOrg: buildPool(managers, quotaCfg),
+		ghinstall.WildcardOrg: buildPool(managers, appIDs, quotaCfg),
 	}), len(managers), octosts.AppSet{IDs: appIDs}, closers, nil
 }
