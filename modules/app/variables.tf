@@ -98,7 +98,7 @@ variable "sticky_store_firestore_collection" {
 }
 
 variable "sticky_store_firestore_ttl" {
-  description = "TTL for sticky route documents (e.g. 1h)."
+  description = "TTL for sticky route documents. Reads refresh the TTL, so it only reaps idle mappings; size it above the longest exchange cadence of any checks:write consumer (a bot exchanging daily needs well over 24h) or identities re-roll between exchanges."
   type        = string
-  default     = "1h"
+  default     = "720h"
 }
