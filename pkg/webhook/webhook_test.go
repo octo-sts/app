@@ -3071,6 +3071,96 @@ func TestPolicyChangesFromSnapshot(t *testing.T) {
 	}
 }
 
+// TestValidatePoliciesCompilesTrustPolicies proves validatePolicies COMPILES
+// repo and org trust policies rather than merely unmarshalling them. "[unclosed"
+// is a well-formed YAML string, so yaml.UnmarshalStrict accepts it; only
+// Compile() rejects it. Without compiling, the check run reports such a file
+// Valid and the policy fails only at token-exchange time. The org trusted-issuer
+// allowlist already gets this treatment, and the two must not diverge.
+func TestValidatePoliciesCompilesTrustPolicies(t *testing.T) {
+	tests := []struct {
+		name    string
+		repo    string
+		policy  string
+		wantErr string
+	}{{
+		name:    "repo policy with uncompilable subject_pattern",
+		repo:    "bar",
+		policy:  "issuer: https://example.com\nsubject_pattern: \"[unclosed\"\n",
+		wantErr: "subject_pattern",
+	}, {
+		name:    "org policy with uncompilable issuer_pattern",
+		repo:    ".github",
+		policy:  "issuer_pattern: \"[unclosed\"\nsubject: s\n",
+		wantErr: "issuer_pattern",
+	}, {
+		name:    "repo policy with a claim_pattern that escapes the anchoring group",
+		repo:    "bar",
+		policy:  "issuer: https://example.com\nsubject: s\nclaim_pattern:\n  ref: \"a)|(\"\n",
+		wantErr: "claim_pattern",
+	}, {
+		name:   "repo policy with a top-level alternation compiles",
+		repo:   "bar",
+		policy: "issuer: https://example.com\nsubject_pattern: \"a|b\"\n",
+	}, {
+		// GitHub preserves repository-name case, so ".GitHub" must still reach
+		// the org arm, and that arm must compile.
+		name:    "org policy in a case-folded repo name is compiled",
+		repo:    ".GitHub",
+		policy:  "issuer_pattern: \"[unclosed\"\nsubject: s\n",
+		wantErr: "issuer_pattern",
+	}, {
+		// "repositories" is only valid on an org policy: strict-unmarshalling
+		// this as a repo-level TrustPolicy would reject it.
+		name:   "org policy in a case-folded repo name keeps its org-only fields",
+		repo:   ".GitHub",
+		policy: "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const path = ".github/chainguard/test.sts.yaml"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/contents/"+path) {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(&github.RepositoryContent{
+					Type:     new("file"),
+					Name:     new("test.sts.yaml"),
+					Path:     github.Ptr(path),
+					Encoding: new("base64"),
+					Content:  new(base64.StdEncoding.EncodeToString([]byte(tt.policy))),
+				}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer srv.Close()
+
+			gh, err := github.NewClient(
+				github.WithHTTPClient(srv.Client()),
+				github.WithEnterpriseURLs(srv.URL, srv.URL),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			results, err := validatePolicies(slogtest.Context(t), gh, "foo", tt.repo, "deadbeef", []string{path}, ".github")
+			if verr, ok := results[path]; !ok || (verr != nil) != (tt.wantErr != "") {
+				t.Errorf("results[%q] = (%v, present=%t), want (err=%t, present=true)", path, verr, ok, tt.wantErr != "")
+			}
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("validatePolicies() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("validatePolicies() = nil, want an error naming %s", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("validatePolicies() = %q, want it to name %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 // forcedPushServer stands up the GitHub endpoints a forced push to the default
 // branch exercises: the token mint and policy file reads come from testdata,
 // while the policy directory listing is driven per-ref by trees.

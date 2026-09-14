@@ -55,22 +55,6 @@ type OrgTrustPolicy struct {
 	Repositories []string `json:"repositories,omitempty"`
 }
 
-// compileAnchored compiles pattern so it must match the ENTIRE input.
-//
-// The non-capturing group is required: "|" binds looser than the anchors, so
-// "^"+pattern+"$" parses as "(^A)|(B$)", leaving each alternative unanchored on
-// one side — "main|develop" would match the subject "main-attacker". Pattern is
-// compiled ALONE first because the group hides an unbalanced ")": without this,
-// "foo)|(" wraps to "^(?:foo)|()$", whose "()$" alternative matches everything.
-// This mirrors the allowlist compilation in org_trusted_issuers.go, which the
-// two paths must not diverge from.
-func compileAnchored(pattern string) (*regexp.Regexp, error) {
-	if _, err := regexp.Compile(pattern); err != nil {
-		return nil, err
-	}
-	return regexp.Compile("^(?:" + pattern + ")$")
-}
-
 // Compile checks the trust policy for validity, and prepares internal state
 // for validating tokens.
 func (tp *TrustPolicy) Compile() error {
@@ -87,7 +71,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.IssuerPattern != "":
 		r, err := compileAnchored(tp.IssuerPattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid issuer_pattern: %w", err)
 		}
 		tp.issuerPattern = r
 	}
@@ -101,7 +85,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.SubjectPattern != "":
 		r, err := compileAnchored(tp.SubjectPattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid subject_pattern: %w", err)
 		}
 		tp.subjectPattern = r
 	}
@@ -113,7 +97,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.AudiencePattern != "":
 		r, err := compileAnchored(tp.AudiencePattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid audience_pattern: %w", err)
 		}
 		tp.audiencePattern = r
 	}

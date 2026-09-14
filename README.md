@@ -63,6 +63,10 @@ permissions:
 This policy will allow OIDC tokens from Google accounts of folks with a
 Chainguard email address to federate and read the repo contents.
 
+Every pattern is matched against the whole value: `subject_pattern: "[0-9]+"`
+accepts `123` but not `123x`, and `refs/heads/main|refs/heads/develop` accepts
+exactly those two refs. Do not add `^` or `$` yourself.
+
 #### Autocomplete
 
 [JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:

@@ -672,16 +672,20 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 		// so an org whose repo is literally ".GitHub" would otherwise fall through
 		// to the default arm and have its org policy strict-unmarshalled as a
 		// repo-level TrustPolicy — a bogus check-run failure on a valid file.
+		//
+		// Parse AND compile, as for the allowlist above: only compiling catches an
+		// uncompilable pattern, which would otherwise pass this check and fail at
+		// token exchange. lookupTrustPolicy on the exchange path does the same.
 		case strings.EqualFold(repo, orgPolicyRepo):
-			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.OrgTrustPolicy{}); err != nil {
-				log.Infof("failed to parse org trust policy: %v", err)
+			if err := parseAndCompile(raw, &octosts.OrgTrustPolicy{}); err != nil {
+				log.Infof("failed to validate org trust policy: %v", err)
 				fail(f, fmt.Errorf("%s: %w", f, err))
 				continue
 			}
 
 		default:
-			if err := yaml.UnmarshalStrict([]byte(raw), &octosts.TrustPolicy{}); err != nil {
-				log.Infof("failed to parse trust policy: %v", err)
+			if err := parseAndCompile(raw, &octosts.TrustPolicy{}); err != nil {
+				log.Infof("failed to validate trust policy: %v", err)
 				fail(f, fmt.Errorf("%s: %w", f, err))
 				continue
 			}
@@ -691,6 +695,20 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 	}
 
 	return results, merr
+}
+
+// compilableTrustPolicy is satisfied by *octosts.TrustPolicy and *octosts.OrgTrustPolicy.
+type compilableTrustPolicy interface {
+	Compile() error
+}
+
+// parseAndCompile strict-unmarshals raw into tp and compiles it, so the check run
+// applies the same verdict as the token-exchange path.
+func parseAndCompile(raw string, tp compilableTrustPolicy) error {
+	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
+		return err
+	}
+	return tp.Compile()
 }
 
 func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (checkRun *github.CheckRun, err error) {
