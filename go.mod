@@ -3,7 +3,7 @@ module github.com/octo-sts/app
 go 1.27.0
 
 require (
-	chainguard.dev/go-grpc-kit v0.19.0
+	chainguard.dev/go-grpc-kit v0.20.0
 	chainguard.dev/sdk v0.1.257
 	cloud.google.com/go/firestore v1.25.0
 	cloud.google.com/go/kms v1.33.0
