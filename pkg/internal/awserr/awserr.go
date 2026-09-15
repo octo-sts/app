@@ -15,8 +15,7 @@ import (
 // stripping the message which may contain resource ARNs and AWS account
 // identifiers. Errors that are not AWS API errors are returned unchanged.
 func Sanitize(err error) error {
-	var apiErr smithy.APIError
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[smithy.APIError](err); ok {
 		return fmt.Errorf("%s", apiErr.ErrorCode()) //nolint:err113
 	}
 	return err

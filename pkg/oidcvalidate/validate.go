@@ -100,8 +100,8 @@ func IsValidIssuer(iss string) bool {
 			return false
 		}
 		// Additional validation: each path segment should be reasonable
-		segments := strings.Split(parsedURL.Path, "/")
-		for _, segment := range segments {
+		segments := strings.SplitSeq(parsedURL.Path, "/")
+		for segment := range segments {
 			if segment == "" {
 				continue // Skip empty segments (like the first one after leading /)
 			}

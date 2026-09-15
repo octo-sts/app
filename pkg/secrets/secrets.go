@@ -83,7 +83,7 @@ func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, er
 		// so parsing the whole value would silently swallow every entry after
 		// the first and derive the vault from only the leading one.
 		var vaultURL string
-		for _, entry := range strings.Split(cfg.WebhookSecret, ",") {
+		for entry := range strings.SplitSeq(cfg.WebhookSecret, ",") {
 			entry = strings.TrimSpace(entry)
 			v, err := akv.ParseSecretID(entry)
 			if err != nil {
