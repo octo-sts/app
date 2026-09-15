@@ -262,7 +262,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{s.policyRepo()},
 		Permissions: &github.InstallationPermissions{
-			Contents: ptr("read"),
+			Contents: new("read"),
 		},
 	}
 
@@ -453,7 +453,7 @@ func (s *sts) orgIssuerLookup(ctx context.Context, owner string) (orgIssuerEntry
 		return e, nil
 	}
 
-	ch := s.orgIssuerFlight.DoChan(owner, func() (interface{}, error) {
+	ch := s.orgIssuerFlight.DoChan(owner, func() (any, error) {
 		// A prior flight may have populated the cache between our miss and here.
 		if e, ok := orgIssuers.Get(owner); ok {
 			return e, nil

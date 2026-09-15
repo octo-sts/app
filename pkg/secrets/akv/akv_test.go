@@ -51,10 +51,8 @@ func newTestClient(t *testing.T, status int, body any, gotPath *string) *azsecre
 	t.Cleanup(srv.Close)
 
 	client, err := azsecrets.NewClient(srv.URL, fakeCred{}, &azsecrets.ClientOptions{
-		ClientOptions: azcore.ClientOptions{
-			// srv.Client() trusts the server's self-signed certificate.
-			Transport: srv.Client(),
-		},
+		// srv.Client() trusts the server's self-signed certificate.
+		Transport: srv.Client(),
 		// The test server is not a real Key Vault domain.
 		DisableChallengeResourceVerification: true,
 	})

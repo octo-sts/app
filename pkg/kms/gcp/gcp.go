@@ -19,11 +19,11 @@ type signingMethodGCP struct {
 	client *kms.KeyManagementClient
 }
 
-func (s *signingMethodGCP) Verify(string, string, interface{}) error {
+func (s *signingMethodGCP) Verify(string, string, any) error {
 	return errors.New("not implemented")
 }
 
-func (s *signingMethodGCP) Sign(signingString string, ikey interface{}) (string, error) {
+func (s *signingMethodGCP) Sign(signingString string, ikey any) (string, error) {
 	key, ok := ikey.(string)
 	if !ok {
 		return "", fmt.Errorf("invalid key reference type: %T", ikey)

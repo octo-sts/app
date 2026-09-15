@@ -179,13 +179,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 	switch {
 	case tp.audiencePattern != nil:
 		// Check that the audience pattern matches at least one of the token's audiences.
-		found := false
-		for _, aud := range token.Audience {
-			if tp.audiencePattern.MatchString(aud) {
-				found = true
-				break
-			}
-		}
+		found := slices.ContainsFunc(token.Audience, tp.audiencePattern.MatchString)
 		if !found {
 			return act, status.Errorf(codes.PermissionDenied, "trust policy: audience_pattern %q did not match any of %q", tp.AudiencePattern, token.Audience)
 		}
@@ -204,7 +198,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 
 	// Check the claims.
 	if len(tp.claimPattern) != 0 {
-		customClaims := make(map[string]interface{})
+		customClaims := make(map[string]any)
 		if err := token.Claims(&customClaims); err != nil {
 			return act, err
 		}
