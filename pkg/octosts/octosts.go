@@ -542,11 +542,6 @@ func (s *sts) ExchangeRefreshToken(ctx context.Context, request *pboidc.Exchange
 	return nil, status.Error(codes.Unimplemented, "octo-sts does not support refresh tokens")
 }
 
-//go:fix inline
-func ptr[T any](in T) *T {
-	return new(in)
-}
-
 func extractUserAgent(ctx context.Context) string {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
