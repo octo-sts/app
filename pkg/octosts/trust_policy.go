@@ -41,7 +41,7 @@ type TrustPolicy struct {
 
 	// GitHub App installation permissions to request tokens with.
 	// See https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
-	Permissions github.InstallationPermissions `json:"permissions"`
+	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
 
 	isCompiled bool `json:"-"`
 }
