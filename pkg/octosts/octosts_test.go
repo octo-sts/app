@@ -84,9 +84,9 @@ func newFakeGitHub() *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID: github.Ptr(int64(1234)),
+			ID: new(int64(1234)),
 			Account: &github.User{
-				Login: github.Ptr("org"),
+				Login: new("org"),
 			},
 		}})
 	})
@@ -98,7 +98,7 @@ func newFakeGitHub() *fakeGitHub {
 		}
 
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -112,7 +112,7 @@ func newFakeGitHub() *fakeGitHub {
 		// is not os.IsNotExist and would fall into the 500 branch instead.
 		if r.PathValue("org") == "orgdir" && r.PathValue("identity") == "trusted-token-issuers.yaml" {
 			json.NewEncoder(w).Encode([]*github.RepositoryContent{
-				{Type: github.Ptr("file"), Name: github.Ptr("placeholder")},
+				{Type: new("file"), Name: new("placeholder")},
 			})
 			return
 		}
@@ -131,9 +131,9 @@ func newFakeGitHub() *fakeGitHub {
 			return
 		}
 		json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
-			Type:     github.Ptr("file"),
-			Encoding: github.Ptr("base64"),
+			Content:  new(base64.StdEncoding.EncodeToString(b)),
+			Type:     new("file"),
+			Encoding: new("base64"),
 		})
 	})
 	// Revoke() posts to this path, but it does NOT reach this fake. Revoke's URL
@@ -182,8 +182,8 @@ func newFakeGitHubNoContents() *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("other-org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("other-org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +193,7 @@ func newFakeGitHubNoContents() *fakeGitHub {
 			return
 		}
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -258,7 +258,7 @@ func TestExchange(t *testing.T) {
 			want: &github.InstallationTokenOptions{
 				Repositories: []string{"repo"},
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.Ptr("write"),
+					PullRequests: new("write"),
 				},
 			},
 		},
@@ -270,7 +270,7 @@ func TestExchange(t *testing.T) {
 			},
 			want: &github.InstallationTokenOptions{
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.Ptr("write"),
+					PullRequests: new("write"),
 				},
 			},
 		},
@@ -361,7 +361,7 @@ func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
 	// test would fail if the lookup silently fell back to the default repo.
 	want := &github.InstallationTokenOptions{
 		Permissions: &github.InstallationPermissions{
-			Contents: github.Ptr("read"),
+			Contents: new("read"),
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -459,9 +459,9 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID: github.Ptr(int64(1234)),
+			ID: new(int64(1234)),
 			Account: &github.User{
-				Login: github.Ptr("org"),
+				Login: new("org"),
 			},
 		}})
 	})
@@ -473,7 +473,7 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 		}
 
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -840,8 +840,8 @@ func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
@@ -851,7 +851,7 @@ func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
 			return
 		}
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})

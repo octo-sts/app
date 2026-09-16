@@ -115,7 +115,7 @@ func main() {
 		if err != nil {
 			log.Panicf("could not create secret provider: %v", err)
 		}
-		for _, name := range strings.Split(webhookConfig.WebhookSecret, ",") {
+		for name := range strings.SplitSeq(webhookConfig.WebhookSecret, ",") {
 			name = strings.TrimSpace(name)
 			val, err := secretsProvider.GetSecret(ctx, name)
 			if err != nil {
@@ -128,7 +128,7 @@ func main() {
 	}
 
 	var orgs []string
-	for _, s := range strings.Split(webhookConfig.OrganizationFilter, ",") {
+	for s := range strings.SplitSeq(webhookConfig.OrganizationFilter, ",") {
 		if o := strings.TrimSpace(s); o != "" {
 			orgs = append(orgs, o)
 		}

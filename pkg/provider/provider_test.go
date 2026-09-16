@@ -18,9 +18,9 @@ import (
 )
 
 func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
-	var hits int32
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		// A small delay widens the race window so concurrent Get calls are
 		// likely to overlap before the first completes.
 		time.Sleep(100 * time.Millisecond)
@@ -34,7 +34,7 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 	const callers = 20
 	var wg sync.WaitGroup
 	errs := make([]error, callers)
-	for i := 0; i < callers; i++ {
+	for i := range callers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -50,7 +50,7 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 		}
 	}
 
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected discovery to be single-flighted to 1 request, got %d", got)
 	}
 }
@@ -58,9 +58,9 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 func TestGet_FollowerContextIsNotAffectedByLeaderCancellation(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	var requestCount int32
+	var requestCount atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&requestCount, 1)
+		requestCount.Add(1)
 		select {
 		case started <- struct{}{}:
 		default:
@@ -174,9 +174,9 @@ func TestGet_CallerStillRespectsItsOwnDeadlineWhileWaiting(t *testing.T) {
 }
 
 func TestGet_NegativeCacheAvoidsRepeatedProbesForFailingIssuer(t *testing.T) {
-	var hits int32
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		// 404 is a permanent error (isPermanentError), so this fails fast
 		// with no retries.
 		w.WriteHeader(http.StatusNotFound)
@@ -188,14 +188,14 @@ func TestGet_NegativeCacheAvoidsRepeatedProbesForFailingIssuer(t *testing.T) {
 	if _, err := Get(ctx, server.URL); err == nil {
 		t.Fatal("expected first call to fail")
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected 1 discovery attempt after first call, got %d", got)
 	}
 
 	if _, err := Get(ctx, server.URL); err == nil {
 		t.Fatal("expected second call to fail")
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected second call within negative-cache TTL to be served from cache (still 1 discovery attempt), got %d", got)
 	}
 }
@@ -207,9 +207,9 @@ func TestGet_NegativeCacheExpiresAndRetriesRecoveredIssuer(t *testing.T) {
 
 	var failing atomic.Bool
 	failing.Store(true)
-	var hits int32
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		if failing.Load() {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -235,7 +235,7 @@ func TestGet_NegativeCacheExpiresAndRetriesRecoveredIssuer(t *testing.T) {
 	if _, err := Get(ctx, server.URL); err != nil {
 		t.Fatalf("expected call after negative-cache expiry to retry the now-recovered issuer, got error: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 2 {
+	if got := hits.Load(); got != 2 {
 		t.Fatalf("expected negative-cache expiry to trigger a second discovery attempt, got %d", got)
 	}
 }
@@ -253,7 +253,7 @@ func TestGet_NegativeCacheIsBoundedAgainstManyDistinctFailingIssuers(t *testing.
 	// distinct failing issuer strings. The negative cache must not grow
 	// without bound in response.
 	const attackerIssuers = 500
-	for i := 0; i < attackerIssuers; i++ {
+	for i := range attackerIssuers {
 		issuer := fmt.Sprintf("%s/evil-issuer-%d", server.URL, i)
 		if _, err := Get(ctx, issuer); err == nil {
 			t.Fatalf("expected issuer %d to fail", i)
@@ -268,9 +268,9 @@ func TestGet_NegativeCacheIsBoundedAgainstManyDistinctFailingIssuers(t *testing.
 func TestGet_CallerCancellationNeverReachesNegativeCache(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
-	var hits int32
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		select {
 		case started <- struct{}{}:
 		default:
@@ -302,7 +302,7 @@ func TestGet_CallerCancellationNeverReachesNegativeCache(t *testing.T) {
 	if _, err := Get(context.Background(), server.URL); err != nil {
 		t.Fatalf("expected a fresh caller to succeed against the healthy issuer, got: %v", err)
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected only the original shared discovery attempt (memoized on success), got %d hits", got)
 	}
 }
@@ -312,9 +312,9 @@ func TestGet_SharedFlightTimeoutIsNegativeCached(t *testing.T) {
 	discoveryTimeout = 20 * time.Millisecond
 	t.Cleanup(func() { discoveryTimeout = origTimeout })
 
-	var hits int32
+	var hits atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&hits, 1)
+		hits.Add(1)
 		// Much slower than discoveryTimeout, so the shared flight's own
 		// context expires -- a caller-independent signal, since this
 		// caller has no deadline of its own.
@@ -335,7 +335,7 @@ func TestGet_SharedFlightTimeoutIsNegativeCached(t *testing.T) {
 	if _, err := Get(context.Background(), server.URL); err == nil {
 		t.Fatal("expected the second call to still fail while negative-cached")
 	}
-	if got := atomic.LoadInt32(&hits); got != 1 {
+	if got := hits.Load(); got != 1 {
 		t.Fatalf("expected the shared-flight timeout to be negative-cached (still 1 discovery attempt), got %d", got)
 	}
 }
@@ -424,9 +424,9 @@ func TestNewProviderWithRetry_AllAttemptsFail(t *testing.T) {
 }
 
 func TestNewProviderWithRetry_ContextCancellation(t *testing.T) {
-	var attempts int32
+	var attempts atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		atomic.AddInt32(&attempts, 1)
+		attempts.Add(1)
 		// Always fail to trigger retries
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -446,7 +446,7 @@ func TestNewProviderWithRetry_ContextCancellation(t *testing.T) {
 		t.Fatal("Expected nil provider after context cancellation")
 	}
 	// Should have attempted at least once but been canceled before completing all retries
-	totalAttempts := atomic.LoadInt32(&attempts)
+	totalAttempts := attempts.Load()
 	if totalAttempts == 0 {
 		t.Fatal("Expected at least one attempt before context cancellation")
 	}

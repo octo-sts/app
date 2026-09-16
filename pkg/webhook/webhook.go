@@ -588,14 +588,14 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 	opts := github.CreateCheckRunOptions{
 		Name:        "Trust Policy Validation",
 		HeadSHA:     sha,
-		ExternalID:  github.Ptr(sha),
-		Status:      github.Ptr("completed"),
-		Conclusion:  github.Ptr(conclusion),
+		ExternalID:  new(sha),
+		Status:      new("completed"),
+		Conclusion:  new(conclusion),
 		StartedAt:   &github.Timestamp{Time: time.Now()},
 		CompletedAt: &github.Timestamp{Time: time.Now()},
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr(title),
-			Summary: github.Ptr(summary),
+			Title:   new(title),
+			Summary: new(summary),
 		},
 	}
 
@@ -861,7 +861,7 @@ func (e *Validator) emitPolicyEvents(ctx context.Context, event *github.PushEven
 		pe.ChangeIndex = i
 		pe.Time = time.Now()
 		if verr, ok := outcome.verdicts[change.Path]; ok {
-			pe.Valid = github.Ptr(verr == nil)
+			pe.Valid = new(verr == nil)
 			if verr != nil {
 				pe.Error = verr.Error()
 			}

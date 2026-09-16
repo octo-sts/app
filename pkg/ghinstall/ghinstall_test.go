@@ -39,9 +39,9 @@ func TestGet(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("my-org"),
+					Login: new("my-org"),
 				},
 			}})
 		default:
@@ -77,9 +77,9 @@ func TestGetCached(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("cached-org"),
+					Login: new("cached-org"),
 				},
 			}})
 		default:
@@ -120,9 +120,9 @@ func TestGetNotFound(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -169,8 +169,8 @@ func TestRoundRobin(t *testing.T) {
 			switch r.URL.Path {
 			case "/app/installations":
 				json.NewEncoder(w).Encode([]github.Installation{{
-					ID:      github.Ptr(installID),
-					Account: &github.User{Login: github.Ptr("my-org")},
+					ID:      new(installID),
+					Account: &github.User{Login: new("my-org")},
 				}})
 			default:
 				w.WriteHeader(http.StatusNotImplemented)
@@ -215,8 +215,8 @@ func TestRoundRobinFallback(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("my-org")},
+				ID:      new(installID),
+				Account: &github.User{Login: new("my-org")},
 			}})
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
@@ -311,8 +311,8 @@ func makeManagersWithDistinctInstalls(t *testing.T, appIDs []int64) ([]Manager, 
 		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/app/installations" {
 				_ = json.NewEncoder(w).Encode([]github.Installation{{
-					ID:      github.Ptr(installID),
-					Account: &github.User{Login: github.Ptr(testOwner)},
+					ID:      new(installID),
+					Account: &github.User{Login: new(testOwner)},
 				}})
 				return
 			}
@@ -386,9 +386,9 @@ func TestGetNotFoundCached(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -437,9 +437,9 @@ func TestGetNotFoundCacheExpires(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -538,9 +538,9 @@ func TestGetWithBaseURL(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/app/installations"):
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("my-org"),
+					Login: new("my-org"),
 				},
 			}})
 		default:
@@ -660,7 +660,7 @@ func TestManagerGetAll(t *testing.T) {
 		if r.URL.Path == "/app/installations" {
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -928,7 +928,7 @@ func TestManagerGetAllFreshBypassesNegativeCache(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -996,7 +996,7 @@ func TestManagerGetAllFreshUsesPositiveCache(t *testing.T) {
 			listCalls.Add(1)
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -1171,7 +1171,7 @@ func TestManagerGetAllFreshRepairsCoexistingCacheEntries(t *testing.T) {
 			listCalls.Add(1)
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}

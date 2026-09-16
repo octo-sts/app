@@ -282,7 +282,7 @@ func createGCPKMSCredsFile(t *testing.T) string {
 	}
 
 	// Create proper JSON with escaped private key
-	creds := map[string]interface{}{
+	creds := map[string]any{
 		"type":        "service_account",
 		"private_key": generateTestCertificateString(),
 	}
