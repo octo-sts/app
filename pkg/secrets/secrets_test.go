@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -55,6 +56,24 @@ func TestSecretProvider_Close(t *testing.T) {
 
 func TestSecretProvider_CloseWithoutCloser(t *testing.T) {
 	assert.NoError(t, (&secretProvider{}).Close())
+}
+
+func TestNewSecretProvider_GCPClose(t *testing.T) {
+	credentials := filepath.Join(t.TempDir(), "credentials.json")
+	require.NoError(t, os.WriteFile(credentials, []byte(`{
+  "type": "authorized_user",
+  "client_id": "test-client",
+  "client_secret": "test-secret",
+  "refresh_token": "test-token"
+}`), 0o600))
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
+
+	provider, err := NewSecretProvider(context.Background(), GCP)
+	require.NoError(t, err)
+
+	sp := provider.(*secretProvider)
+	assert.Same(t, sp.gcpSecretManager, sp.closer)
+	assert.NoError(t, provider.Close())
 }
 
 func TestNewSecretProvider_NormalizesProviderString(t *testing.T) {

@@ -111,19 +111,21 @@ func main() {
 		// provider, but because of the support for environment variables before adding a
 		// second cloud provider supported, that complicates adding a new environment variable
 		// for config.
-		secretsProvider, err := secrets.NewSecretProvider(ctx, baseCfg.KMSProvider)
-		if err != nil {
-			log.Panicf("could not create secret provider: %v", err)
-		}
-		defer secretsProvider.Close() //nolint:errcheck // released at process shutdown
-		for name := range strings.SplitSeq(webhookConfig.WebhookSecret, ",") {
-			name = strings.TrimSpace(name)
-			val, err := secretsProvider.GetSecret(ctx, name)
+		func() {
+			secretsProvider, err := secrets.NewSecretProvider(ctx, baseCfg.KMSProvider)
 			if err != nil {
-				log.Panicf("error fetching webhook secret %s: %v", name, err)
+				log.Panicf("could not create secret provider: %v", err)
 			}
-			webhookSecrets = append(webhookSecrets, val)
-		}
+			defer secretsProvider.Close() //nolint:errcheck // secrets are already in memory
+			for name := range strings.SplitSeq(webhookConfig.WebhookSecret, ",") {
+				name = strings.TrimSpace(name)
+				val, err := secretsProvider.GetSecret(ctx, name)
+				if err != nil {
+					log.Panicf("error fetching webhook secret %s: %v", name, err)
+				}
+				webhookSecrets = append(webhookSecrets, val)
+			}
+		}()
 	} else {
 		webhookSecrets = [][]byte{[]byte(webhookConfig.WebhookSecret)}
 	}
