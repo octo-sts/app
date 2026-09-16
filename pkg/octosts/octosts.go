@@ -496,6 +496,11 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 	if checksWrite {
 		// Configuration order must not change check-run ownership. candidates
 		// is a private slice, so sorting cannot mutate a manager or cache entry.
+		//
+		// An uninstalled app's positive-cache entry has no TTL, so it stays in
+		// candidates until process restart; a hash landing on it fails closed
+		// at mint. Rotation and quota picks move off a dead install on their
+		// own — this deterministic pick is the one that cannot.
 		slices.SortFunc(candidates, func(a, b ghinstall.Installation) int {
 			if order := cmp.Compare(a.AppID, b.AppID); order != 0 {
 				return order

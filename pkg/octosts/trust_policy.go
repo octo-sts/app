@@ -123,11 +123,7 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.App != "" && tp.AppPattern != "":
 		return errors.New("trust policy: only one of app or app_pattern can be set, got both")
 	case tp.AppPattern != "":
-		// Raw compile first: the (?:) wrapping legalizes garbage like ")(".
-		if _, err := regexp.Compile(tp.AppPattern); err != nil {
-			return err
-		}
-		r, err := regexp.Compile("^(?:" + tp.AppPattern + ")$")
+		r, err := compileAnchored(tp.AppPattern)
 		if err != nil {
 			return err
 		}
