@@ -21,7 +21,10 @@ type OrgPool struct {
 	AppCount int
 	// AppIDs identifies the configured apps in this pool, including apps
 	// whose installation lookup currently fails. Callers must not modify it.
-	// Nil means membership is unknown; an empty map means the pool has no apps.
+	// A nil or empty map means the pool has no configured apps, so app pins
+	// resolve to no eligible app and fail closed. Membership is never treated
+	// as "unknown, allow all": app pinning is an org-isolation control, so an
+	// absent pool must not widen it to every configured app.
 	AppIDs map[int64]bool
 	// Quota enables capacity-aware selection for callers that pick among
 	// enumerated installations themselves (e.g. trust policy app pins).

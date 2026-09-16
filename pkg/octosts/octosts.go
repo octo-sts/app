@@ -379,14 +379,14 @@ func (s *sts) eligibleApps(pool *ghinstall.OrgPool, owner string, tp *TrustPolic
 		if !configured {
 			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app %q is not a configured app", tp.App)
 		}
-		if pool.AppIDs != nil && !pool.AppIDs[id] {
+		if !pool.AppIDs[id] {
 			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app %q is not configured for %q", tp.App, owner)
 		}
 		return map[int64]bool{id: true}, nil
 	case tp.appPattern != nil:
 		eligible := make(map[int64]bool)
 		for name, id := range s.apps.Names {
-			if (pool.AppIDs == nil || pool.AppIDs[id]) && tp.appPattern.MatchString(name) {
+			if pool.AppIDs[id] && tp.appPattern.MatchString(name) {
 				eligible[id] = true
 			}
 		}
