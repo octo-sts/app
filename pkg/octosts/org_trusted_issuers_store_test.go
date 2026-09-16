@@ -562,7 +562,7 @@ func TestFetchOrgIssuersOnceMintsLeastPrivilegeToken(t *testing.T) {
 	want := &github.InstallationTokenOptions{
 		Repositories: []string{".github"},
 		Permissions: &github.InstallationPermissions{
-			Contents: ptr("read"),
+			Contents: new("read"),
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -613,8 +613,8 @@ func newOrgFakeGitHub(opts ...orgFakeGitHubOption) *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", routes.mint)
@@ -655,7 +655,7 @@ func defaultOrgFakeMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(github.InstallationToken{
-		Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+		Token:     new(base64.StdEncoding.EncodeToString(b)),
 		ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 	})
 }
@@ -671,7 +671,7 @@ func defaultOrgFakeContents(w http.ResponseWriter, r *http.Request) {
 	// os.IsNotExist and would fall into the 500 branch instead.
 	if r.PathValue("org") == "orgdir" && r.PathValue("identity") == "trusted-token-issuers.yaml" {
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("placeholder")},
+			{Type: new("file"), Name: new("placeholder")},
 		})
 		return
 	}
@@ -688,9 +688,9 @@ func defaultOrgFakeContents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(github.RepositoryContent{
-		Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
-		Type:     github.Ptr("file"),
-		Encoding: github.Ptr("base64"),
+		Content:  new(base64.StdEncoding.EncodeToString(b)),
+		Type:     new("file"),
+		Encoding: new("base64"),
 	})
 }
 
@@ -714,7 +714,7 @@ func withNoGitHubRepoAccess() orgFakeGitHubOption {
 				return
 			}
 			json.NewEncoder(w).Encode(github.InstallationToken{
-				Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+				Token:     new(base64.StdEncoding.EncodeToString(b)),
 				ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 			})
 		}
@@ -1505,7 +1505,7 @@ func (c *captureCEClient) Request(_ context.Context, _ cloudevents.Event) (*clou
 	return nil, nil
 }
 
-func (c *captureCEClient) StartReceiver(_ context.Context, _ interface{}) error { return nil }
+func (c *captureCEClient) StartReceiver(_ context.Context, _ any) error { return nil }
 
 func (c *captureCEClient) sent() []cloudevents.Event {
 	c.mu.Lock()

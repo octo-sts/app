@@ -35,8 +35,7 @@ func Sanitize(err error) error {
 	// AuthenticationFailedError renders the token endpoint, which embeds the
 	// tenant ID, along with the response body. Its credential type and message
 	// are unexported, so only the status code can be safely surfaced.
-	var authErr *azidentity.AuthenticationFailedError
-	if errors.As(err, &authErr) {
+	if authErr, ok := errors.AsType[*azidentity.AuthenticationFailedError](err); ok {
 		if authErr.RawResponse != nil {
 			return fmt.Errorf("azure authentication failed (HTTP %d)", authErr.RawResponse.StatusCode)
 		}
@@ -46,8 +45,7 @@ func Sanitize(err error) error {
 	// ResponseError renders the request method and URL, the status line and the
 	// response body. The error code alone ("KeyNotFound", "Forbidden") carries
 	// no resource identifiers.
-	var respErr *azcore.ResponseError
-	if errors.As(err, &respErr) {
+	if respErr, ok := errors.AsType[*azcore.ResponseError](err); ok {
 		if respErr.ErrorCode != "" {
 			return fmt.Errorf("%s", respErr.ErrorCode) //nolint:err113
 		}
@@ -58,8 +56,7 @@ func Sanitize(err error) error {
 	// code to report. Both url.Error.URL and the error it wraps name the vault
 	// host (a DNS failure renders as "lookup <vault>.vault.azure.net: ..."), so
 	// classify the failure rather than echoing any part of it.
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		var dnsErr *net.DNSError
 		switch {
 		case urlErr.Timeout():

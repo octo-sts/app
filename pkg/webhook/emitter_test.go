@@ -208,26 +208,22 @@ func TestPolicyEmitterEnqueueRacesShutdown(t *testing.T) {
 	start := make(chan struct{})
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			for range 25 {
 				p.Enqueue(ctx, testEvent(t, "foo/bar/racy"))
 			}
-		}()
+		})
 	}
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		<-start
 		sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := p.Shutdown(sctx); err != nil {
 			t.Errorf("emitter did not drain: %v", err)
 		}
-	}()
+	})
 
 	close(start)
 	wg.Wait()

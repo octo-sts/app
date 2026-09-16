@@ -47,7 +47,7 @@ func (f *fakeKV) Sign(_ context.Context, name, version string, params azkeys.Sig
 		return azkeys.SignResponse{}, f.err
 	}
 	return azkeys.SignResponse{
-		KeyOperationResult: azkeys.KeyOperationResult{Result: f.result},
+		Result: f.result,
 	}, nil
 }
 
@@ -168,7 +168,7 @@ type ctxCapturingKV struct {
 func (c *ctxCapturingKV) Sign(ctx context.Context, _, _ string, _ azkeys.SignParameters, _ *azkeys.SignOptions) (azkeys.SignResponse, error) {
 	c.onSign(ctx)
 	return azkeys.SignResponse{
-		KeyOperationResult: azkeys.KeyOperationResult{Result: []byte("sig")},
+		Result: []byte("sig"),
 	}, nil
 }
 

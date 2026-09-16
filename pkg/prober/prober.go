@@ -92,8 +92,8 @@ func Func(ctx context.Context) error {
 	if _, _, err := ghc.Issues.Create(ctx,
 		"octo-sts", "prober",
 		&github.IssueRequest{
-			Title: github.Ptr("octo-sts prober was able to create an issue"),
-			Body:  github.Ptr("This should fail!"),
+			Title: new("octo-sts prober was able to create an issue"),
+			Body:  new("This should fail!"),
 		}); err == nil {
 		return fmt.Errorf("expected to fail creating an issue")
 	}

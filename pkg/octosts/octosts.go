@@ -860,7 +860,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{tpKey.repo},
 		Permissions: &github.InstallationPermissions{
-			Contents: ptr("read"),
+			Contents: new("read"),
 		},
 	}
 	defer func() {
@@ -918,10 +918,6 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 // ExchangeRefreshToken implements pboidc.SecurityTokenServiceServer
 func (s *sts) ExchangeRefreshToken(ctx context.Context, request *pboidc.ExchangeRefreshTokenRequest) (*pboidc.TokenPair, error) {
 	return nil, status.Error(codes.Unimplemented, "octo-sts does not support refresh tokens")
-}
-
-func ptr[T any](in T) *T {
-	return &in
 }
 
 func extractUserAgent(ctx context.Context) string {

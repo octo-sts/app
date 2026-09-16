@@ -115,7 +115,7 @@ func TestNewSecretProvider_AKVMultipleSecrets(t *testing.T) {
 		assert.NotNil(t, sp)
 
 		// Retrieval must accept the identical padded entry.
-		for _, name := range strings.Split(os.Getenv("GITHUB_WEBHOOK_SECRET"), ",") {
+		for name := range strings.SplitSeq(os.Getenv("GITHUB_WEBHOOK_SECRET"), ",") {
 			_, err := akv.ParseSecretID(strings.TrimSpace(name))
 			assert.NoError(t, err, "entry %q rejected at retrieval but accepted at construction", name)
 		}

@@ -164,11 +164,11 @@ func TestOrgFilter(t *testing.T) {
 		t.Run(tc.org, func(t *testing.T) {
 			body, err := json.Marshal(github.PushEvent{
 				Organization: &github.Organization{
-					Login: github.Ptr(tc.org),
+					Login: new(tc.org),
 				},
 				Repo: &github.PushEventRepository{
 					Owner: &github.User{
-						Login: github.Ptr(tc.org),
+						Login: new(tc.org),
 					},
 				},
 				Commits: []*github.HeadCommit{{
@@ -255,19 +255,19 @@ func TestWebhookOK(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -298,15 +298,15 @@ func TestWebhookOK(t *testing.T) {
 	want := []*github.CreateCheckRunOptions{{
 		Name:       "Trust Policy Validation",
 		HeadSHA:    "5678",
-		ExternalID: github.Ptr("5678"),
-		Status:     github.Ptr("completed"),
-		Conclusion: github.Ptr("success"),
+		ExternalID: new("5678"),
+		Status:     new("completed"),
+		Conclusion: new("success"),
 		// Use time from the response to ignore it.
 		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
 		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr("Valid trust policy."),
-			Summary: github.Ptr(""),
+			Title:   new("Valid trust policy."),
+			Summary: new(""),
 		},
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -405,19 +405,19 @@ func TestWebhookDeletedSTS(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("9876"),
-		After:  github.Ptr("4321"),
+		Before: new("9876"),
+		After:  new("4321"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test2.sts.yaml"},
 		}, {
@@ -450,15 +450,15 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	want := []*github.CreateCheckRunOptions{{
 		Name:       "Trust Policy Validation",
 		HeadSHA:    "4321",
-		ExternalID: github.Ptr("4321"),
-		Status:     github.Ptr("completed"),
-		Conclusion: github.Ptr("success"),
+		ExternalID: new("4321"),
+		Status:     new("completed"),
+		Conclusion: new("success"),
 		// Use time from the response to ignore it.
 		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
 		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr("Valid trust policy."),
-			Summary: github.Ptr(""),
+			Title:   new("Valid trust policy."),
+			Summary: new(""),
 		},
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -642,19 +642,19 @@ func TestWebhookPushTruncatedFallback(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before:  github.Ptr("1234"),
-		After:   github.Ptr("5678"),
+		Before:  new("1234"),
+		After:   new("5678"),
 		Commits: commits,
 	})
 	if err != nil {
@@ -734,19 +734,19 @@ func TestWebhookPushNoSTSFiles(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{
 			{Added: []string{"README.md"}},
 			{Modified: []string{"go.mod", "main.go"}},
@@ -833,19 +833,19 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before:  github.Ptr("1234"),
-		After:   github.Ptr("5678"),
+		Before:  new("1234"),
+		After:   new("5678"),
 		Commits: commits,
 	})
 	if err != nil {
@@ -930,23 +930,23 @@ func TestCheckSuiteNewBranchNoPRsSkipped(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("feature-x"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("feature-x"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1037,25 +1037,25 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:         github.Ptr(int64(1)),
-			HeadSHA:    github.Ptr("deadbeef"),
-			HeadBranch: github.Ptr("feature-x"),
-			BeforeSHA:  github.Ptr(zeroHash),
+			ID:         new(int64(1)),
+			HeadSHA:    new("deadbeef"),
+			HeadBranch: new("feature-x"),
+			BeforeSHA:  new(zeroHash),
 			PullRequests: []*github.PullRequest{
-				{Number: github.Ptr(42)},
+				{Number: new(42)},
 			},
 		},
 	})
@@ -1107,9 +1107,9 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("test.sts.yaml"),
-				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+				Type: new("file"),
+				Name: new("test.sts.yaml"),
+				Path: new(".github/chainguard/test.sts.yaml"),
 			},
 		})
 	})
@@ -1143,23 +1143,23 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1241,23 +1241,23 @@ func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1334,23 +1334,23 @@ func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1402,14 +1402,14 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("test.sts.yaml"),
-				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+				Type: new("file"),
+				Name: new("test.sts.yaml"),
+				Path: new(".github/chainguard/test.sts.yaml"),
 			},
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("README.md"),
-				Path: github.Ptr(".github/chainguard/README.md"),
+				Type: new("file"),
+				Name: new("README.md"),
+				Path: new(".github/chainguard/README.md"),
 			},
 		}); err != nil {
 			t.Error(err)
@@ -1459,23 +1459,23 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1576,23 +1576,23 @@ func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("5678"),
-			HeadBranch:   github.Ptr("feature-y"),
-			BeforeSHA:    github.Ptr("abcd1234"),
+			ID:           new(int64(1)),
+			HeadSHA:      new("5678"),
+			HeadBranch:   new("feature-y"),
+			BeforeSHA:    new("abcd1234"),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1653,20 +1653,20 @@ func TestWebhookCheckSuiteBotSkipped(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Action: github.Ptr("requested"),
+		Action: new("requested"),
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
 		Sender: &github.User{
-			Login: github.Ptr("octo-sts[bot]"),
+			Login: new("octo-sts[bot]"),
 		},
 		CheckSuite: &github.CheckSuite{
-			HeadSHA:   github.Ptr("abc123"),
-			BeforeSHA: github.Ptr("def456"),
+			HeadSHA:   new("abc123"),
+			BeforeSHA: new("def456"),
 		},
 	})
 	if err != nil {
@@ -1715,21 +1715,21 @@ func TestWebhookCheckRunBotSkipped(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckRunEvent{
-		Action: github.Ptr("created"),
+		Action: new("created"),
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
 		Sender: &github.User{
-			Login: github.Ptr("some-other-app[bot]"),
+			Login: new("some-other-app[bot]"),
 		},
 		CheckRun: &github.CheckRun{
 			CheckSuite: &github.CheckSuite{
-				HeadSHA:   github.Ptr("abc123"),
-				BeforeSHA: github.Ptr("def456"),
+				HeadSHA:   new("abc123"),
+				BeforeSHA: new("def456"),
 			},
 		},
 	})
@@ -1802,14 +1802,14 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{
 				".github/chainguard/a.sts.yaml",
@@ -1910,19 +1910,19 @@ func TestWebhookPullRequestActionSkipped(t *testing.T) {
 			defer srv.Close()
 
 			body, err := json.Marshal(github.PullRequestEvent{
-				Action: github.Ptr(action),
-				Number: github.Ptr(1),
+				Action: new(action),
+				Number: new(1),
 				Installation: &github.Installation{
-					ID: github.Ptr(int64(1111)),
+					ID: new(int64(1111)),
 				},
 				Repo: &github.Repository{
-					Owner: &github.User{Login: github.Ptr("foo")},
-					Name:  github.Ptr("bar"),
+					Owner: &github.User{Login: new("foo")},
+					Name:  new("bar"),
 				},
 				PullRequest: &github.PullRequest{
-					Head: &github.PullRequestBranch{SHA: github.Ptr("abc123")},
+					Head: &github.PullRequestBranch{SHA: new("abc123")},
 				},
-				Sender: &github.User{Login: github.Ptr("someone")},
+				Sender: &github.User{Login: new("someone")},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1992,13 +1992,13 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -2008,7 +2008,7 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 	}
 
 	// Deliver the same event twice; the second must reuse the cached client.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
 		if err != nil {
 			t.Fatal(err)
@@ -2114,14 +2114,14 @@ func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
 	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("test.sts.yaml"), Path: github.Ptr(".github/chainguard/test.sts.yaml")},
-			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(".github/chainguard/trusted-token-issuers.yaml")},
-			{Type: github.Ptr("file"), Name: github.Ptr("README.md"), Path: github.Ptr(".github/chainguard/README.md")},
+			{Type: new("file"), Name: new("test.sts.yaml"), Path: new(".github/chainguard/test.sts.yaml")},
+			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: new(".github/chainguard/trusted-token-issuers.yaml")},
+			{Type: new("file"), Name: new("README.md"), Path: new(".github/chainguard/README.md")},
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/") {
-			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"))
+		if after, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"); ok {
+			fetched = append(fetched, after)
 		}
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -2148,20 +2148,20 @@ func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.Repository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -2265,7 +2265,7 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/.github/chainguard", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
+			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
 		}); err != nil {
 			t.Error(err)
 		}
@@ -2274,18 +2274,18 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 		fetched = append(fetched, allowlistPath)
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(&github.RepositoryContent{
-			Type:     github.Ptr("file"),
-			Name:     github.Ptr("trusted-token-issuers.yaml"),
+			Type:     new("file"),
+			Name:     new("trusted-token-issuers.yaml"),
 			Path:     github.Ptr(allowlistPath),
-			Encoding: github.Ptr("base64"),
-			Content:  github.Ptr(base64.StdEncoding.EncodeToString([]byte(allowlist))),
+			Encoding: new("base64"),
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(allowlist))),
 		}); err != nil {
 			t.Error(err)
 		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/") {
-			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/"))
+		if after, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/"); ok {
+			fetched = append(fetched, after)
 		}
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -2312,20 +2312,20 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.Repository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr(".github"),
-			FullName:      github.Ptr("foo/.github"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new(".github"),
+			FullName:      new("foo/.github"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -2518,11 +2518,11 @@ func TestWebhookEnrichesMetricsContext(t *testing.T) {
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{ID: github.Ptr(installationID)},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -2587,7 +2587,7 @@ func (f *fakeCEClient) Request(ctx context.Context, e cloudevents.Event) (*cloud
 	return nil, f.Send(ctx, e)
 }
 
-func (f *fakeCEClient) StartReceiver(context.Context, interface{}) error { return nil }
+func (f *fakeCEClient) StartReceiver(context.Context, any) error { return nil }
 
 func (f *fakeCEClient) sent() []cloudevents.Event {
 	f.mu.Lock()
@@ -2617,9 +2617,9 @@ func TestPolicyChangesFromCompare(t *testing.T) {
 	}{{
 		name: "added, modified and removed",
 		files: []*github.CommitFile{
-			{Filename: github.Ptr(".github/chainguard/a.sts.yaml"), Status: github.Ptr("added")},
-			{Filename: github.Ptr(".github/chainguard/b.sts.yaml"), Status: github.Ptr("modified")},
-			{Filename: github.Ptr(".github/chainguard/c.sts.yaml"), Status: github.Ptr("removed")},
+			{Filename: new(".github/chainguard/a.sts.yaml"), Status: new("added")},
+			{Filename: new(".github/chainguard/b.sts.yaml"), Status: new("modified")},
+			{Filename: new(".github/chainguard/c.sts.yaml"), Status: new("removed")},
 		},
 		want: []PolicyChange{
 			{Path: ".github/chainguard/a.sts.yaml", Policy: "a", Action: PolicyCreated},
@@ -2629,9 +2629,9 @@ func TestPolicyChangesFromCompare(t *testing.T) {
 	}, {
 		name: "rename records both sides",
 		files: []*github.CommitFile{{
-			Filename:         github.Ptr(".github/chainguard/new.sts.yaml"),
-			PreviousFilename: github.Ptr(".github/chainguard/old.sts.yaml"),
-			Status:           github.Ptr("renamed"),
+			Filename:         new(".github/chainguard/new.sts.yaml"),
+			PreviousFilename: new(".github/chainguard/old.sts.yaml"),
+			Status:           new("renamed"),
 		}},
 		want: []PolicyChange{
 			{Path: ".github/chainguard/new.sts.yaml", Policy: "new", Action: PolicyCreated},
@@ -2642,13 +2642,13 @@ func TestPolicyChangesFromCompare(t *testing.T) {
 		// byte-identical across the range, so nothing happened to it.
 		name: "unchanged files are not updates",
 		files: []*github.CommitFile{
-			{Filename: github.Ptr(".github/chainguard/steady.sts.yaml"), Status: github.Ptr("unchanged")},
+			{Filename: new(".github/chainguard/steady.sts.yaml"), Status: new("unchanged")},
 		},
 		want: nil,
 	}, {
 		name: "unrecognised status is reported rather than dropped",
 		files: []*github.CommitFile{
-			{Filename: github.Ptr(".github/chainguard/odd.sts.yaml"), Status: github.Ptr("something-new")},
+			{Filename: new(".github/chainguard/odd.sts.yaml"), Status: new("something-new")},
 		},
 		want: []PolicyChange{{
 			Path: ".github/chainguard/odd.sts.yaml", Policy: "odd", Action: PolicyUpdated,
@@ -2656,8 +2656,8 @@ func TestPolicyChangesFromCompare(t *testing.T) {
 	}, {
 		name: "non-policy files ignored",
 		files: []*github.CommitFile{
-			{Filename: github.Ptr("README.md"), Status: github.Ptr("added")},
-			{Filename: github.Ptr(".github/chainguard/README.md"), Status: github.Ptr("modified")},
+			{Filename: new("README.md"), Status: new("added")},
+			{Filename: new(".github/chainguard/README.md"), Status: new("modified")},
 		},
 		want: nil,
 	}} {
@@ -2785,17 +2785,17 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 	defer srv.Close()
 
 	push := github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Ref:    github.Ptr("refs/heads/main"),
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
-		Sender: &github.User{Login: github.Ptr("mallory"), ID: github.Ptr(int64(99))},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("mallory"), ID: new(int64(99))},
 		Commits: []*github.HeadCommit{{
 			Added:   []string{".github/chainguard/test.sts.yaml", ".github/chainguard/missing.sts.yaml"},
 			Removed: []string{".github/chainguard/gone.sts.yaml"},
@@ -2941,16 +2941,16 @@ func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Ref:     github.Ptr("refs/heads/feature"),
-		Before:  github.Ptr("1234"),
-		After:   github.Ptr("5678"),
+		Ref:     new("refs/heads/feature"),
+		Before:  new("1234"),
+		After:   new("5678"),
 		Commits: []*github.HeadCommit{{Added: []string{".github/chainguard/test.sts.yaml"}}},
 	})
 	if err != nil {
@@ -3276,18 +3276,18 @@ func sendForcedPush(t *testing.T, v *Validator, secret []byte) {
 	t.Cleanup(srv.Close)
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Ref:     github.Ptr("refs/heads/main"),
-		Before:  github.Ptr("before"),
-		After:   github.Ptr("after"),
-		Forced:  github.Ptr(true),
-		Sender:  &github.User{Login: github.Ptr("mallory"), ID: github.Ptr(int64(99))},
+		Ref:     new("refs/heads/main"),
+		Before:  new("before"),
+		After:   new("after"),
+		Forced:  new(true),
+		Sender:  &github.User{Login: new("mallory"), ID: new(int64(99))},
 		Commits: []*github.HeadCommit{},
 	})
 	if err != nil {
@@ -3490,17 +3490,17 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Ref:    github.Ptr("refs/heads/main"),
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
-		Sender: &github.User{Login: github.Ptr("octocat"), ID: github.Ptr(int64(1))},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("octocat"), ID: new(int64(1))},
 		Commits: []*github.HeadCommit{
 			{Added: []string{ephemeral}},
 			{Removed: []string{ephemeral}},
@@ -3599,17 +3599,17 @@ func TestRateLimitedPushReportsNoVerdict(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Ref:    github.Ptr("refs/heads/main"),
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
-		Sender: &github.User{Login: github.Ptr("octocat"), ID: github.Ptr(int64(1))},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("octocat"), ID: new(int64(1))},
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"},
 		}},
