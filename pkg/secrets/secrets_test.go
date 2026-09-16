@@ -5,6 +5,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -13,6 +14,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeCloser struct {
+	closed bool
+	err    error
+}
+
+func (f *fakeCloser) Close() error {
+	f.closed = true
+	return f.err
+}
 
 func TestNewSecretProviderReturnsErrOnFakeProvider(t *testing.T) {
 	ctx := context.Background()
@@ -29,6 +40,21 @@ func TestSecretProvider_GetSecretReturnsErrOnFakeProvider(t *testing.T) {
 	val, err := sp.GetSecret(ctx, "fake-key-id")
 	assert.Nil(t, val)
 	assert.Error(t, err)
+}
+
+func TestSecretProvider_Close(t *testing.T) {
+	wantErr := errors.New("close failed")
+	closer := &fakeCloser{err: wantErr}
+	sp := &secretProvider{closer: closer}
+
+	err := sp.Close()
+
+	assert.True(t, closer.closed)
+	assert.ErrorIs(t, err, wantErr)
+}
+
+func TestSecretProvider_CloseWithoutCloser(t *testing.T) {
+	assert.NoError(t, (&secretProvider{}).Close())
 }
 
 func TestNewSecretProvider_NormalizesProviderString(t *testing.T) {

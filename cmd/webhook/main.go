@@ -115,6 +115,7 @@ func main() {
 		if err != nil {
 			log.Panicf("could not create secret provider: %v", err)
 		}
+		defer secretsProvider.Close() //nolint:errcheck // released at process shutdown
 		for name := range strings.SplitSeq(webhookConfig.WebhookSecret, ",") {
 			name = strings.TrimSpace(name)
 			val, err := secretsProvider.GetSecret(ctx, name)
