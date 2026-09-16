@@ -789,14 +789,19 @@ type enumMgr struct {
 	// the cheap enumeration. Set freshInstalls to a superset to model an App
 	// installed within the negative-cache TTL.
 	//
-	// Precedence is freshErr, then freshInstalls, then a fallback that mirrors
-	// GetAll exactly — installs AND err. So a fake that sets only err is a failed
-	// enumeration on BOTH paths rather than one that reports success on the
-	// confirm, while a fake that sets freshInstalls says "the confirm sees this,
-	// successfully" and err stays scoped to GetAll.
+	// When either freshErr or freshInstalls is set, GetAllFresh returns both
+	// (set both to model a partial fresh enumeration); otherwise it falls back
+	// to mirroring GetAll exactly — installs AND err. So a fake that sets only
+	// err is a failed enumeration on BOTH paths rather than one that reports
+	// success on the confirm, while a fake that sets only freshInstalls says
+	// "the confirm sees this, successfully" and err stays scoped to GetAll.
 	freshInstalls []ghinstall.Installation
 	freshErr      error
 	freshCalls    atomic.Int32
+
+	// freshGate, when set, blocks GetAllFresh until closed — for tests that
+	// pile up concurrent callers behind one in-flight walk.
+	freshGate chan struct{}
 }
 
 func (e *enumMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
@@ -822,11 +827,11 @@ func (e *enumMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation,
 
 func (e *enumMgr) GetAllFresh(_ context.Context, _ string) ([]ghinstall.Installation, error) {
 	e.freshCalls.Add(1)
-	if e.freshErr != nil {
-		return nil, e.freshErr
+	if e.freshGate != nil {
+		<-e.freshGate
 	}
-	if e.freshInstalls != nil {
-		return e.freshInstalls, nil
+	if e.freshErr != nil || e.freshInstalls != nil {
+		return e.freshInstalls, e.freshErr
 	}
 	return e.installs, e.err
 }

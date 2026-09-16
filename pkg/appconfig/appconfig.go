@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 
 	"github.com/go-viper/mapstructure/v2"
@@ -31,6 +32,7 @@ type OrgConfig struct {
 // Exactly one of KMSKey, PrivateKeyFile, or PrivateKey must be set.
 type AppConfig struct {
 	AppID          int64  `mapstructure:"app_id"`
+	AppName        string `mapstructure:"app_name,omitempty"`
 	KMSKey         string `mapstructure:"kms_key,omitempty"`
 	PrivateKeyFile string `mapstructure:"private_key_file,omitempty"`
 	PrivateKey     string `mapstructure:"private_key,omitempty"`
@@ -139,6 +141,7 @@ func (c *Config) Validate() error {
 
 	orgNames := make(map[string]bool)
 	appIDs := make(map[int64]bool)
+	appNames := make(map[string]bool)
 
 	for i := range c.Orgs {
 		c.Orgs[i].Name = strings.ToLower(c.Orgs[i].Name)
@@ -164,6 +167,17 @@ func (c *Config) Validate() error {
 			}
 			appIDs[app.AppID] = true
 
+			if app.AppName != "" {
+				// Numeric names would shadow the numeric app-ID selector form.
+				if _, err := strconv.ParseInt(app.AppName, 10, 64); err == nil {
+					return fmt.Errorf("org %q: app_name %q must not be numeric", org.Name, app.AppName)
+				}
+				if appNames[app.AppName] {
+					return fmt.Errorf("duplicate app_name: %q", app.AppName)
+				}
+				appNames[app.AppName] = true
+			}
+
 			sources := 0
 			if app.KMSKey != "" {
 				sources++
@@ -181,4 +195,28 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// AppNames returns the app_name -> app_id mapping for all named apps.
+func (c *Config) AppNames() map[string]int64 {
+	names := make(map[string]int64)
+	for _, org := range c.Orgs {
+		for _, app := range org.Apps {
+			if app.AppName != "" {
+				names[app.AppName] = app.AppID
+			}
+		}
+	}
+	return names
+}
+
+// AppIDs returns the set of all configured app IDs, named or not.
+func (c *Config) AppIDs() map[int64]bool {
+	ids := make(map[int64]bool)
+	for _, org := range c.Orgs {
+		for _, app := range org.Apps {
+			ids[app.AppID] = true
+		}
+	}
+	return ids
 }
