@@ -136,7 +136,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "1.43.4"
+  version = "1.43.6"
 
   project_id = var.project_id
   region     = each.key
@@ -147,7 +147,7 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "1.43.4"
+  version = "1.43.6"
 
   team = "developer-platform"
 
