@@ -1232,9 +1232,11 @@ func TestExtractUserAgent(t *testing.T) {
 }
 
 func poolOf(m ghinstall.Manager) *ghinstall.OrgPool {
-	// These tests configure apps 101 (ci-a), 102 (ci-b), and 201 (deploy), so
-	// mark them all as pool members. eligibleApps fails closed on a nil AppIDs
-	// map, and production always sets it, so the pool must set it here too.
+	// Shared by the pin tests in this package, which configure apps 101
+	// (ci-a), 102 (ci-b), 103 (ci-c, from pin_order_test.go and
+	// pin_snapshot_test.go), and 201 (deploy), so mark them all as pool
+	// members. eligibleApps fails closed on a nil AppIDs map, and production
+	// always sets it, so the pool must set it here too.
 	return &ghinstall.OrgPool{M: m, AppCount: 3, AppIDs: map[int64]bool{101: true, 102: true, 103: true, 201: true}}
 }
 
@@ -1398,7 +1400,10 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 
 	t.Run("pinned app not installed", func(t *testing.T) {
 		s := &sts{apps: AppSet{Names: map[string]int64{"ghost": 301}, IDs: map[int64]bool{301: true}}}
-		_, err := exchange(t, s, pool, compile(t, &TrustPolicy{App: "ghost"}))
+		// ghost/301 is a pool member but has no installation, so the pin must
+		// reach installation enumeration and fail there, not on membership.
+		ghostPool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: map[int64]bool{301: true}}
+		_, err := exchange(t, s, ghostPool, compile(t, &TrustPolicy{App: "ghost"}))
 		if status.Code(err) != codes.FailedPrecondition {
 			t.Fatalf("got %v, want FailedPrecondition", err)
 		}
