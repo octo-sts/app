@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 
 	gcpSM "cloud.google.com/go/secretmanager/apiv1"
@@ -22,6 +23,7 @@ import (
 
 type SecretProvider interface {
 	GetSecret(ctx context.Context, keyID string) ([]byte, error)
+	io.Closer
 }
 
 const (
@@ -35,6 +37,7 @@ type secretProvider struct {
 	gcpSecretManager *gcpSM.Client
 	awsSecretManager *awsSM.Client
 	akvSecretManager *azsecrets.Client
+	closer           io.Closer
 }
 
 func (s *secretProvider) GetSecret(ctx context.Context, keyID string) ([]byte, error) {
@@ -48,6 +51,13 @@ func (s *secretProvider) GetSecret(ctx context.Context, keyID string) ([]byte, e
 	default:
 		return nil, errors.New("unsupported secret provider")
 	}
+}
+
+func (s *secretProvider) Close() error {
+	if s.closer == nil {
+		return nil
+	}
+	return s.closer.Close()
 }
 
 func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, error) {
@@ -71,6 +81,7 @@ func NewSecretProvider(ctx context.Context, provider string) (SecretProvider, er
 			return nil, err
 		}
 		sp.gcpSecretManager = client
+		sp.closer = client
 		return sp, nil
 	case AKV:
 		cfg, err := envconfig.WebhookConfig()

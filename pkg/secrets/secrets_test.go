@@ -5,7 +5,9 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,6 +15,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type fakeCloser struct {
+	closed bool
+	err    error
+}
+
+func (f *fakeCloser) Close() error {
+	f.closed = true
+	return f.err
+}
 
 func TestNewSecretProviderReturnsErrOnFakeProvider(t *testing.T) {
 	ctx := context.Background()
@@ -29,6 +41,39 @@ func TestSecretProvider_GetSecretReturnsErrOnFakeProvider(t *testing.T) {
 	val, err := sp.GetSecret(ctx, "fake-key-id")
 	assert.Nil(t, val)
 	assert.Error(t, err)
+}
+
+func TestSecretProvider_Close(t *testing.T) {
+	wantErr := errors.New("close failed")
+	closer := &fakeCloser{err: wantErr}
+	sp := &secretProvider{closer: closer}
+
+	err := sp.Close()
+
+	assert.True(t, closer.closed)
+	assert.ErrorIs(t, err, wantErr)
+}
+
+func TestSecretProvider_CloseWithoutCloser(t *testing.T) {
+	assert.NoError(t, (&secretProvider{}).Close())
+}
+
+func TestNewSecretProvider_GCPClose(t *testing.T) {
+	credentials := filepath.Join(t.TempDir(), "credentials.json")
+	require.NoError(t, os.WriteFile(credentials, []byte(`{
+  "type": "authorized_user",
+  "client_id": "test-client",
+  "client_secret": "test-secret",
+  "refresh_token": "test-token"
+}`), 0o600))
+	t.Setenv("GOOGLE_APPLICATION_CREDENTIALS", credentials)
+
+	provider, err := NewSecretProvider(context.Background(), GCP)
+	require.NoError(t, err)
+
+	sp := provider.(*secretProvider)
+	assert.Same(t, sp.gcpSecretManager, sp.closer)
+	assert.NoError(t, provider.Close())
 }
 
 func TestNewSecretProvider_NormalizesProviderString(t *testing.T) {
