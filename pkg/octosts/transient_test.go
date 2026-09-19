@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -147,6 +148,64 @@ func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 	}
 }
 
+// TestFetchTrustPolicyRawServesStaleOnRateLimit covers the rate-limit stale path
+// after the retry refactor: it serves stale without retrying, and the fresh-only
+// cache writes mean the stale entry's TTL is not renewed on the serve.
+func TestFetchTrustPolicyRawServesStaleOnRateLimit(t *testing.T) {
+	key := freshTPKey(t, "stale-me")
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+	staleTrustPolicies.Add(key, policy) // stale present, primary empty
+	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	raw, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key)
+	if err != nil || raw != policy {
+		t.Fatalf("fetchTrustPolicyRaw = (%q, %v), want stale (%q, nil)", raw, err, policy)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Errorf("contents calls = %d, want 1 (rate limit is not retried)", got)
+	}
+}
+
+// TestFetchTrustPolicyRawContextDeadline pins that a caller deadline expiring
+// mid-fetch surfaces as DeadlineExceeded, not as a GitHub-transient Unavailable.
+func TestFetchTrustPolicyRawContextDeadline(t *testing.T) {
+	key := freshTPKey(t, "slowpoke")
+	gh, _ := newFakeGitHubContents("", http.StatusInternalServerError)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Millisecond)
+	defer cancel()
+	_, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+	if got := status.Code(err); got != codes.DeadlineExceeded {
+		t.Fatalf("code = %v, want DeadlineExceeded; err = %v", got, err)
+	}
+}
+
+// TestFetchTrustPolicyRawTransientThenNotFound pins the subtle boundary where
+// backoff's try limit and a Permanent stop coincide on the final attempt: two
+// 5xx then a 404 must resolve to NotFound and seed the negative cache.
+func TestFetchTrustPolicyRawTransientThenNotFound(t *testing.T) {
+	key := freshTPKey(t, "eventually-404")
+	gh, counter := newFakeGitHubContents("",
+		http.StatusInternalServerError, http.StatusInternalServerError, http.StatusNotFound)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	_, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key)
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound; err = %v", got, err)
+	}
+	if got := counter.Load(); got != int32(maxRetry) {
+		t.Errorf("contents calls = %d, want %d", got, maxRetry)
+	}
+	if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
+		t.Error("final 404 did not seed the negative cache")
+	}
+}
+
 func TestIsTransient(t *testing.T) {
 	resp := func(code int) *github.ErrorResponse {
 		return &github.ErrorResponse{Response: &http.Response{StatusCode: code}}
@@ -167,6 +226,9 @@ func TestIsTransient(t *testing.T) {
 		{"context canceled", context.Canceled, false},
 		{"deadline exceeded", context.DeadlineExceeded, false},
 		{"wrapped 500", fmt.Errorf("get contents: %w", resp(http.StatusInternalServerError)), true},
+		{"token-mint 500", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusBadGateway}}, true},
+		{"token-mint 401", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusUnauthorized}}, false},
+		{"token-mint 404", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusNotFound}}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isTransient(tc.err); got != tc.want {

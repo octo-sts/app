@@ -893,11 +893,24 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			&github.RepositoryContentGetOptions{},
 		)
 		if err == nil {
+			if file == nil {
+				// GetContents returns a nil file when the path is a directory;
+				// GetContent would panic on it. Treat it as no policy.
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "trust policy path is not a file for %q", tpKey.identity))
+			}
 			raw, rerr := file.GetContent()
 			if rerr != nil {
 				clog.ErrorContextf(ctx, "failed to read trust policy: %v", rerr)
 				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to read trust policy found for %q", tpKey.identity))
 			}
+			// Populate the caches on the fresh-fetch path only. The stale-serve
+			// branch below must not reach here, or it would renew the stale
+			// entry's TTL on every rate-limited exchange and keep a stale policy
+			// servable indefinitely.
+			if evicted := trustPolicies.Add(tpKey, raw); evicted {
+				clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
+			}
+			staleTrustPolicies.Add(tpKey, raw)
 			return raw, nil
 		}
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
@@ -931,6 +944,19 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	expBackoff.InitialInterval = retryDelay
 	raw, err := backoff.Retry(ctx, op, backoff.WithBackOff(expBackoff), backoff.WithMaxTries(maxRetry))
 	if err != nil {
+		// backoff returns the *PermanentError wrapper when the try limit and a
+		// Permanent stop coincide on the last attempt; unwrap so the checks
+		// below see the underlying error.
+		var pe *backoff.PermanentError
+		if errors.As(err, &pe) {
+			err = pe.Unwrap()
+		}
+		// A cancellation during a backoff sleep surfaces here as a raw context
+		// error, not a gRPC status; report it as the caller giving up rather
+		// than as a GitHub transient.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", status.FromContextError(err).Err()
+		}
 		// Permanent classifications are already gRPC status errors; a bare error
 		// here is the transient class that exhausted its retries.
 		if _, ok := status.FromError(err); ok {
@@ -939,11 +965,6 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		clog.WarnContextf(ctx, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
 		return "", status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
 	}
-
-	if evicted := trustPolicies.Add(tpKey, raw); evicted {
-		clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
-	}
-	staleTrustPolicies.Add(tpKey, raw)
 	return raw, nil
 }
 
@@ -962,7 +983,14 @@ func isTransient(err error) bool {
 	if errors.As(err, &ghErr) {
 		return ghErr.Response != nil && ghErr.Response.StatusCode >= 500
 	}
-	// No HTTP response: transport, DNS, TLS, or installation-token creation.
+	// Installation-token creation surfaces as *ghinstallation.HTTPError, not a
+	// go-github error. A permanent 401/404 (bad key, app not installed) must not
+	// be retried; only a 5xx mint failure is transient.
+	var httpErr *ghinstallation.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Response != nil && httpErr.Response.StatusCode >= 500
+	}
+	// No HTTP response at all: transport, DNS, or TLS.
 	return true
 }
 
