@@ -265,4 +265,10 @@ func TestPolicyEmitterShutdownCancelsInFlightSends(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Error("in-flight send was not cancelled when the drain deadline expired")
 	}
+
+	// Shutdown gave up on its deadline without waiting for the worker, so wait
+	// for the worker to exit before returning. Its deferred error log uses the
+	// t-bound logger, and logging after the test completes races with test
+	// teardown ("Log in goroutine after test has completed").
+	p.wg.Wait()
 }
