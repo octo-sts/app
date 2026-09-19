@@ -129,7 +129,7 @@ jobs:
           password: "${{ steps.auth.outputs.access_token }}"
           registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@142d22e4cec7c824db396585b9bc86f76f7c1732 # v1.6.35
+      - uses: chainguard-dev/actions/setup-terraform@0bacfe710021b5ad6d8886a53a34c40072f2fc90 # v1.6.36
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
