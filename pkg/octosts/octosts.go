@@ -253,6 +253,12 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
+	// The identity is interpolated into the policy path, so restrict it to a
+	// single path segment. Otherwise a value with "/" resolves to a nested file
+	// the webhook glob never validates, and ".."/"." could traverse the repo.
+	if !oidcvalidate.IsValidIdentity(request.GetIdentity()) {
+		return nil, status.Error(codes.InvalidArgument, "identity must be a single path segment")
+	}
 
 	var base *ghinstallation.AppsTransport
 	base, e.InstallationID, e.TrustPolicy, e.IssuerAllowlist, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject, issuer)
