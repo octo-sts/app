@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/cenkalti/backoff/v5"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v88/github"
@@ -878,13 +879,46 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}
-	file, _, _, err := client.Repositories.GetContents(ctx,
-		tpKey.owner, tpKey.repo,
-		fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
-		&github.RepositoryContentGetOptions{},
-	)
-	if err != nil {
+	// GetContents can fail transiently (a 5xx, a network blip, or a token-mint
+	// error). Those must not be reported as NotFound, which masks the real cause
+	// and offers no retry. Retry the transient class same-app with a short
+	// backoff, sitting below the fleet rotation in lookupTrustPolicyWithRetry,
+	// and surface an unresolved transient failure as Unavailable. Rate limits
+	// and 404s stop immediately: the rotation layer handles the former, and a
+	// 404 is the genuine "no policy" answer that seeds the negative cache.
+	op := func() (string, error) {
+		file, _, _, err := client.Repositories.GetContents(ctx,
+			tpKey.owner, tpKey.repo,
+			fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
+			&github.RepositoryContentGetOptions{},
+		)
+		if err == nil {
+			if file == nil {
+				// GetContents returns a nil file when the path is a directory;
+				// GetContent would panic on it. Treat it as no policy.
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "trust policy path is not a file for %q", tpKey.identity))
+			}
+			raw, rerr := file.GetContent()
+			if rerr != nil {
+				clog.ErrorContextf(ctx, "failed to read trust policy: %v", rerr)
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to read trust policy found for %q", tpKey.identity))
+			}
+			// Populate the caches on the fresh-fetch path only. The stale-serve
+			// branch below must not reach here, or it would renew the stale
+			// entry's TTL on every rate-limited exchange and keep a stale policy
+			// servable indefinitely.
+			if evicted := trustPolicies.Add(tpKey, raw); evicted {
+				clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
+			}
+			staleTrustPolicies.Add(tpKey, raw)
+			return raw, nil
+		}
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
+
+		// The caller gave up; propagate rather than retry or mask.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", backoff.Permanent(status.FromContextError(err).Err())
+		}
 		if IsGitHubRateLimited(err) {
 			if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 				clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
@@ -893,26 +927,71 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 				trustPolicies.Add(tpKey, stale)
 				return stale, nil
 			}
-			return "", status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded for %q", tpKey.identity)
+			return "", backoff.Permanent(status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded for %q", tpKey.identity))
 		}
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
 			trustPolicies.Add(tpKey, negativeCacheConst)
+			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
-		return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+		if isTransient(err) {
+			return "", err
+		}
+		return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 	}
 
-	raw, err := file.GetContent()
+	expBackoff := backoff.NewExponentialBackOff()
+	expBackoff.InitialInterval = retryDelay
+	raw, err := backoff.Retry(ctx, op, backoff.WithBackOff(expBackoff), backoff.WithMaxTries(maxRetry))
 	if err != nil {
-		clog.ErrorContextf(ctx, "failed to read trust policy: %v", err)
-		return "", status.Errorf(codes.NotFound, "unable to read trust policy found for %q", tpKey.identity)
+		// backoff returns the *PermanentError wrapper when the try limit and a
+		// Permanent stop coincide on the last attempt; unwrap so the checks
+		// below see the underlying error.
+		var pe *backoff.PermanentError
+		if errors.As(err, &pe) {
+			err = pe.Unwrap()
+		}
+		// A cancellation during a backoff sleep surfaces here as a raw context
+		// error, not a gRPC status; report it as the caller giving up rather
+		// than as a GitHub transient.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return "", status.FromContextError(err).Err()
+		}
+		// Permanent classifications are already gRPC status errors; a bare error
+		// here is the transient class that exhausted its retries.
+		if _, ok := status.FromError(err); ok {
+			return "", err
+		}
+		clog.WarnContextf(ctx, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
+		return "", status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
 	}
-
-	if evicted := trustPolicies.Add(tpKey, raw); evicted {
-		clog.InfoContextf(ctx, "evicted cachekey %s", tpKey)
-	}
-	staleTrustPolicies.Add(tpKey, raw)
 	return raw, nil
+}
+
+// isTransient reports whether err is a retriable, non-rate-limit failure from a
+// trust policy fetch: a 5xx GitHub response, or a transport / token-creation
+// error with no HTTP response at all. Context cancellation and deadline are the
+// caller giving up, so they are deliberately excluded.
+func isTransient(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var ghErr *github.ErrorResponse
+	if errors.As(err, &ghErr) {
+		return ghErr.Response != nil && ghErr.Response.StatusCode >= 500
+	}
+	// Installation-token creation surfaces as *ghinstallation.HTTPError, not a
+	// go-github error. A permanent 401/404 (bad key, app not installed) must not
+	// be retried; only a 5xx mint failure is transient.
+	var httpErr *ghinstallation.HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.Response != nil && httpErr.Response.StatusCode >= 500
+	}
+	// No HTTP response at all: transport, DNS, or TLS.
+	return true
 }
 
 // ExchangeRefreshToken implements pboidc.SecurityTokenServiceServer
