@@ -35,8 +35,8 @@ func TestEligibleAppsScopesSelectorsToConfiguredPool(t *testing.T) {
 		{name: "unpinned", members: local},
 		{name: "empty pool", pattern: "ci-.*", members: map[int64]bool{}, code: codes.FailedPrecondition},
 		{name: "empty pool unpinned", members: map[int64]bool{}},
-		{name: "unknown membership retains pattern matches", pattern: "ci-.*", want: map[int64]bool{101: true, 102: true, 103: true}},
-		{name: "unknown membership retains named match", app: "ci-remote", want: map[int64]bool{103: true}},
+		{name: "nil membership fails closed for pattern", pattern: "ci-.*", code: codes.FailedPrecondition},
+		{name: "nil membership fails closed for named app", app: "ci-remote", code: codes.FailedPrecondition},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tp := &TrustPolicy{Issuer: "https://example.com", Subject: "subject", App: tc.app, AppPattern: tc.pattern}
