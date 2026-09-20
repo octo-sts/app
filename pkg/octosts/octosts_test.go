@@ -433,6 +433,27 @@ func TestExchangeValidation(t *testing.T) {
 			},
 		},
 		{
+			name: "nested identity",
+			req: &v1.ExchangeRequest{
+				Identity: "sub/foo",
+				Scopes:   []string{"org/repo"},
+			},
+		},
+		{
+			name: "traversal identity",
+			req: &v1.ExchangeRequest{
+				Identity: "../secrets",
+				Scopes:   []string{"org/repo"},
+			},
+		},
+		{
+			name: "dotdot identity",
+			req: &v1.ExchangeRequest{
+				Identity: "..",
+				Scopes:   []string{"org/repo"},
+			},
+		},
+		{
 			name: "nil",
 			req:  nil,
 		},
