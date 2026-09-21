@@ -854,6 +854,116 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	}
 }
 
+// newFakeGitHubForbidden returns a fake GitHub whose policy read answers with a
+// bare 403 carrying no rate-limit headers, so go-github surfaces a plain
+// *github.ErrorResponse rather than a *RateLimitError. This is the
+// permission-denied case of issue #1320, distinct from newFakeGitHubRateLimit.
+func newFakeGitHubForbidden() *fakeGitHub {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		// Keep the org allowlist read out of the way, as newFakeGitHubRateLimit does.
+		if r.PathValue("identity") == "trusted-token-issuers.yaml" {
+			writeGitHubNotFound(w)
+			return
+		}
+		// A bare 403: no X-RateLimit-Remaining, no Retry-After. This is a
+		// permission failure, not a rate limit.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(github.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusForbidden},
+			Message:  "Resource not accessible by integration",
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}
+}
+
+// TestPolicyReadForbiddenDoesNotRotate covers issue #1320's wasteful-rotation
+// impact: a bare 403 on the first app must surface as PermissionDenied without
+// rotating to the next app. The pool's second transport works, so a rotation
+// would succeed; a PermissionDenied result proves the retry loop stopped.
+func TestPolicyReadForbiddenDoesNotRotate(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	orgIssuers.Add("org", absentOrgIssuerEntry())
+	t.Cleanup(func() {
+		orgIssuers.Remove("org")
+		staleOrgIssuers.Remove("org")
+	})
+
+	ctx := context.Background()
+	forbiddenAtr := newAppsTransport(t, newFakeGitHubForbidden())
+	workingAtr := newAppsTransport(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool := &ghinstall.OrgPool{
+		M: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{forbiddenAtr, workingAtr},
+		},
+		AppCount: 2,
+	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scopes:   []string{"org/repo"},
+	})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied (a 403 must not rotate to the next app); err = %v", got, err)
+	}
+}
+
 // newFakeGitHubNotFoundCounter returns a fake GitHub server that returns 404
 // for content requests and counts how many times the endpoint was hit.
 func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {

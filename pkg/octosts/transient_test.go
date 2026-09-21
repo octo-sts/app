@@ -150,12 +150,13 @@ func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 
 // TestFetchTrustPolicyRawServesStaleOnRateLimit covers the rate-limit stale path
 // after the retry refactor: it serves stale without retrying, and the fresh-only
-// cache writes mean the stale entry's TTL is not renewed on the serve.
+// cache writes mean the stale entry's TTL is not renewed on the serve. A 429 is a
+// proven rate limit; a bare 403 is not and is covered by the forbidden test below.
 func TestFetchTrustPolicyRawServesStaleOnRateLimit(t *testing.T) {
 	key := freshTPKey(t, "stale-me")
 	const policy = "issuer: https://example.com\nsubject: sub\n"
 	staleTrustPolicies.Add(key, policy) // stale present, primary empty
-	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	gh, counter := newFakeGitHubContents("", http.StatusTooManyRequests)
 	atr := newAppsTransport(t, gh)
 	s := &sts{}
 
@@ -165,6 +166,85 @@ func TestFetchTrustPolicyRawServesStaleOnRateLimit(t *testing.T) {
 	}
 	if got := counter.Load(); got != 1 {
 		t.Errorf("contents calls = %d, want 1 (rate limit is not retried)", got)
+	}
+}
+
+// TestFetchTrustPolicyRawForbiddenFailsClosed covers issue #1320: a bare 403 is a
+// permission failure, not a rate limit. It must surface as PermissionDenied, not
+// ResourceExhausted, must not be retried, and must fail closed by refusing to
+// serve a stale policy even when one is cached (access may have been revoked).
+func TestFetchTrustPolicyRawForbiddenFailsClosed(t *testing.T) {
+	key := freshTPKey(t, "forbidden")
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+	staleTrustPolicies.Add(key, policy) // stale present but must NOT be served
+	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	raw, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key)
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied; err = %v", got, err)
+	}
+	if raw != "" {
+		t.Errorf("raw = %q, want empty (stale must not be served on a 403)", raw)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Errorf("contents calls = %d, want 1 (a 403 is not retried)", got)
+	}
+	// A 403 is not a definitive "no policy" answer, so it must not poison the
+	// negative cache the way a 404 does.
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("a 403 seeded the trust policy cache; it must not")
+	}
+}
+
+func TestIsProvenRateLimit(t *testing.T) {
+	resp := func(code int) *github.ErrorResponse {
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"typed RateLimitError", &github.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, true},
+		{"typed AbuseRateLimitError", &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, true},
+		{"429", resp(http.StatusTooManyRequests), true},
+		{"bare 403", resp(http.StatusForbidden), false},
+		{"404", resp(http.StatusNotFound), false},
+		{"500", resp(http.StatusInternalServerError), false},
+		{"wrapped 429", fmt.Errorf("get contents: %w", resp(http.StatusTooManyRequests)), true},
+		{"wrapped bare 403", fmt.Errorf("get contents: %w", resp(http.StatusForbidden)), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isProvenRateLimit(tc.err); got != tc.want {
+				t.Errorf("isProvenRateLimit(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsForbidden(t *testing.T) {
+	resp := func(code int) *github.ErrorResponse {
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bare 403", resp(http.StatusForbidden), true},
+		{"429", resp(http.StatusTooManyRequests), false},
+		{"404", resp(http.StatusNotFound), false},
+		{"wrapped 403", fmt.Errorf("get contents: %w", resp(http.StatusForbidden)), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isForbidden(tc.err); got != tc.want {
+				t.Errorf("isForbidden(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

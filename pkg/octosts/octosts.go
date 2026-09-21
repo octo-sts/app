@@ -824,6 +824,35 @@ func IsGitHubRateLimited(err error) bool {
 	return false
 }
 
+// isProvenRateLimit reports whether err is PROVEN to be a rate limit, unlike the
+// lenient IsGitHubRateLimited. go-github returns a typed *RateLimitError for a
+// 403 carrying X-RateLimit-Remaining: 0 and *AbuseRateLimitError for a secondary
+// limit; a raw 429 is the primary limit. A bare *ErrorResponse 403 is NOT counted:
+// it is a permission failure (resource not accessible by integration, IP
+// allowlist, SAML/SSO, ToS lock), and mislabeling it as a rate limit both
+// misleads operators and burns quota rotating apps that cannot help.
+func isProvenRateLimit(err error) bool {
+	if err == nil {
+		return false
+	}
+	var rateLimitErr *github.RateLimitError
+	var abuseRateLimitErr *github.AbuseRateLimitError
+	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr) {
+		return true
+	}
+	var errResp *github.ErrorResponse
+	return errors.As(err, &errResp) && errResp.Response != nil &&
+		errResp.Response.StatusCode == http.StatusTooManyRequests
+}
+
+// isForbidden reports whether err is a bare GitHub 403 that isProvenRateLimit has
+// already ruled out as a rate limit: a genuine permission-denied response.
+func isForbidden(err error) bool {
+	var errResp *github.ErrorResponse
+	return errors.As(err, &errResp) && errResp.Response != nil &&
+		errResp.Response.StatusCode == http.StatusForbidden
+}
+
 type trustPolicy interface {
 	Compile() error
 }
@@ -925,7 +954,10 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", backoff.Permanent(status.FromContextError(err).Err())
 		}
-		if IsGitHubRateLimited(err) {
+		// Rate limits FIRST, and only PROVEN ones: a typed rate-limit error or a
+		// 429. A bare 403 is handled below as permission-denied, not here, so it
+		// no longer masquerades as a rate limit (see isProvenRateLimit).
+		if isProvenRateLimit(err) {
 			if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 				clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
 				// Seed the primary cache so further exchanges during the
@@ -934,6 +966,14 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 				return stale, nil
 			}
 			return "", backoff.Permanent(status.Errorf(codes.ResourceExhausted, "GitHub API rate limit exceeded for %q", tpKey.identity))
+		}
+		// A bare 403 is permission-denied, not a rate limit. Fail closed: do not
+		// serve a stale policy (access may have been revoked) and do not rotate
+		// apps in lookupTrustPolicyWithRetry, which keys off ResourceExhausted.
+		// A permission problem is not one another app can resolve.
+		if isForbidden(err) {
+			clog.WarnContextf(ctx, "trust policy read forbidden for %q (403, not a rate limit): %v", tpKey.identity, err)
+			return "", backoff.Permanent(status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity))
 		}
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
