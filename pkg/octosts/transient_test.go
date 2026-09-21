@@ -79,9 +79,11 @@ func freshTPKey(t *testing.T, identity string) cacheTrustPolicyKey {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: identity}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		forbiddenPolicies.Remove(key)
 	})
 	return key
 }
@@ -219,6 +221,12 @@ func TestFetchTrustPolicyRawForbiddenThenRateLimitDoesNotResurrect(t *testing.T)
 		t.Fatalf("first fetch code = %v, want PermissionDenied; err = %v", status.Code(err), err)
 	}
 
+	// Simulate the forbidden cooldown expiring so the next fetch reaches the
+	// rate-limit path instead of short-circuiting. Without this the cooldown
+	// (issue #1685) would return PermissionDenied and never exercise the
+	// stale-drop this test pins.
+	forbiddenPolicies.Remove(key)
+
 	// Then: a 429 on the same key must not find a stale policy to serve.
 	limited, _ := newFakeGitHubContents("", http.StatusTooManyRequests)
 	raw, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, limited), 1234, key)
@@ -227,6 +235,29 @@ func TestFetchTrustPolicyRawForbiddenThenRateLimitDoesNotResurrect(t *testing.T)
 	}
 	if raw != "" {
 		t.Errorf("raw = %q, want empty (stale must not be resurrected by a rate limit)", raw)
+	}
+}
+
+// TestFetchTrustPolicyRawForbiddenCooldownStopsReprobing covers issue #1685: a
+// permission 403 seeds a short cooldown so the next exchange returns
+// PermissionDenied without re-minting a token to re-probe GitHub. The contents
+// endpoint must be hit exactly once across two fetches on the same key.
+func TestFetchTrustPolicyRawForbiddenCooldownStopsReprobing(t *testing.T) {
+	key := freshTPKey(t, "cooldown")
+	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	// First fetch: hits GitHub, gets a 403, seeds the cooldown.
+	if _, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("first fetch code = %v, want PermissionDenied; err = %v", status.Code(err), err)
+	}
+	// Second fetch: served from the cooldown, so GitHub is not touched again.
+	if _, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("second fetch code = %v, want PermissionDenied; err = %v", status.Code(err), err)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Errorf("contents calls = %d, want 1 (the cooldown must suppress the re-probe)", got)
 	}
 }
 
