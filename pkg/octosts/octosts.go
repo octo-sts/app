@@ -73,6 +73,17 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
+// forbiddenPolicyTTL is deliberately short so a permission fix (an installation
+// regaining contents:read, an IP allowlist edit) is picked up within a minute.
+const forbiddenPolicyTTL = time.Minute
+
+// forbiddenPolicies caches trust policy reads that returned a permission 403 so a
+// persistently misconfigured org stops re-probing GitHub (mint, read, revoke) on
+// every exchange. It is kept separate from the trustPolicies 404 negative cache
+// because a 403 must surface as PermissionDenied, not NotFound, and expires
+// faster than the 5-minute policy cache so a fixed permission recovers quickly.
+var forbiddenPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, struct{}](200, nil, forbiddenPolicyTTL)
+
 // Pin confirmation caches share one size and TTL. The TTL is deliberately
 // shorter than ghinstall's 5-minute negative-cache TTL so that
 // install-then-retry recovers within a minute. Unchanged observations reuse
@@ -912,6 +923,15 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		return cached, nil
 	}
 
+	// A recent permission 403 short-circuits the mint/read/revoke cycle for the
+	// cooldown window, so a misconfigured org stops re-probing GitHub on every
+	// exchange. Distinct from the 404 negative cache: this returns
+	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
+	if _, ok := forbiddenPolicies.Get(tpKey); ok {
+		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
+		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
+	}
+
 	atr := ghinstallation.NewFromAppsTransport(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{tpKey.repo},
@@ -994,10 +1014,12 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		// revoked, so leaving the stale entry would let a later proven rate limit
 		// on this key serve it (and re-seed the primary cache) after GitHub has
 		// already refused the read. A permission problem is not one another app
-		// can resolve.
+		// can resolve. Seed the cooldown so the next exchange short-circuits
+		// instead of re-minting a token to re-probe the same 403.
 		if isForbidden(err) {
 			clog.WarnContextf(ctx, "trust policy read forbidden for %q (403, not a rate limit): %v", tpKey.identity, err)
 			staleTrustPolicies.Remove(tpKey)
+			forbiddenPolicies.Add(tpKey, struct{}{})
 			return "", backoff.Permanent(status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity))
 		}
 		var ghErr *github.ErrorResponse

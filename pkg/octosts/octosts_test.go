@@ -731,9 +731,13 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
 	})
 
 	orgIssuers.Add("org", absentOrgIssuerEntry())
@@ -793,9 +797,13 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
 	})
 
 	orgIssuers.Add("org", absentOrgIssuerEntry())
@@ -910,9 +918,13 @@ func TestPolicyReadForbiddenDoesNotRotate(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
 	})
 
 	orgIssuers.Add("org", absentOrgIssuerEntry())
