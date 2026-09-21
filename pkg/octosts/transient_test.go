@@ -150,12 +150,13 @@ func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 
 // TestFetchTrustPolicyRawServesStaleOnRateLimit covers the rate-limit stale path
 // after the retry refactor: it serves stale without retrying, and the fresh-only
-// cache writes mean the stale entry's TTL is not renewed on the serve.
+// cache writes mean the stale entry's TTL is not renewed on the serve. A 429 is a
+// proven rate limit; a bare 403 is not and is covered by the forbidden test below.
 func TestFetchTrustPolicyRawServesStaleOnRateLimit(t *testing.T) {
 	key := freshTPKey(t, "stale-me")
 	const policy = "issuer: https://example.com\nsubject: sub\n"
 	staleTrustPolicies.Add(key, policy) // stale present, primary empty
-	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	gh, counter := newFakeGitHubContents("", http.StatusTooManyRequests)
 	atr := newAppsTransport(t, gh)
 	s := &sts{}
 
@@ -165,6 +166,136 @@ func TestFetchTrustPolicyRawServesStaleOnRateLimit(t *testing.T) {
 	}
 	if got := counter.Load(); got != 1 {
 		t.Errorf("contents calls = %d, want 1 (rate limit is not retried)", got)
+	}
+}
+
+// TestFetchTrustPolicyRawForbiddenFailsClosed covers issue #1320: a bare 403 is a
+// permission failure, not a rate limit. It must surface as PermissionDenied, not
+// ResourceExhausted, must not be retried, and must fail closed by refusing to
+// serve a stale policy even when one is cached (access may have been revoked).
+func TestFetchTrustPolicyRawForbiddenFailsClosed(t *testing.T) {
+	key := freshTPKey(t, "forbidden")
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+	staleTrustPolicies.Add(key, policy) // stale present but must NOT be served
+	gh, counter := newFakeGitHubContents("", http.StatusForbidden)
+	atr := newAppsTransport(t, gh)
+	s := &sts{}
+
+	raw, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key)
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied; err = %v", got, err)
+	}
+	if raw != "" {
+		t.Errorf("raw = %q, want empty (stale must not be served on a 403)", raw)
+	}
+	if got := counter.Load(); got != 1 {
+		t.Errorf("contents calls = %d, want 1 (a 403 is not retried)", got)
+	}
+	// A 403 is not a definitive "no policy" answer, so it must not poison the
+	// negative cache the way a 404 does.
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("a 403 seeded the trust policy cache; it must not")
+	}
+	// Failing closed means dropping the stale copy too: access may have been
+	// revoked, so a later rate limit must not be able to resurrect it.
+	if _, ok := staleTrustPolicies.Get(key); ok {
+		t.Error("a 403 left the stale trust policy in place; it must drop it")
+	}
+}
+
+// TestFetchTrustPolicyRawForbiddenThenRateLimitDoesNotResurrect proves the
+// fail-closed drop holds across calls: once a 403 removes the stale copy, a
+// later 429 on the same key cannot serve the policy GitHub refused to let us
+// read. Without the stale removal a rate limit would resurrect and re-seed it.
+func TestFetchTrustPolicyRawForbiddenThenRateLimitDoesNotResurrect(t *testing.T) {
+	key := freshTPKey(t, "revoked")
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+	staleTrustPolicies.Add(key, policy)
+	s := &sts{}
+
+	// First: a 403 fails closed and drops the stale copy.
+	forbidden, _ := newFakeGitHubContents("", http.StatusForbidden)
+	if _, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, forbidden), 1234, key); status.Code(err) != codes.PermissionDenied {
+		t.Fatalf("first fetch code = %v, want PermissionDenied; err = %v", status.Code(err), err)
+	}
+
+	// Then: a 429 on the same key must not find a stale policy to serve.
+	limited, _ := newFakeGitHubContents("", http.StatusTooManyRequests)
+	raw, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, limited), 1234, key)
+	if status.Code(err) != codes.ResourceExhausted {
+		t.Fatalf("second fetch code = %v, want ResourceExhausted; err = %v", status.Code(err), err)
+	}
+	if raw != "" {
+		t.Errorf("raw = %q, want empty (stale must not be resurrected by a rate limit)", raw)
+	}
+}
+
+func TestIsProvenRateLimit(t *testing.T) {
+	resp := func(code int) *github.ErrorResponse {
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code}}
+	}
+	// respH builds a bare ErrorResponse (the shape go-github leaves when its
+	// documentation_url anchor match fails to type a rate limit) with headers.
+	// Headers are set through http.Header.Set so keys are canonicalized exactly
+	// as net/http populates a real response, matching how isProvenRateLimit reads
+	// them back with Get.
+	respH := func(code int, kv ...string) *github.ErrorResponse {
+		h := http.Header{}
+		for i := 0; i+1 < len(kv); i += 2 {
+			h.Set(kv[i], kv[i+1])
+		}
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code, Header: h}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"typed RateLimitError", &github.RateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, true},
+		{"typed AbuseRateLimitError", &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}}, true},
+		{"429", resp(http.StatusTooManyRequests), true},
+		// A secondary limit go-github failed to type: a bare 403 with Retry-After.
+		{"403 with Retry-After", respH(http.StatusForbidden, "Retry-After", "60"), true},
+		// A primary limit surfacing as a bare 403 (untyped) with the count header.
+		{"403 with X-RateLimit-Remaining 0", respH(http.StatusForbidden, "X-RateLimit-Remaining", "0"), true},
+		// A permission 403: no rate-limit headers, remaining count not exhausted.
+		{"403 with remaining budget", respH(http.StatusForbidden, "X-RateLimit-Remaining", "4999"), false},
+		{"bare 403", resp(http.StatusForbidden), false},
+		{"404", resp(http.StatusNotFound), false},
+		{"500", resp(http.StatusInternalServerError), false},
+		{"wrapped 429", fmt.Errorf("get contents: %w", resp(http.StatusTooManyRequests)), true},
+		{"wrapped bare 403", fmt.Errorf("get contents: %w", resp(http.StatusForbidden)), false},
+		{"wrapped 403 with Retry-After", fmt.Errorf("get contents: %w", respH(http.StatusForbidden, "Retry-After", "30")), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isProvenRateLimit(tc.err); got != tc.want {
+				t.Errorf("isProvenRateLimit(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsForbidden(t *testing.T) {
+	resp := func(code int) *github.ErrorResponse {
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code}}
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"bare 403", resp(http.StatusForbidden), true},
+		{"429", resp(http.StatusTooManyRequests), false},
+		{"404", resp(http.StatusNotFound), false},
+		{"wrapped 403", fmt.Errorf("get contents: %w", resp(http.StatusForbidden)), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isForbidden(tc.err); got != tc.want {
+				t.Errorf("isForbidden(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 

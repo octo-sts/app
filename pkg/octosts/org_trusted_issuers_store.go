@@ -161,19 +161,9 @@ const (
 // isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. Stricter than
 // IsGitHubRateLimited: a bare *ErrorResponse 403 is a permanent permission,
 // SAML/IP-allowlist or suspension failure, and calling it a rate limit would deny every
-// exchange in the org indefinitely.
+// exchange in the org indefinitely. See isProvenRateLimit for the shared definition.
 func isOrgIssuerRateLimit(err error) bool {
-	if err == nil {
-		return false
-	}
-	var rl *github.RateLimitError
-	var abuse *github.AbuseRateLimitError
-	if errors.As(err, &rl) || errors.As(err, &abuse) {
-		return true
-	}
-	var resp *github.ErrorResponse
-	return errors.As(err, &resp) && resp.Response != nil &&
-		resp.Response.StatusCode == http.StatusTooManyRequests
+	return isProvenRateLimit(err)
 }
 
 // isMintRateLimit reports whether a mint failure response is a rate limit. Below
