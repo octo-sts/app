@@ -6,7 +6,7 @@ require (
 	chainguard.dev/go-grpc-kit v0.20.0
 	chainguard.dev/sdk v0.1.279
 	cloud.google.com/go/firestore v1.25.0
-	cloud.google.com/go/kms v1.33.0
+	cloud.google.com/go/kms v1.34.0
 	cloud.google.com/go/secretmanager v1.21.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.1
