@@ -1534,6 +1534,16 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
+	t.Run("confirmation walk timeout surfaces as Unavailable", func(t *testing.T) {
+		pinMisses.Purge()
+		mgr := &enumMgr{freshErr: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		if _, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "timeoutorg", "timeoutorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.Unavailable {
+			t.Fatalf("got %v, want Unavailable for the walk's own timeout", err)
+		}
+	})
+
 	t.Run("unknown app", func(t *testing.T) {
 		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "ghost"}))
 		if status.Code(err) != codes.FailedPrecondition {

@@ -413,18 +413,20 @@ func (rr *roundRobin) enumerate(
 	out := make([]Installation, 0, len(rr.managers))
 	var errs []error
 	seen := make(map[int64]struct{}, len(rr.managers))
+	var ctxErr error
 
 	for _, m := range rr.managers {
-		if ctx.Err() != nil {
+		if ctxErr = ctx.Err(); ctxErr != nil {
 			// Bail rather than walking the remaining managers only to
 			// collect N copies of the same cancellation error.
-			errs = append(errs, ctx.Err())
 			break
 		}
 
 		installs, err := each(m, ctx, owner)
 		if err != nil {
-			errs = append(errs, err)
+			if ctxErr = ctx.Err(); ctxErr == nil {
+				errs = append(errs, err)
+			}
 			// installs may still be non-empty (a nested roundRobin or future
 			// multi-install Manager can return a partial result alongside its
 			// own error); collect it below rather than discarding it.
@@ -439,10 +441,14 @@ func (rr *roundRobin) enumerate(
 	}
 
 	if len(errs) > 0 {
-		err := status.Errorf(codes.Unavailable, "enumerating installations for %q: %v", owner, errors.Join(errs...))
 		clog.WarnContextf(ctx, "ghinstall: %s enumeration incomplete for %q: %d of %d managers failed; "+
-			"callers requiring exhaustiveness must treat this as unknown: %v", label, owner, len(errs), len(rr.managers), err)
-		return out, err
+			"callers requiring exhaustiveness must treat this as unknown: %v", label, owner, len(errs), len(rr.managers), errors.Join(errs...))
+	}
+	if ctxErr != nil {
+		return out, status.Errorf(status.FromContextError(ctxErr).Code(), "enumerating installations for %q: %v", owner, errors.Join(append(errs, ctxErr)...))
+	}
+	if len(errs) > 0 {
+		return out, status.Errorf(codes.Unavailable, "enumerating installations for %q: %v", owner, errors.Join(errs...))
 	}
 	return out, nil
 }
