@@ -74,12 +74,12 @@ type DetectionMethod string
 const (
 	// DetectionCommits derived changes from the push payload's commit list.
 	DetectionCommits DetectionMethod = "commits"
-	// DetectionCompare derived changes from the Compare API, used when the
-	// payload's commit list is truncated.
+	// DetectionCompare derived changes directly from the Compare API, used
+	// when the payload's commit list is truncated and the response is complete.
 	DetectionCompare DetectionMethod = "compare"
 	// DetectionSnapshot derived changes by diffing the policy directory at the
-	// pushed SHA against the ref's previous SHA. Used for forced pushes, where
-	// the commit list does not describe the net effect on the branch.
+	// pushed SHA against the ref's previous SHA. Used for forced pushes and
+	// comparisons at GitHub's file cap.
 	DetectionSnapshot DetectionMethod = "snapshot"
 	// DetectionDegraded means change detection could not be completed and the
 	// accompanying changes, if any, may be incomplete. Always accompanied by a
@@ -763,6 +763,11 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 			// computed. Record that the audit view of this push is incomplete.
 			log.Warnf("policy snapshot failed, falling back: %v", serr)
 			detection, detectionErr = DetectionDegraded, serr.Error()
+			if isProvenWebhookRateLimit(serr) {
+				// Further reads would amplify the limit. The degraded marker
+				// records the gap without posting a partial check run.
+				break
+			}
 
 			// Only before failed to resolve; the listing at the pushed SHA is
 			// still good. Report what is live rather than the commit list,
@@ -786,8 +791,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
 		if err != nil {
 			if isProvenWebhookRateLimit(err) {
-				log.Warnf("rate-limited discovering policies for new ref %s/%s@%s; acknowledging delivery", owner, repo, sha)
-				return nil, nil
+				log.Warnf("rate-limited discovering policies for new ref %s/%s@%s; recording degraded detection", owner, repo, sha)
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
 			}
 			return nil, err
 		}
@@ -796,13 +802,20 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
+			}
 			return nil, err
 		}
-		changes, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
+		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
+			}
 			return nil, err
 		}
-		detection = DetectionCompare
 	}
 
 	// Validation and auditing share one view of the push so the two can't
@@ -945,6 +958,10 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 
 	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 	if err != nil {
+		if errors.Is(err, errPRHeadMoved) || isProvenWebhookRateLimit(err) {
+			log.Warnf("skipping PR file validation: %v", err)
+			return nil, nil
+		}
 		return nil, err
 	}
 	if len(files) == 0 {
@@ -1011,6 +1028,10 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited discovering policies for check suite; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			if resp == nil || resp.StatusCode != http.StatusNotFound {
 				return nil, err
 			}
@@ -1024,10 +1045,18 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited comparing check suite; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			return nil, err
 		}
-		changes, err := e.completeCompareChanges(ctx, client, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, resp)
+		changes, _, err := e.completeCompareChanges(ctx, client, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, resp)
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited discovering check suite changes; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			return nil, err
 		}
 		files = append(files, pathsToValidate(changes)...)
@@ -1036,6 +1065,14 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	for _, pr := range cs.GetCheckSuite().PullRequests {
 		prFiles, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 		if err != nil {
+			if errors.Is(err, errPRHeadMoved) {
+				log.Infof("skipping stale PR %d in check suite: %v", pr.GetNumber(), err)
+				continue
+			}
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited listing check suite PR files; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			return nil, err
 		}
 		files = append(files, prFiles...)

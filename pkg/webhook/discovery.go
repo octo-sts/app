@@ -37,6 +37,8 @@ const (
 	compareFileCap = 300
 )
 
+var errPRHeadMoved = errors.New("pull request head moved past event commit")
+
 // policyFilesFromPR lists a complete, stable PR diff before selecting policies.
 func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead string) ([]string, error) {
 	snapshot := func() (head, base string, count int, err error) {
@@ -50,58 +52,75 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 		return pr.GetHead().GetSHA(), pr.GetBase().GetSHA(), pr.GetChangedFiles(), nil
 	}
 
-	head, base, count, err := snapshot()
-	if err != nil {
-		return nil, err
-	}
-	if head != expectedHead {
-		return nil, fmt.Errorf("pull request %d head %s differs from event head %s", number, head, expectedHead)
-	}
-	if count < 0 || count > maxPRFiles {
-		return nil, fmt.Errorf("pull request %d has %d changed files; GitHub lists at most %d", number, count, maxPRFiles)
-	}
-
-	seen := make(map[string]struct{}, count)
-	var files []*github.CommitFile
-	page := 1
-	for range maxPRPages {
-		listed, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, number, &github.ListOptions{Page: page, PerPage: prFilesPerPage})
+	for attempt := 0; attempt < 2; attempt++ {
+		head, base, count, err := snapshot()
 		if err != nil {
 			return nil, err
 		}
-		if resp == nil || resp.Response == nil || listed == nil {
-			return nil, fmt.Errorf("pull request %d file page %d is incomplete", number, page)
+		if head != expectedHead {
+			return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, head, expectedHead, errPRHeadMoved)
 		}
-		for _, file := range listed {
-			if file == nil || file.Filename == nil || file.GetFilename() == "" || file.Status == nil || file.GetStatus() == "" {
-				return nil, fmt.Errorf("pull request %d file page %d has an incomplete entry", number, page)
-			}
-			if _, exists := seen[file.GetFilename()]; exists {
-				return nil, fmt.Errorf("pull request %d repeats file %q", number, file.GetFilename())
-			}
-			seen[file.GetFilename()] = struct{}{}
-			files = append(files, file)
+		if count < 0 || count > maxPRFiles {
+			return nil, fmt.Errorf("pull request %d has %d changed files; GitHub lists at most %d", number, count, maxPRFiles)
 		}
-		if resp.NextPage == 0 {
-			finalHead, finalBase, finalCount, err := snapshot()
+
+		seen := make(map[string]struct{}, count)
+		var files []*github.CommitFile
+		page := 1
+		retryCount := false
+		for range maxPRPages {
+			listed, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, number, &github.ListOptions{Page: page, PerPage: prFilesPerPage})
 			if err != nil {
 				return nil, err
 			}
-			if head != finalHead || base != finalBase || count != finalCount || len(seen) != count {
-				return nil, fmt.Errorf("pull request %d changed during file listing or returned an incomplete list", number)
+			if resp == nil || resp.Response == nil || listed == nil {
+				return nil, fmt.Errorf("pull request %d file page %d is incomplete", number, page)
 			}
-			return pathsToValidate(e.policyChangesFromCompare(ctx, repo, files)), nil
+			for _, file := range listed {
+				if file == nil || file.Filename == nil || file.GetFilename() == "" || file.Status == nil || file.GetStatus() == "" {
+					return nil, fmt.Errorf("pull request %d file page %d has an incomplete entry", number, page)
+				}
+				if _, exists := seen[file.GetFilename()]; exists {
+					return nil, fmt.Errorf("pull request %d repeats file %q", number, file.GetFilename())
+				}
+				seen[file.GetFilename()] = struct{}{}
+				files = append(files, file)
+			}
+			if resp.NextPage == 0 {
+				finalHead, finalBase, finalCount, err := snapshot()
+				if err != nil {
+					return nil, err
+				}
+				if finalHead != expectedHead {
+					return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, finalHead, expectedHead, errPRHeadMoved)
+				}
+				if head != finalHead || base != finalBase {
+					return nil, fmt.Errorf("pull request %d changed during file listing", number)
+				}
+				if count != finalCount || len(seen) != finalCount {
+					if attempt == 0 {
+						retryCount = true
+						break
+					}
+					return nil, fmt.Errorf("pull request %d file list has %d entries, expected %d", number, len(seen), finalCount)
+				}
+				return pathsToValidate(e.policyChangesFromCompare(ctx, repo, files)), nil
+			}
+			if resp.NextPage != page+1 {
+				return nil, fmt.Errorf("pull request %d file pages jump from %d to %d", number, page, resp.NextPage)
+			}
+			page = resp.NextPage
 		}
-		if resp.NextPage != page+1 {
-			return nil, fmt.Errorf("pull request %d file pages jump from %d to %d", number, page, resp.NextPage)
+		if !retryCount {
+			return nil, fmt.Errorf("pull request %d exceeds %d file pages", number, maxPRPages)
 		}
-		page = resp.NextPage
 	}
-	return nil, fmt.Errorf("pull request %d exceeds %d file pages", number, maxPRPages)
+	return nil, fmt.Errorf("pull request %d file listing stayed incomplete after retry", number)
 }
 
-// policyTreeSnapshot reads the full tree at a commit and refuses an incomplete
-// response. It avoids the Compare API's 300-file limit.
+// policyTreeSnapshot reads only the policy directory at a commit and refuses
+// incomplete responses. It avoids both the Compare API's 300-file limit and
+// GitHub's recursive tree limit for large repositories.
 func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Client, owner, repo, ref string) (map[string]string, error) {
 	commit, _, err := client.Git.GetCommit(ctx, owner, repo, ref)
 	if err != nil {
@@ -110,12 +129,32 @@ func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Clien
 	if commit == nil || commit.Tree == nil || commit.GetTree().GetSHA() == "" {
 		return nil, fmt.Errorf("commit %s has no tree SHA", ref)
 	}
-	tree, _, err := client.Git.GetTree(ctx, owner, repo, commit.GetTree().GetSHA(), true)
-	if err != nil {
-		return nil, err
+	treeSHA := commit.GetTree().GetSHA()
+	for _, directory := range []string{".github", "chainguard"} {
+		tree, err := completePolicyTree(ctx, client, owner, repo, treeSHA)
+		if err != nil {
+			return nil, fmt.Errorf("tree at %s: %w", ref, err)
+		}
+		found := false
+		for _, entry := range tree.Entries {
+			if entry.GetPath() != directory {
+				continue
+			}
+			if entry.GetType() != "tree" {
+				// A file or submodule with this name cannot contain policies.
+				return map[string]string{}, nil
+			}
+			treeSHA = entry.GetSHA()
+			found = true
+			break
+		}
+		if !found {
+			return map[string]string{}, nil
+		}
 	}
-	if tree == nil || tree.Truncated == nil || tree.Entries == nil || tree.GetTruncated() {
-		return nil, fmt.Errorf("tree at %s is incomplete or truncated", ref)
+	tree, err := completePolicyTree(ctx, client, owner, repo, treeSHA)
+	if err != nil {
+		return nil, fmt.Errorf("policy tree at %s: %w", ref, err)
 	}
 	out := make(map[string]string)
 	for _, entry := range tree.Entries {
@@ -124,8 +163,9 @@ func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Clien
 		}
 		switch entry.GetType() {
 		case "blob":
-			if isValidatedPath(repo, entry.GetPath(), e.policyRepo()) {
-				out[entry.GetPath()] = entry.GetSHA()
+			path := policyDir + "/" + entry.GetPath()
+			if isValidatedPath(repo, path, e.policyRepo()) {
+				out[path] = entry.GetSHA()
 			}
 		case "tree", "commit":
 		default:
@@ -133,6 +173,22 @@ func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Clien
 		}
 	}
 	return out, nil
+}
+
+func completePolicyTree(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.Tree, error) {
+	tree, _, err := client.Git.GetTree(ctx, owner, repo, sha, false)
+	if err != nil {
+		return nil, err
+	}
+	if tree == nil || tree.Truncated == nil || tree.Entries == nil || tree.GetTruncated() {
+		return nil, fmt.Errorf("tree %s is incomplete or truncated", sha)
+	}
+	for _, entry := range tree.Entries {
+		if entry == nil || entry.GetPath() == "" || entry.GetType() == "" || entry.GetSHA() == "" {
+			return nil, fmt.Errorf("tree %s has an incomplete entry", sha)
+		}
+	}
+	return tree, nil
 }
 
 func (e *Validator) policyChangesFromTrees(ctx context.Context, client *github.Client, owner, repo, before, after string) ([]PolicyChange, error) {
@@ -166,17 +222,19 @@ func (e *Validator) policyChangesFromTrees(ctx context.Context, client *github.C
 	return changes, nil
 }
 
-func (e *Validator) completeCompareChanges(ctx context.Context, client *github.Client, owner, repo, before, after string, comparison *github.CommitsComparison) ([]PolicyChange, error) {
+func (e *Validator) completeCompareChanges(ctx context.Context, client *github.Client, owner, repo, before, after string, comparison *github.CommitsComparison) ([]PolicyChange, DetectionMethod, error) {
 	if comparison == nil || comparison.Files == nil {
-		return nil, errors.New("GitHub comparison omitted files")
+		changes, err := e.policyChangesFromTrees(ctx, client, owner, repo, before, after)
+		return changes, DetectionSnapshot, err
 	}
 	for _, file := range comparison.Files {
 		if file == nil || file.GetFilename() == "" || file.GetStatus() == "" {
-			return nil, errors.New("GitHub comparison has an incomplete file entry")
+			return nil, "", errors.New("GitHub comparison has an incomplete file entry")
 		}
 	}
 	if len(comparison.Files) >= compareFileCap {
-		return e.policyChangesFromTrees(ctx, client, owner, repo, before, after)
+		changes, err := e.policyChangesFromTrees(ctx, client, owner, repo, before, after)
+		return changes, DetectionSnapshot, err
 	}
-	return e.policyChangesFromCompare(ctx, repo, comparison.Files), nil
+	return e.policyChangesFromCompare(ctx, repo, comparison.Files), DetectionCompare, nil
 }
