@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,7 +25,6 @@ import (
 
 	v1 "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/chainguard-dev/clog"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
@@ -37,6 +35,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/octo-sts/app/internal/logtest"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -106,8 +105,7 @@ func TestCacheOrgIssuerEntryWarnsOnEnforcementRemoved(t *testing.T) {
 
 	// Capture the log output via a real slog handler wired through clog, so
 	// the warning itself — not just the state it keys off — is asserted.
-	var logs bytes.Buffer
-	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewTextHandler(&logs, nil)))
+	ctx, logs := logtest.Capture(t)
 
 	// Present first, so staleOrgIssuers holds an enforcing entry...
 	cacheOrgIssuerEntry(ctx, "o-transition", presentOrgIssuerEntry(allow))
