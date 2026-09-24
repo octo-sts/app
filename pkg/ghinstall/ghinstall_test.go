@@ -1195,7 +1195,8 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("mid-walk cancellation returns partial results", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(t.Context())
+		ctx, logs := captureLogs(t)
+		ctx, cancel := context.WithCancel(ctx)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
 			&cancelingManager{cancel: cancel},
@@ -1207,6 +1208,9 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 		}
 		if len(got) != 1 || got[0].ID != 1 {
 			t.Errorf("GetAllFresh() = %v, want only installation 1", got)
+		}
+		if bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Errorf("GetAllFresh() logged an incomplete enumeration for cancellation: %s", logs.Bytes())
 		}
 	})
 
@@ -1224,8 +1228,8 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Errorf("GetAllFresh() = %v, want the genuine failure in the message", err)
 		}
-		if !bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
-			t.Error("GetAllFresh() did not log the genuine failure")
+		if !bytes.Contains(logs.Bytes(), []byte("1 of 2 managers failed")) {
+			t.Errorf("GetAllFresh() log = %q, want 1 of 2 managers failed", logs.String())
 		}
 	})
 }
