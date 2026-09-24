@@ -554,6 +554,10 @@ type validationOutcome struct {
 }
 
 func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner, repo, sha string, files []string) (*github.CheckRun, validationOutcome, error) {
+	return e.handleSHAForPolicyRepo(ctx, client, owner, repo, repo, sha, files)
+}
+
+func (e *Validator) handleSHAForPolicyRepo(ctx context.Context, client *github.Client, owner, readRepo, policyRepo, sha string, files []string) (*github.CheckRun, validationOutcome, error) {
 	log := clog.FromContext(ctx)
 
 	// Commit doesn't exist - nothing to do.
@@ -561,12 +565,12 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 		return nil, validationOutcome{}, nil
 	}
 
-	results, err := validatePolicies(ctx, client, owner, repo, sha, files, e.policyRepo())
+	results, err := validatePoliciesForRepo(ctx, client, owner, readRepo, policyRepo, sha, files, e.policyRepo())
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which GitHub treats as a
 	// failed delivery and redelivers — amplifying load on the rate-limited API.
 	if octosts.IsGitHubRateLimited(err) {
-		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, repo, sha)
+		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, readRepo, sha)
 		// Files validated before the limit was hit still have real verdicts;
 		// the rest are simply absent from the map and stay unknown. The limit
 		// is carried on the events so that "unknown" comes with a reason.
@@ -599,7 +603,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 		},
 	}
 
-	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, opts)
+	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, readRepo, opts)
 	if err != nil {
 		log.Errorf("error creating CheckRun: %v", err)
 		// The verdicts are still authoritative; only reporting them to the
@@ -613,7 +617,7 @@ func (e *Validator) handleSHA(ctx context.Context, client *github.Client, owner,
 // and the aggregate error used for the check run. A file present in the map
 // with a nil value parsed cleanly; a file absent from the map was never read,
 // because a rate limit aborted the pass before reaching it.
-func validatePolicies(ctx context.Context, client *github.Client, owner, repo, sha string, files []string, orgPolicyRepo string) (map[string]error, error) {
+func validatePoliciesForRepo(ctx context.Context, client *github.Client, owner, readRepo, policyRepo, sha string, files []string, orgPolicyRepo string) (map[string]error, error) {
 	var merr error
 	results := make(map[string]error, len(files))
 
@@ -626,7 +630,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 	for _, f := range sets.List(sets.New(files...)) {
 		log := clog.FromContext(ctx).With("path", f)
 
-		resp, _, _, err := client.Repositories.GetContents(ctx, owner, repo, f, &github.RepositoryContentGetOptions{Ref: sha})
+		resp, _, _, err := client.Repositories.GetContents(ctx, owner, readRepo, f, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
 			log.Infof("failed to get content for: %v", err)
 			if octosts.IsGitHubRateLimited(err) {
@@ -658,7 +662,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 		}
 
 		switch {
-		case strings.EqualFold(repo, orgPolicyRepo) && f == octosts.OrgTrustedIssuersPath:
+		case strings.EqualFold(policyRepo, orgPolicyRepo) && f == octosts.OrgTrustedIssuersPath:
 			// Parse AND compile: only compiling catches uncompilable patterns,
 			// invalid issuer URLs, and an empty allowlist. The exchange path calls
 			// this same function, so the two verdicts cannot diverge.
@@ -676,7 +680,7 @@ func validatePolicies(ctx context.Context, client *github.Client, owner, repo, s
 		// Parse AND compile, as for the allowlist above: only compiling catches an
 		// uncompilable pattern, which would otherwise pass this check and fail at
 		// token exchange. lookupTrustPolicy on the exchange path does the same.
-		case strings.EqualFold(repo, orgPolicyRepo):
+		case strings.EqualFold(policyRepo, orgPolicyRepo):
 			if err := parseAndCompile(raw, &octosts.OrgTrustPolicy{}); err != nil {
 				log.Infof("failed to validate org trust policy: %v", err)
 				fail(f, fmt.Errorf("%s: %w", f, err))
@@ -1062,8 +1066,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		files = append(files, pathsToValidate(changes)...)
 	}
 
+	validationRepo := repo
 	for _, pr := range cs.GetCheckSuite().PullRequests {
-		prFiles, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
+		prOwner, prRepo, crossRepo, err := checkSuitePRHome(pr, owner, repo)
 		if err != nil {
 			if errors.Is(err, errPRHeadMismatch) {
 				log.Warnf("PR %d head differs from check suite commit; skipping CheckRun: %v", pr.GetNumber(), err)
@@ -1075,13 +1080,24 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			}
 			return nil, err
 		}
+		prFiles, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, pr.GetNumber(), sha)
+		if err != nil {
+			if crossRepo && inaccessibleCrossRepoPR(err) {
+				log.Warnf("skipping inaccessible PR %s/%s#%d: %v", prOwner, prRepo, pr.GetNumber(), err)
+				continue
+			}
+			return nil, err
+		}
+		if crossRepo && strings.EqualFold(prRepo, e.policyRepo()) {
+			validationRepo = prRepo
+		}
 		files = append(files, prFiles...)
 	}
 	if len(files) == 0 {
 		return nil, nil
 	}
 
-	cr, _, err := e.handleSHA(ctx, client, owner, repo, sha, files)
+	cr, _, err := e.handleSHAForPolicyRepo(ctx, client, owner, repo, validationRepo, sha, files)
 	return cr, err
 }
 

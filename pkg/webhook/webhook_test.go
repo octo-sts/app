@@ -67,7 +67,7 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.Context(t)
-	if _, err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -104,7 +104,7 @@ func prefetchGitHub(t *testing.T) *github.Client {
 func TestValidatePolicyCompileFailure(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	_, err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github")
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github")
 	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
 		t.Fatalf("validatePolicies = %v, want compile error about app/app_pattern", err)
 	}
@@ -113,7 +113,7 @@ func TestValidatePolicyCompileFailure(t *testing.T) {
 func TestValidateOrgPolicyCompiles(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	if _, err := validatePolicies(ctx, gh, "foo", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github"); err != nil {
 		t.Fatalf("validatePolicies = %v, want nil (org policy with repositories compiles)", err)
 	}
 }
@@ -121,7 +121,7 @@ func TestValidateOrgPolicyCompiles(t *testing.T) {
 func TestValidateOrgPolicyCompileFailure(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	_, err := validatePolicies(ctx, gh, "foo", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github")
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github")
 	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
 		t.Fatalf("validatePolicies = %v, want org-arm compile error about app/app_pattern", err)
 	}
@@ -2696,7 +2696,7 @@ func TestValidatePoliciesPerFileVerdicts(t *testing.T) {
 	gh := githubTestServer(t, nil)
 	ctx := slogtest.Context(t)
 
-	results, err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{
+	results, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{
 		".github/chainguard/test.sts.yaml",
 		".github/chainguard/missing.sts.yaml",
 	}, ".github")
@@ -3208,7 +3208,7 @@ func TestValidatePoliciesCompilesTrustPolicies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			results, err := validatePolicies(slogtest.Context(t), gh, "foo", tt.repo, "deadbeef", []string{path}, ".github")
+			results, err := validatePoliciesForRepo(slogtest.Context(t), gh, "foo", tt.repo, tt.repo, "deadbeef", []string{path}, ".github")
 			if verr, ok := results[path]; !ok || (verr != nil) != (tt.wantErr != "") {
 				t.Errorf("results[%q] = (%v, present=%t), want (err=%t, present=true)", path, verr, ok, tt.wantErr != "")
 			}
