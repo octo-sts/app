@@ -4,6 +4,7 @@
 package ghinstall
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -15,6 +16,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -25,6 +27,7 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
+	"github.com/chainguard-dev/clog"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
@@ -772,6 +775,22 @@ func (s *stubManager) GetAllFresh(_ context.Context, _ string) ([]Installation, 
 
 var _ Manager = (*stubManager)(nil)
 
+func captureLogs(t *testing.T) (context.Context, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	return clog.WithLogger(t.Context(), clog.New(slog.NewTextHandler(&logs, nil))), &logs
+}
+
+type cancelingManager struct {
+	stubManager
+	cancel context.CancelFunc
+}
+
+func (m *cancelingManager) GetAllFresh(context.Context, string) ([]Installation, error) {
+	m.cancel()
+	return nil, status.Errorf(codes.Internal, "listing installations: %v", context.Canceled)
+}
+
 func TestRoundRobinGetAll(t *testing.T) {
 	t.Run("concatenates and dedups", func(t *testing.T) {
 		rr := NewRoundRobin([]Manager{
@@ -1104,16 +1123,23 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("one manager failing yields a partial result AND an error", func(t *testing.T) {
+		ctx, logs := captureLogs(t)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
 			&stubManager{freshErr: errors.New("boom")},
 		})
-		got, err := rr.GetAllFresh(context.Background(), "org")
+		got, err := rr.GetAllFresh(ctx, "org")
 		if err == nil {
 			t.Fatal("GetAllFresh() = nil error, want an error for a partial enumeration")
 		}
+		if status.Code(err) != codes.Unavailable {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Unavailable)
+		}
 		if len(got) != 1 {
 			t.Errorf("GetAllFresh() returned %d installations, want the 1 that succeeded", len(got))
+		}
+		if !bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Error("GetAllFresh() did not log the incomplete enumeration")
 		}
 	})
 
@@ -1131,7 +1157,8 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	// GetAll and GetAllFresh share one aggregation helper, so this covers the
 	// cancellation bail-out for both.
 	t.Run("a cancelled context bails instead of collecting N identical errors", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, logs := captureLogs(t)
+		ctx, cancel := context.WithCancel(ctx)
 		cancel()
 
 		rr := NewRoundRobin([]Manager{
@@ -1142,8 +1169,67 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 		if err == nil {
 			t.Fatal("GetAllFresh() = nil error, want the cancellation")
 		}
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
 		if len(got) != 0 {
 			t.Errorf("GetAllFresh() returned %d installations, want 0 — it must bail before querying any manager", len(got))
+		}
+		if bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Error("GetAllFresh() logged an incomplete enumeration for cancellation")
+		}
+	})
+
+	t.Run("an expired deadline preserves its status", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		rr := NewRoundRobin([]Manager{&stubManager{}})
+		got, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.DeadlineExceeded)
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAllFresh() returned %d installations, want 0", len(got))
+		}
+	})
+
+	t.Run("mid-walk cancellation returns partial results", func(t *testing.T) {
+		ctx, logs := captureLogs(t)
+		ctx, cancel := context.WithCancel(ctx)
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
+			&cancelingManager{cancel: cancel},
+			&stubManager{freshInstalls: []Installation{{ID: 3, AppID: 30}}},
+		})
+		got, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
+		if len(got) != 1 || got[0].ID != 1 {
+			t.Errorf("GetAllFresh() = %v, want only installation 1", got)
+		}
+		if bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Errorf("GetAllFresh() logged an incomplete enumeration for cancellation: %s", logs.Bytes())
+		}
+	})
+
+	t.Run("a genuine failure before cancellation is kept and logged", func(t *testing.T) {
+		ctx, logs := captureLogs(t)
+		ctx, cancel := context.WithCancel(ctx)
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshErr: errors.New("boom")},
+			&cancelingManager{cancel: cancel},
+		})
+		_, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Errorf("GetAllFresh() = %v, want the genuine failure in the message", err)
+		}
+		if !bytes.Contains(logs.Bytes(), []byte("1 of 2 managers failed")) {
+			t.Errorf("GetAllFresh() log = %q, want 1 of 2 managers failed", logs.String())
 		}
 	})
 }

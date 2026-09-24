@@ -615,9 +615,11 @@ func (s *sts) confirmStableCandidates(ctx context.Context, pool *ghinstall.OrgPo
 
 // getAllFreshShared collapses concurrent GetAllFresh confirmation walks for
 // the same owner into one. The leader detaches from its caller's cancellation
-// so waiters sharing the walk are not failed by an unrelated cancel; the
-// result pairs installations with the enumeration error, preserving
-// partial-enumeration semantics. A shared walk may have started before a
+// so waiters sharing the walk are not failed by an unrelated cancel, and its
+// own pinConfirmTimeout expiring surfaces as Unavailable rather than
+// DeadlineExceeded because no caller's deadline fired; the result pairs
+// installations with the enumeration error, preserving partial-enumeration
+// semantics. A shared walk may have started before a
 // waiter's own cache observation, so a confirmation can lag reality by up to
 // the walk's duration. record, when non-nil, receives the flight's result on
 // every path — normal completion and caller cancellation — so recording
@@ -627,6 +629,9 @@ func (s *sts) getAllFreshShared(ctx context.Context, pool *ghinstall.OrgPool, ow
 		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), pinConfirmTimeout)
 		defer cancel()
 		insts, err := pool.M.GetAllFresh(workCtx, owner)
+		if status.Code(err) == codes.DeadlineExceeded {
+			err = status.Errorf(codes.Unavailable, "confirming installations for %q: %v", owner, err)
+		}
 		return insts, err
 	})
 	select {
