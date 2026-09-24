@@ -16,7 +16,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -27,11 +26,12 @@ import (
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/chainguard-dev/clog"
 	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/octo-sts/app/internal/logtest"
 )
 
 func TestGet(t *testing.T) {
@@ -775,12 +775,6 @@ func (s *stubManager) GetAllFresh(_ context.Context, _ string) ([]Installation, 
 
 var _ Manager = (*stubManager)(nil)
 
-func captureLogs(t *testing.T) (context.Context, *bytes.Buffer) {
-	t.Helper()
-	var logs bytes.Buffer
-	return clog.WithLogger(t.Context(), clog.New(slog.NewTextHandler(&logs, nil))), &logs
-}
-
 type cancelingManager struct {
 	stubManager
 	cancel context.CancelFunc
@@ -1123,7 +1117,7 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("one manager failing yields a partial result AND an error", func(t *testing.T) {
-		ctx, logs := captureLogs(t)
+		ctx, logs := logtest.Capture(t)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
 			&stubManager{freshErr: errors.New("boom")},
@@ -1157,7 +1151,7 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	// GetAll and GetAllFresh share one aggregation helper, so this covers the
 	// cancellation bail-out for both.
 	t.Run("a cancelled context bails instead of collecting N identical errors", func(t *testing.T) {
-		ctx, logs := captureLogs(t)
+		ctx, logs := logtest.Capture(t)
 		ctx, cancel := context.WithCancel(ctx)
 		cancel()
 
@@ -1195,7 +1189,7 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("mid-walk cancellation returns partial results", func(t *testing.T) {
-		ctx, logs := captureLogs(t)
+		ctx, logs := logtest.Capture(t)
 		ctx, cancel := context.WithCancel(ctx)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
@@ -1215,7 +1209,7 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("a genuine failure before cancellation is kept and logged", func(t *testing.T) {
-		ctx, logs := captureLogs(t)
+		ctx, logs := logtest.Capture(t)
 		ctx, cancel := context.WithCancel(ctx)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshErr: errors.New("boom")},
