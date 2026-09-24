@@ -981,6 +981,14 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 
 	prFilesHit := false
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&github.PullRequest{
+			Head:         &github.PullRequestBranch{SHA: new("deadbeef")},
+			Base:         &github.PullRequestBranch{SHA: new("base123")},
+			ChangedFiles: new(1),
+		})
+	})
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
 		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
