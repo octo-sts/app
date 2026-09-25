@@ -74,12 +74,12 @@ type DetectionMethod string
 const (
 	// DetectionCommits derived changes from the push payload's commit list.
 	DetectionCommits DetectionMethod = "commits"
-	// DetectionCompare derived changes from the Compare API, used when the
-	// payload's commit list is truncated.
+	// DetectionCompare derived changes directly from the Compare API, used
+	// when the payload's commit list is truncated and the response is complete.
 	DetectionCompare DetectionMethod = "compare"
 	// DetectionSnapshot derived changes by diffing the policy directory at the
-	// pushed SHA against the ref's previous SHA. Used for forced pushes, where
-	// the commit list does not describe the net effect on the branch.
+	// pushed SHA against the ref's previous SHA. Used for forced pushes and
+	// comparisons at GitHub's file cap.
 	DetectionSnapshot DetectionMethod = "snapshot"
 	// DetectionDegraded means change detection could not be completed and the
 	// accompanying changes, if any, may be incomplete. Always accompanied by a
@@ -763,6 +763,11 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 			// computed. Record that the audit view of this push is incomplete.
 			log.Warnf("policy snapshot failed, falling back: %v", serr)
 			detection, detectionErr = DetectionDegraded, serr.Error()
+			if isProvenWebhookRateLimit(serr) {
+				// Further reads would amplify the limit. The degraded marker
+				// records the gap without posting a partial check run.
+				break
+			}
 
 			// Only before failed to resolve; the listing at the pushed SHA is
 			// still good. Report what is live rather than the commit list,
@@ -782,13 +787,35 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	case len(event.Commits) < 20:
 		changes = e.policyChangesFromPushEvent(repo, event)
 
+	case event.GetBefore() == zeroHash:
+		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
+		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited discovering policies for new ref %s/%s@%s; recording degraded detection", owner, repo, sha)
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
+			}
+			return nil, err
+		}
+		detection = DetectionSnapshot
+
 	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
+			}
 			return nil, err
 		}
-		detection = DetectionCompare
-		changes = e.policyChangesFromCompare(ctx, repo, resp.Files)
+		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
+		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				detection, detectionErr = DetectionDegraded, err.Error()
+				break
+			}
+			return nil, err
+		}
 	}
 
 	// Validation and auditing share one view of the push so the two can't
@@ -918,7 +945,8 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 	// Only actions that can change the PR's file diff can introduce or modify
 	// a trust policy. Skipping the rest avoids a ListFiles call (and its token
 	// mint) on the ~99% of PR events that can't affect policy.
-	if !prActionsThatChangeFiles.Has(pr.GetAction()) {
+	baseEdited := pr.GetAction() == "edited" && pr.GetChanges().GetBase() != nil
+	if !prActionsThatChangeFiles.Has(pr.GetAction()) && !baseEdited {
 		log.Infof("skipping pull_request action %q: cannot change file diff", pr.GetAction())
 		return nil, nil
 	}
@@ -928,18 +956,13 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 
-	// Check diff
-	var files []string
-	resp, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pr.GetNumber(), &github.ListOptions{})
+	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 	if err != nil {
-		return nil, err
-	}
-	for _, file := range resp {
-		if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
-			if file.GetStatus() != "removed" {
-				files = append(files, file.GetFilename())
-			}
+		if errors.Is(err, errPRHeadMismatch) || isProvenWebhookRateLimit(err) {
+			log.Warnf("skipping PR file validation: %v", err)
+			return nil, nil
 		}
+		return nil, err
 	}
 	if len(files) == 0 {
 		return nil, nil
@@ -1003,25 +1026,18 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			log.Infof("skipping new non-default branch with no PRs")
 			return nil, nil
 		}
-		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, ".github/chainguard", &github.RepositoryContentGetOptions{Ref: sha})
+		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
 		if err != nil {
-			// A missing policy directory means there are no policies to
-			// validate; only a non-404 (or transport) error should fail the
-			// delivery. Otherwise an initial commit to a repo without
-			// .github/chainguard would 500 and GitHub would redeliver.
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited discovering policies for check suite; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			if resp == nil || resp.StatusCode != http.StatusNotFound {
 				return nil, err
 			}
 			log.Infof("no policy directory at %s, skipping validation", sha)
 		}
-		// This branch lists the policy directory rather than diffing it, so the
-		// entries are everything the directory holds — not just trust policies.
-		// Filter here as every diff-based path already does, otherwise unrelated
-		// files (a README, a .gitkeep, the organization allowlist) get fetched
-		// and parsed as trust policies and fail the check run.
 		for _, file := range dirContents {
-			// Type matters as well as path: a directory can be named to match, and
-			// listing it as a candidate would send a non-file down the read path.
 			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
 				files = append(files, file.GetPath())
 			}
@@ -1029,29 +1045,37 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
 		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited comparing check suite; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			return nil, err
 		}
-		for _, file := range resp.Files {
-			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
-				if file.GetStatus() != "removed" {
-					files = append(files, file.GetFilename())
-				}
+		changes, _, err := e.completeCompareChanges(ctx, client, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, resp)
+		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited discovering check suite changes; skipping CheckRun: %v", err)
+				return nil, nil
 			}
+			return nil, err
 		}
+		files = append(files, pathsToValidate(changes)...)
 	}
 
 	for _, pr := range cs.GetCheckSuite().PullRequests {
-		resp, _, err := client.PullRequests.ListFiles(ctx, owner, repo, pr.GetNumber(), &github.ListOptions{})
+		prFiles, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 		if err != nil {
+			if errors.Is(err, errPRHeadMismatch) {
+				log.Warnf("PR %d head differs from check suite commit; skipping CheckRun: %v", pr.GetNumber(), err)
+				return nil, nil
+			}
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited listing check suite PR files; skipping CheckRun: %v", err)
+				return nil, nil
+			}
 			return nil, err
 		}
-		for _, file := range resp {
-			if isValidatedPath(repo, file.GetFilename(), e.policyRepo()) {
-				if file.GetStatus() != "removed" {
-					files = append(files, file.GetFilename())
-				}
-			}
-		}
+		files = append(files, prFiles...)
 	}
 	if len(files) == 0 {
 		return nil, nil
