@@ -96,20 +96,49 @@ func TestPolicyFilesFromPRRejectsChangingSnapshot(t *testing.T) {
 	}
 }
 
-func TestPolicyFilesFromPRSkipsMovedHead(t *testing.T) {
+func TestPolicyFilesFromPRRejectsPersistentHeadMismatch(t *testing.T) {
+	gets := 0
 	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/v3/repos/o/r/pulls/7" {
 			t.Errorf("unexpected request %s", r.URL)
 			http.NotFound(w, r)
 			return
 		}
+		gets++
 		json.NewEncoder(w).Encode(&github.PullRequest{
-			Head: &github.PullRequestBranch{SHA: new("new-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
+			Head: &github.PullRequestBranch{SHA: new("previous-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
 		})
 	}))
 	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head")
-	if !errors.Is(err, errPRHeadMoved) {
-		t.Fatalf("error = %v, want moved-head sentinel", err)
+	if !errors.Is(err, errPRHeadMismatch) || gets != 2 {
+		t.Fatalf("error = %v, snapshot reads = %d, want head-mismatch sentinel after one retry", err, gets)
+	}
+}
+
+func TestPolicyFilesFromPRRetriesLaggingHead(t *testing.T) {
+	gets, lists := 0, 0
+	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/repos/o/r/pulls/7":
+			gets++
+			head := "event-head"
+			if gets == 1 {
+				head = "previous-head"
+			}
+			json.NewEncoder(w).Encode(&github.PullRequest{
+				Head: &github.PullRequestBranch{SHA: &head}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
+			})
+		case "/api/v3/repos/o/r/pulls/7/files":
+			lists++
+			json.NewEncoder(w).Encode([]*github.CommitFile{{Filename: new(".github/chainguard/policy.sts.yaml"), Status: new("modified")}})
+		default:
+			t.Errorf("unexpected request %s", r.URL)
+			http.NotFound(w, r)
+		}
+	}))
+	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head")
+	if err != nil || len(files) != 1 || gets != 3 || lists != 1 {
+		t.Fatalf("files=%v err=%v snapshot reads=%d lists=%d, want one policy after one retry", files, err, gets, lists)
 	}
 }
 
@@ -252,13 +281,13 @@ func TestCompleteCompareChangesMissingFilesUsesSnapshot(t *testing.T) {
 	}
 }
 
-func TestCheckSuiteStalePRAndRateLimit(t *testing.T) {
+func TestCheckSuiteHeadMismatchAndRateLimit(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		prStatus   int
 		wantChecks int
 	}{
-		{"stale PR keeps push-diff validation", http.StatusOK, 1},
+		{"lagging PR head prevents partial green check", http.StatusOK, 0},
 		{"PR rate limit prevents partial green check", http.StatusTooManyRequests, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,7 +305,7 @@ func TestCheckSuiteStalePRAndRateLimit(t *testing.T) {
 						return
 					}
 					json.NewEncoder(w).Encode(&github.PullRequest{
-						Head: &github.PullRequestBranch{SHA: new("new-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
+						Head: &github.PullRequestBranch{SHA: new("previous-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
 					})
 				case "/api/v3/repos/foo/bar/contents/.github/chainguard/test.sts.yaml":
 					json.NewEncoder(w).Encode(&github.RepositoryContent{Type: new("file"), Content: new("issuer: https://token.actions.githubusercontent.com\n")})

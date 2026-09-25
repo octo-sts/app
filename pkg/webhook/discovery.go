@@ -37,7 +37,7 @@ const (
 	compareFileCap = 300
 )
 
-var errPRHeadMoved = errors.New("pull request head moved past event commit")
+var errPRHeadMismatch = errors.New("pull request head differs from event commit")
 
 // policyFilesFromPR lists a complete, stable PR diff before selecting policies.
 func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead string) ([]string, error) {
@@ -58,7 +58,11 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 			return nil, err
 		}
 		if head != expectedHead {
-			return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, head, expectedHead, errPRHeadMoved)
+			// The PR API may lag the event; retry once.
+			if attempt == 0 {
+				continue
+			}
+			return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, head, expectedHead, errPRHeadMismatch)
 		}
 		if count < 0 || count > maxPRFiles {
 			return nil, fmt.Errorf("pull request %d has %d changed files; GitHub lists at most %d", number, count, maxPRFiles)
@@ -67,7 +71,7 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 		seen := make(map[string]struct{}, count)
 		var files []*github.CommitFile
 		page := 1
-		retryCount := false
+		retrySnapshot := false
 		for range maxPRPages {
 			listed, resp, err := client.PullRequests.ListFiles(ctx, owner, repo, number, &github.ListOptions{Page: page, PerPage: prFilesPerPage})
 			if err != nil {
@@ -92,14 +96,18 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 					return nil, err
 				}
 				if finalHead != expectedHead {
-					return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, finalHead, expectedHead, errPRHeadMoved)
+					if attempt == 0 {
+						retrySnapshot = true
+						break
+					}
+					return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, finalHead, expectedHead, errPRHeadMismatch)
 				}
 				if head != finalHead || base != finalBase {
 					return nil, fmt.Errorf("pull request %d changed during file listing", number)
 				}
 				if count != finalCount || len(seen) != finalCount {
 					if attempt == 0 {
-						retryCount = true
+						retrySnapshot = true
 						break
 					}
 					return nil, fmt.Errorf("pull request %d file list has %d entries, expected %d", number, len(seen), finalCount)
@@ -111,7 +119,7 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 			}
 			page = resp.NextPage
 		}
-		if !retryCount {
+		if !retrySnapshot {
 			return nil, fmt.Errorf("pull request %d exceeds %d file pages", number, maxPRPages)
 		}
 	}

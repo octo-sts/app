@@ -958,7 +958,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 
 	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 	if err != nil {
-		if errors.Is(err, errPRHeadMoved) || isProvenWebhookRateLimit(err) {
+		if errors.Is(err, errPRHeadMismatch) || isProvenWebhookRateLimit(err) {
 			log.Warnf("skipping PR file validation: %v", err)
 			return nil, nil
 		}
@@ -1065,9 +1065,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	for _, pr := range cs.GetCheckSuite().PullRequests {
 		prFiles, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
 		if err != nil {
-			if errors.Is(err, errPRHeadMoved) {
-				log.Infof("skipping stale PR %d in check suite: %v", pr.GetNumber(), err)
-				continue
+			if errors.Is(err, errPRHeadMismatch) {
+				log.Warnf("PR %d head differs from check suite commit; skipping CheckRun: %v", pr.GetNumber(), err)
+				return nil, nil
 			}
 			if isProvenWebhookRateLimit(err) {
 				log.Warnf("rate-limited listing check suite PR files; skipping CheckRun: %v", err)
