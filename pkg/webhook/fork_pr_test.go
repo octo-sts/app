@@ -5,6 +5,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/base64"
@@ -126,5 +127,136 @@ func TestForkCheckSuiteUsesBasePRAndForkContent(t *testing.T) {
 				t.Fatalf("fork content reads = %d, want 1", contentReads)
 			}
 		})
+	}
+}
+
+func TestForkCheckSuiteRateLimitDoesNotPostPartialCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name, remaining string
+		status          int
+	}{
+		{name: "429", status: http.StatusTooManyRequests},
+		{name: "403 with exhausted quota", status: http.StatusForbidden, remaining: "0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks := 0
+			client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/v3/repos/foo/renamed-fork/compare/before...head":
+					json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new(".github/chainguard/policy.sts.yaml"), Status: new("modified")}}})
+				case "/api/v3/repos/foo/.github/pulls/7":
+					if tc.remaining != "" {
+						w.Header().Set("X-RateLimit-Remaining", tc.remaining)
+					}
+					w.WriteHeader(tc.status)
+				case "/api/v3/repos/foo/renamed-fork/check-runs":
+					checks++
+					json.NewEncoder(w).Encode(&github.CheckRun{})
+				default:
+					t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			v := &Validator{Transport: client}
+			check, err := v.handleCheckSuite(context.Background(), forkCheckSuiteEvent("before", "head", ".github"))
+			if err != nil || check != nil || checks != 0 {
+				t.Fatalf("check=%v err=%v posted=%d, want no partial check", check, err, checks)
+			}
+		})
+	}
+}
+
+func TestForkCheckSuiteHeadMismatchPreventsPartialCheck(t *testing.T) {
+	const path = ".github/chainguard/policy.sts.yaml"
+	checks := 0
+	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/repos/foo/renamed-fork/compare/before...head":
+			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new(path), Status: new("modified")}}})
+		case "/api/v3/repos/foo/.github/pulls/7":
+			json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("previous-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1)})
+		case "/api/v3/repos/foo/renamed-fork/contents/" + path:
+			raw := "issuer: https://example.com\nsubject: s\n"
+			json.NewEncoder(w).Encode(&github.RepositoryContent{Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(raw)))})
+		case "/api/v3/repos/foo/renamed-fork/check-runs":
+			checks++
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	v := &Validator{Transport: client}
+	_, err := v.handleCheckSuite(context.Background(), forkCheckSuiteEvent("before", "head", ".github"))
+	if err != nil || checks != 0 {
+		t.Fatalf("err=%v posted=%d, want no partial check", err, checks)
+	}
+}
+
+func TestForkCheckSuiteKeepsPushDiffClassification(t *testing.T) {
+	const path = ".github/chainguard/policy.sts.yaml"
+	checks := 0
+	contentReads := 0
+	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v3/repos/foo/renamed-fork/compare/before...head":
+			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new(path), Status: new("modified")}}})
+		case "/api/v3/repos/foo/.github/pulls/7":
+			json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1)})
+		case "/api/v3/repos/foo/.github/pulls/7/files":
+			json.NewEncoder(w).Encode([]*github.CommitFile{{Filename: new(path), Status: new("modified")}})
+		case "/api/v3/repos/foo/renamed-fork/contents/" + path:
+			contentReads++
+			raw := "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n"
+			json.NewEncoder(w).Encode(&github.RepositoryContent{Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(raw)))})
+		case "/api/v3/repos/foo/renamed-fork/check-runs":
+			checks++
+			var options github.CreateCheckRunOptions
+			if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+				t.Error(err)
+			}
+			if options.GetConclusion() != "failure" {
+				t.Errorf("check conclusion = %q, want failure for repo-level policy", options.GetConclusion())
+			}
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	v := &Validator{Transport: client}
+	_, err := v.handleCheckSuite(context.Background(), forkCheckSuiteEvent("before", "head", ".github"))
+	if err != nil || checks != 1 || contentReads != 1 {
+		t.Fatalf("err=%v posted=%d reads=%d, want one failed check and one content read", err, checks, contentReads)
+	}
+}
+
+func forkCheckSuiteClient(t *testing.T, handler http.Handler) *ghinstallation.AppsTransport {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/app/installations/1111/access_tokens" {
+			json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := ghinstallation.NewAppsTransportFromPrivateKey(server.Client().Transport, 1234, key)
+	transport.BaseURL = server.URL
+	return transport
+}
+
+func forkCheckSuiteEvent(before, head, baseRepo string) *github.CheckSuiteEvent {
+	return &github.CheckSuiteEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("renamed-fork"), DefaultBranch: new("main")},
+		CheckSuite: &github.CheckSuite{
+			HeadSHA: new(head), BeforeSHA: new(before), HeadBranch: new("feature"),
+			PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/foo/" + baseRepo)}}}},
+		},
 	}
 }

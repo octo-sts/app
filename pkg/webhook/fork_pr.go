@@ -66,9 +66,6 @@ func repoFromAPIURL(raw string) (owner, repo string, err error) {
 }
 
 func inaccessibleCrossRepoPR(err error) bool {
-	if isProvenWebhookRateLimit(err) {
-		return true
-	}
 	var ghErr *github.ErrorResponse
 	return errors.As(err, &ghErr) && ghErr.Response != nil &&
 		(ghErr.Response.StatusCode == http.StatusForbidden || ghErr.Response.StatusCode == http.StatusNotFound)
