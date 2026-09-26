@@ -59,7 +59,7 @@ func TestPolicyFilesFromPRPaginatesAndChecksSnapshot(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head")
+	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestPolicyFilesFromPRRejectsChangingSnapshot(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head")
+	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 	if err == nil || !strings.Contains(err.Error(), "changed during file listing") {
 		t.Fatalf("error = %v", err)
 	}
@@ -109,7 +109,7 @@ func TestPolicyFilesFromPRRejectsPersistentHeadMismatch(t *testing.T) {
 			Head: &github.PullRequestBranch{SHA: new("previous-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
 		})
 	}))
-	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head")
+	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
 	if !errors.Is(err, errPRHeadMismatch) || gets != 2 {
 		t.Fatalf("error = %v, snapshot reads = %d, want head-mismatch sentinel after one retry", err, gets)
 	}
@@ -136,7 +136,7 @@ func TestPolicyFilesFromPRRetriesLaggingHead(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head")
+	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
 	if err != nil || len(files) != 1 || gets != 3 || lists != 1 {
 		t.Fatalf("files=%v err=%v snapshot reads=%d lists=%d, want one policy after one retry", files, err, gets, lists)
 	}
@@ -168,7 +168,7 @@ func TestPolicyFilesFromPRRetriesStaleFileCount(t *testing.T) {
 					http.NotFound(w, r)
 				}
 			}))
-			files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head")
+			files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 			if err != nil || len(files) != 1 || gets != 4 || lists != 2 {
 				t.Fatalf("files=%v err=%v snapshot reads=%d lists=%d, want one policy after one retry", files, err, gets, lists)
 			}
