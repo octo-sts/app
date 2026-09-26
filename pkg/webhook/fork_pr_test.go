@@ -260,3 +260,126 @@ func forkCheckSuiteEvent(before, head, baseRepo string) *github.CheckSuiteEvent 
 		},
 	}
 }
+
+// TestForkCheckSuiteClassifiesByEventRepo pins classification to the event
+// repository, where content is read. A PR base may upgrade to org policy
+// parsing only when it is the same owner's policy repository; a base named like
+// the policy repository under another owner must not upgrade, and a base with
+// another name must not downgrade the policy repository's own files.
+func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
+	const (
+		policyPath    = ".github/chainguard/x.sts.yaml"
+		allowlistPath = ".github/chainguard/trusted-token-issuers.yaml"
+		// Valid only as an org policy: TrustPolicy rejects `repositories`.
+		orgOnlyPolicy = "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n"
+		allowlist     = "mode: audit\nissuers:\n  - https://token.actions.githubusercontent.com\n"
+	)
+	for _, tc := range []struct {
+		name                string
+		eventRepo           string
+		baseOwner, baseRepo string
+		wantConclusion      string
+		wantAllowlistReads  int
+	}{
+		{
+			name:      "outsider base named like the policy repo does not upgrade",
+			eventRepo: "app", baseOwner: "attacker", baseRepo: ".github",
+			wantConclusion: "failure", wantAllowlistReads: 0,
+		},
+		{
+			name:      "policy repo keeps org classification under a differently named base",
+			eventRepo: ".github", baseOwner: "other", baseRepo: "foo",
+			wantConclusion: "success", wantAllowlistReads: 1,
+		},
+		{
+			name:      "same owner policy repo base upgrades a renamed fork",
+			eventRepo: "renamed-fork", baseOwner: "foo", baseRepo: ".github",
+			wantConclusion: "success", wantAllowlistReads: 1,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var conclusion string
+			checks, allowlistReads := 0, 0
+			content := func(raw string) *github.RepositoryContent {
+				return &github.RepositoryContent{Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(raw)))}
+			}
+			event := "/api/v3/repos/foo/" + tc.eventRepo
+			base := "/api/v3/repos/" + tc.baseOwner + "/" + tc.baseRepo
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/app/installations/1111/access_tokens":
+					json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
+				case event + "/contents/.github/chainguard":
+					json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+				case event + "/contents/" + policyPath:
+					json.NewEncoder(w).Encode(content(orgOnlyPolicy))
+				case event + "/contents/" + allowlistPath:
+					allowlistReads++
+					json.NewEncoder(w).Encode(content(allowlist))
+				case base + "/pulls/7":
+					json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("deadbeef")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(2)})
+				case base + "/pulls/7/files":
+					json.NewEncoder(w).Encode([]*github.CommitFile{
+						{Filename: new(policyPath), Status: new("added")},
+						{Filename: new(allowlistPath), Status: new("added")},
+					})
+				case event + "/check-runs":
+					checks++
+					var options github.CreateCheckRunOptions
+					if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+						t.Error(err)
+					}
+					conclusion = options.GetConclusion()
+					json.NewEncoder(w).Encode(&github.CheckRun{})
+				default:
+					t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			transport.BaseURL = gh.URL
+			secret := []byte("test-secret")
+			webhook := httptest.NewServer(&Validator{Transport: transport, WebhookSecret: [][]byte{secret}})
+			t.Cleanup(webhook.Close)
+			body, err := json.Marshal(&github.CheckSuiteEvent{
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new(tc.eventRepo), DefaultBranch: new("main")},
+				CheckSuite: &github.CheckSuite{
+					HeadSHA: new("deadbeef"), BeforeSHA: new(zeroHash), HeadBranch: new("feature"),
+					PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/" + tc.baseOwner + "/" + tc.baseRepo)}}}},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, webhook.URL, bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(github.SHA256SignatureHeader, signature(secret, body))
+			req.Header.Set(HeaderEvent, "check_suite")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := webhook.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || checks != 1 {
+				t.Fatalf("status=%d checks=%d, want status=200 checks=1", resp.StatusCode, checks)
+			}
+			if conclusion != tc.wantConclusion {
+				t.Errorf("conclusion = %q, want %q", conclusion, tc.wantConclusion)
+			}
+			if allowlistReads != tc.wantAllowlistReads {
+				t.Errorf("allowlist reads = %d, want %d", allowlistReads, tc.wantAllowlistReads)
+			}
+		})
+	}
+}
