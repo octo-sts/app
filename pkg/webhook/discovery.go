@@ -40,7 +40,10 @@ const (
 var errPRHeadMismatch = errors.New("pull request head differs from event commit")
 
 // policyFilesFromPR lists a complete, stable PR diff before selecting policies.
-func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead string) ([]string, error) {
+// owner/repo is where the PR lives; classifyRepo is the repository name used to
+// decide which listed paths are policies, so selection matches how the files
+// will be parsed.
+func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead, classifyRepo string) ([]string, error) {
 	snapshot := func() (head, base string, count int, err error) {
 		pr, resp, err := client.PullRequests.Get(ctx, owner, repo, number)
 		if err != nil {
@@ -112,7 +115,7 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 					}
 					return nil, fmt.Errorf("pull request %d file list has %d entries, expected %d", number, len(seen), finalCount)
 				}
-				return pathsToValidate(e.policyChangesFromCompare(ctx, repo, files)), nil
+				return pathsToValidate(e.policyChangesFromCompare(ctx, classifyRepo, files)), nil
 			}
 			if resp.NextPage != page+1 {
 				return nil, fmt.Errorf("pull request %d file pages jump from %d to %d", number, page, resp.NextPage)

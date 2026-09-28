@@ -1024,7 +1024,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 
-	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha)
+	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha, repo)
 	if err != nil {
 		if errors.Is(err, errPRHeadMismatch) || isProvenWebhookRateLimit(err) {
 			log.Warnf("skipping PR file validation: %v", err)
@@ -1137,7 +1137,17 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if err != nil {
 			return nil, err
 		}
-		prFiles, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, pr.GetNumber(), sha)
+		// Content is read from the event repository, so its name decides how a
+		// file is parsed. The only exception is a PR into the same owner's
+		// policy repository, such as from a renamed fork of it. A base named
+		// like the policy repository under another owner must not upgrade
+		// classification, and a PR base must never downgrade the policy
+		// repository's own files.
+		classification := repo
+		if strings.EqualFold(prOwner, owner) && strings.EqualFold(prRepo, e.policyRepo()) {
+			classification = prRepo
+		}
+		prFiles, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, classification)
 		if err != nil {
 			if errors.Is(err, errPRHeadMismatch) {
 				log.Warnf("PR %s/%s#%d head differs from check suite commit; skipping CheckRun: %v", prOwner, prRepo, pr.GetNumber(), err)
@@ -1154,7 +1164,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			return nil, err
 		}
 		for _, path := range prFiles {
-			files = append(files, policyFile{path: path, repo: prRepo})
+			files = append(files, policyFile{path: path, repo: classification})
 		}
 	}
 	if len(files) == 0 {
