@@ -75,7 +75,7 @@ type VerifierProvider interface {
 	Verifier(config *oidc.Config) *oidc.IDTokenVerifier
 }
 
-func Get(ctx context.Context, issuer string) (provider VerifierProvider, err error) {
+func Get(ctx context.Context, issuer string) (VerifierProvider, error) {
 	// Return any verifiers that we have already constructed
 	// to avoid paying for discovery again.
 	if v, ok := providers.Get(issuer); ok {
@@ -87,7 +87,13 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		clog.InfoContext(ctx, "found issuer in negative cache", "error", err)
 		return nil, err
 	}
+	return getAfterCacheMiss(ctx, issuer)
+}
 
+// getAfterCacheMiss joins the issuer's discovery flight. A caller can be
+// descheduled between Get's cache checks and joining the flight; if the prior
+// flight has finished by then, the new leader must check both caches again.
+func getAfterCacheMiss(ctx context.Context, issuer string) (VerifierProvider, error) {
 	// Concurrent Get calls for the same issuer collapse into one discovery,
 	// so the shared discovery runs on its own context bounded only by
 	// discoveryTimeout -- not on any single caller's context. Using DoChan
@@ -96,6 +102,13 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 	// waiting, so other callers sharing the issuer are unaffected either
 	// way.
 	ch := discoveryFlight.DoChan(issuer, func() (any, error) {
+		if p, ok := providers.Get(issuer); ok {
+			return p, nil
+		}
+		if err, ok := getNegativeCache(issuer); ok {
+			return nil, err
+		}
+
 		discoveryCtx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 		defer cancel()
 		discoveryCtx = oidc.ClientContext(discoveryCtx, &http.Client{
@@ -131,15 +144,13 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		provider = res.Val.(VerifierProvider)
+		return res.Val.(VerifierProvider), nil
 	case <-ctx.Done():
 		// This caller's own context expired while waiting; the shared
 		// discovery keeps running in the background for any other callers,
 		// and memoizes its own result if it succeeds.
 		return nil, ctx.Err()
 	}
-
-	return provider, nil
 }
 
 // newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic

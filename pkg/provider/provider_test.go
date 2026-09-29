@@ -55,6 +55,49 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 	}
 }
 
+// The caller has already missed the fast-path checks in Get. Simulate a
+// completed flight filling either cache before that caller joins a new flight.
+func TestGetAfterCacheMissRechecksCompletedFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		negative bool
+	}{
+		{name: "successful discovery"},
+		{name: "failed discovery", negative: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				hits.Add(1)
+				w.WriteHeader(http.StatusNotFound)
+			}))
+			defer server.Close()
+			defer providers.Remove(server.URL)
+			defer negativeCache.Remove(server.URL)
+
+			wantProvider := &keysetProvider{issuer: server.URL}
+			wantErr := errors.New("cached discovery failure")
+			if tc.negative {
+				setNegativeCache(server.URL, wantErr)
+			} else {
+				providers.Add(server.URL, wantProvider)
+			}
+
+			got, err := getAfterCacheMiss(context.Background(), server.URL)
+			if tc.negative {
+				if got != nil || !errors.Is(err, wantErr) {
+					t.Fatalf("getAfterCacheMiss() = (%v, %v), want cached error %v", got, err, wantErr)
+				}
+			} else if got != wantProvider || err != nil {
+				t.Fatalf("getAfterCacheMiss() = (%v, %v), want cached provider", got, err)
+			}
+			if count := hits.Load(); count != 0 {
+				t.Errorf("duplicate discovery sent %d HTTP requests", count)
+			}
+		})
+	}
+}
+
 func TestGet_FollowerContextIsNotAffectedByLeaderCancellation(t *testing.T) {
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})
