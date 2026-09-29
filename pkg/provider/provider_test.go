@@ -57,7 +57,7 @@ func TestGet_SingleflightCollapsesConcurrentCallers(t *testing.T) {
 
 // The caller has already missed the fast-path checks in Get. Simulate a
 // completed flight filling either cache before that caller joins a new flight.
-func TestGetAfterCacheMissRechecksCompletedFlight(t *testing.T) {
+func TestGetAfterCacheMiss_RechecksCompletedFlight(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		negative bool

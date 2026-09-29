@@ -153,7 +153,6 @@ func getAfterCacheMiss(ctx context.Context, issuer string) (VerifierProvider, er
 	}
 }
 
-// newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic
 // getNegativeCache returns the cached error for issuer, if discovery failed
 // for it within the last negativeCacheTTL. An expired entry is not returned.
 func getNegativeCache(issuer string) (error, bool) {
@@ -173,6 +172,7 @@ func setNegativeCache(issuer string, err error) {
 	})
 }
 
+// newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic.
 func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider, error) {
 	attempt := 0
 
