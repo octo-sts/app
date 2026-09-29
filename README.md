@@ -265,8 +265,16 @@ policy.
 
 ### Release cadence
 
-Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
-we will might make a new release.
+We cut a release when there is a bug fix or feature to ship. Changes reach
+each environment as follows:
+
+- Merging to `main` deploys staging.
+- Pushing a `v*` tag publishes the container images.
+- Publishing a release (not a pre-release) for a `vX.Y.Z` tag deploys
+  production. Pre-releases and tag pushes without a published release do not
+  deploy.
+- To roll back production, run the `deploy-prod.yaml` workflow manually against
+  the previous version tag.
 
 ### Container images
 
