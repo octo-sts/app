@@ -1141,33 +1141,28 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 // then become the leader of a new flight. It must use the result just cached by
 // that earlier flight rather than fetching a stale 404 and overwriting a 200.
 func TestPolicyReadRechecksCachesAfterJoiningFlight(t *testing.T) {
+	const policy = "fresh policy"
 	for _, tc := range []struct {
-		name     string
-		negative bool
+		name string
+		seed func(cacheTrustPolicyKey)
+		want codes.Code
 	}{
-		{name: "successful policy read"},
-		{name: "missing policy read", negative: true},
+		{"successful policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, policy) }, codes.OK},
+		{"missing policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, negativeCacheConst) }, codes.NotFound},
+		{"forbidden policy read", func(k cacheTrustPolicyKey) { forbiddenPolicies.Add(k, struct{}{}) }, codes.PermissionDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "late-joiner-" + tc.name}
-			trustPolicies.Remove(key)
-			t.Cleanup(func() { trustPolicies.Remove(key) })
+			key := freshTPKey(t, "late-joiner-"+tc.name)
 			gh, counter := newFakeGitHubNotFoundCounter()
 			atr := newAppsTransport(t, gh)
-
-			want := "fresh policy"
-			if tc.negative {
-				want = negativeCacheConst
-			}
-			trustPolicies.Add(key, want)
+			tc.seed(key)
 
 			got, err := (&sts{}).fetchTrustPolicyRawAfterCacheMiss(t.Context(), atr, 1234, key)
-			if tc.negative {
-				if status.Code(err) != codes.NotFound {
-					t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached NotFound", got, err)
-				}
-			} else if err != nil || got != want {
-				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached policy %q", got, err, want)
+			if status.Code(err) != tc.want {
+				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached %v", got, err, tc.want)
+			}
+			if tc.want == codes.OK && got != policy {
+				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = %q, want cached policy %q", got, policy)
 			}
 			if calls := counter.Load(); calls != 0 {
 				t.Errorf("late joiner made %d GitHub contents requests, want 0", calls)
@@ -1193,13 +1188,7 @@ func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation
 }
 
 func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "concurrent-policy-read"}
-	trustPolicies.Remove(key)
-	staleTrustPolicies.Remove(key)
-	t.Cleanup(func() {
-		trustPolicies.Remove(key)
-		staleTrustPolicies.Remove(key)
-	})
+	key := freshTPKey(t, "concurrent-policy-read")
 
 	firstStarted := make(chan struct{})
 	releaseSuccess := make(chan struct{})
@@ -1249,7 +1238,9 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 		raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
 		second <- result{raw, err}
 	}()
-	// Give the second miss time to join the in-flight read before the 200.
+	// Give the second miss time to join the in-flight read before the 200. If
+	// it joins late instead, the recheck inside its own flight serves the
+	// cached 200, so the assertions below hold either way.
 	time.Sleep(30 * time.Millisecond)
 	closeSuccess()
 	gotFirst := <-first
@@ -1267,9 +1258,7 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 }
 
 func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "policy-after-cancel"}
-	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
+	key := freshTPKey(t, "policy-after-cancel")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	closeRelease := sync.OnceFunc(func() { close(release) })
@@ -1320,6 +1309,38 @@ func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
 	}
 	if got := reads.Load(); got != 1 {
 		t.Errorf("GitHub contents read %d times, want 1", got)
+	}
+}
+
+func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
+	key := freshTPKey(t, "policy-read-timeout")
+	orig := policyReadTimeout
+	policyReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { policyReadTimeout = orig })
+
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(_ http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := (&sts{}).fetchTrustPolicyRaw(ctx, atr, 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable (the caller never gave up); err = %v", got, err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("caller context expired; the shared timeout was not what ended the read")
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub contents read %d times, want 1", got)
+	}
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("a timed-out read must not populate the policy cache")
+	}
+	if _, ok := forbiddenPolicies.Get(key); ok {
+		t.Error("a timed-out read must not populate the forbidden cooldown")
 	}
 }
 

@@ -74,14 +74,15 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
-// policyReadFlight serializes cache misses for the same policy. The cache is
-// package-wide, so the flight must be too: otherwise a late 404 from another
-// STS instance could replace a successful read in the shared cache.
+// policyReadFlight collapses concurrent cache misses for the same policy key
+// into one GitHub read. The caches above are package-level, so the flight is
+// too: a per-server group would let two servers in one process race on them.
 var policyReadFlight singleflight.Group
 
-// A shared read outlives a caller that stops waiting, but must not keep an
-// installation token or a GitHub request alive indefinitely.
-const policyReadTimeout = 30 * time.Second
+// policyReadTimeout bounds a shared read. The read outlives a caller that
+// stops waiting, but must not keep an installation token or a GitHub request
+// alive indefinitely. It is a var so tests can shorten it.
+var policyReadTimeout = 30 * time.Second
 
 // forbiddenPolicyTTL is deliberately short so a permission fix (an installation
 // regaining contents:read, an IP allowlist edit) is picked up within a minute.
@@ -966,23 +967,24 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 // fetchTrustPolicyRaw returns the raw YAML for a trust policy, serving
 // from the LRU cache when possible and falling back to the GitHub API.
 func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
-	if raw, err, found := cachedTrustPolicyRaw(ctx, tpKey); found {
+	if raw, found, err := cachedTrustPolicyRaw(ctx, tpKey); found {
 		return raw, err
 	}
 	return s.fetchTrustPolicyRawAfterCacheMiss(ctx, base, install, tpKey)
 }
 
-// cachedTrustPolicyRaw checks both caches that can terminate a policy read.
-// The same check runs inside the flight: a caller can miss here and be
-// descheduled until after an earlier flight has filled a cache entry.
-func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (string, error, bool) {
+// cachedTrustPolicyRaw checks the three caches that can terminate a policy
+// read: a cached policy, a cached 404, and the 403 cooldown. The same check
+// runs inside the flight: a caller can miss here and be descheduled until
+// after an earlier flight has filled a cache entry.
+func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (string, bool, error) {
 	if cached, ok := trustPolicies.Get(tpKey); ok {
 		if cached == negativeCacheConst {
 			clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-			return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity), true
+			return "", true, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 		}
 		clog.InfoContextf(ctx, "found trust policy in cache for %s", tpKey)
-		return cached, nil, true
+		return cached, true, nil
 	}
 
 	// A recent permission 403 short-circuits the mint/read/revoke cycle for the
@@ -991,23 +993,35 @@ func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (strin
 	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
 	if _, ok := forbiddenPolicies.Get(tpKey); ok {
 		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
-		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity), true
+		return "", true, status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
 	}
-	return "", nil, false
+	return "", false, nil
 }
 
-// fetchTrustPolicyRawAfterCacheMiss joins the flight even if its initial cache
-// check missed. Only its leader reads GitHub and writes to the shared caches;
-// each waiter can still leave when its own request context is canceled.
+// fetchTrustPolicyRawAfterCacheMiss joins the flight for tpKey. Only the
+// leader reads GitHub and writes to the shared caches; each waiter can still
+// leave when its own request context is canceled. The flight is keyed exactly
+// like the caches, so no two concurrent readers can write the same entry.
 func (s *sts) fetchTrustPolicyRawAfterCacheMiss(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
-	key := fmt.Sprintf("%q/%q/%q/%q", s.baseURL, tpKey.owner, tpKey.repo, tpKey.identity)
+	key := fmt.Sprintf("%q/%q/%q", tpKey.owner, tpKey.repo, tpKey.identity)
 	ch := policyReadFlight.DoChan(key, func() (any, error) {
-		if raw, err, found := cachedTrustPolicyRaw(ctx, tpKey); found {
+		if raw, found, err := cachedTrustPolicyRaw(ctx, tpKey); found {
 			return raw, err
 		}
+		// WithoutCancel keeps the leader's request values (logger, app and
+		// installation) but detaches its cancellation, so the only deadline
+		// the read can see is policyReadTimeout.
 		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policyReadTimeout)
 		defer cancel()
-		return s.fetchTrustPolicyRawUncached(workCtx, base, install, tpKey)
+		raw, err := s.fetchTrustPolicyRawUncached(workCtx, base, install, tpKey)
+		if status.Code(err) == codes.DeadlineExceeded {
+			// The shared read hit policyReadTimeout. No waiter gave up, so
+			// report a transient GitHub failure the caller may retry, not a
+			// deadline the caller never set. Nothing is cached.
+			clog.WarnContextf(ctx, "trust policy read for %q timed out after %v", tpKey.identity, policyReadTimeout)
+			return "", status.Errorf(codes.Unavailable, "trust policy read for %q timed out", tpKey.identity)
+		}
+		return raw, err
 	})
 	select {
 	case <-ctx.Done():
@@ -1020,6 +1034,10 @@ func (s *sts) fetchTrustPolicyRawAfterCacheMiss(ctx context.Context, base *ghins
 	}
 }
 
+// fetchTrustPolicyRawUncached mints a contents:read token, reads the policy
+// from GitHub, and fills the caches. It runs only as a flight leader on the
+// flight's own context, so a context error here is policyReadTimeout, never a
+// waiter giving up.
 func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
 	atr := ghtransport.ForInstallation(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
@@ -1081,7 +1099,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		}
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 
-		// The caller gave up; propagate rather than retry or mask.
+		// The read's own deadline passed; propagate rather than retry or mask.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", backoff.Permanent(status.FromContextError(err).Err())
 		}
@@ -1134,9 +1152,9 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		if errors.As(err, &pe) {
 			err = pe.Unwrap()
 		}
-		// A cancellation during a backoff sleep surfaces here as a raw context
-		// error, not a gRPC status; report it as the caller giving up rather
-		// than as a GitHub transient.
+		// A deadline during a backoff sleep surfaces here as a raw context
+		// error, not a gRPC status; report it as a context error rather than
+		// as a GitHub transient. The flight maps it to Unavailable.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", status.FromContextError(err).Err()
 		}
@@ -1153,8 +1171,8 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 
 // isTransient reports whether err is a retriable, non-rate-limit failure from a
 // trust policy fetch: a 5xx GitHub response, or a transport / token-creation
-// error with no HTTP response at all. Context cancellation and deadline are the
-// caller giving up, so they are deliberately excluded.
+// error with no HTTP response at all. Context cancellation and deadline end the
+// read outright, so they are deliberately excluded.
 func isTransient(err error) bool {
 	if err == nil {
 		return false
