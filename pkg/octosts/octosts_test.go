@@ -1137,6 +1137,192 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	}
 }
 
+// A caller can miss the cache, be descheduled until an earlier flight finishes,
+// then become the leader of a new flight. It must use the result just cached by
+// that earlier flight rather than fetching a stale 404 and overwriting a 200.
+func TestPolicyReadRechecksCachesAfterJoiningFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		negative bool
+	}{
+		{name: "successful policy read"},
+		{name: "missing policy read", negative: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "late-joiner-" + tc.name}
+			trustPolicies.Remove(key)
+			t.Cleanup(func() { trustPolicies.Remove(key) })
+			gh, counter := newFakeGitHubNotFoundCounter()
+			atr := newAppsTransport(t, gh)
+
+			want := "fresh policy"
+			if tc.negative {
+				want = negativeCacheConst
+			}
+			trustPolicies.Add(key, want)
+
+			got, err := (&sts{}).fetchTrustPolicyRawAfterCacheMiss(t.Context(), atr, 1234, key)
+			if tc.negative {
+				if status.Code(err) != codes.NotFound {
+					t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached NotFound", got, err)
+				}
+			} else if err != nil || got != want {
+				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached policy %q", got, err, want)
+			}
+			if calls := counter.Load(); calls != 0 {
+				t.Errorf("late joiner made %d GitHub contents requests, want 0", calls)
+			}
+		})
+	}
+}
+
+func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation.AppsTransport {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("test-installation-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", read)
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return newAppsTransport(t, &fakeGitHub{mux: mux})
+}
+
+func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "concurrent-policy-read"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+	})
+
+	firstStarted := make(chan struct{})
+	releaseSuccess := make(chan struct{})
+	release404 := make(chan struct{})
+	closeSuccess := sync.OnceFunc(func() { close(releaseSuccess) })
+	close404 := sync.OnceFunc(func() { close(release404) })
+	defer closeSuccess()
+	defer close404()
+	var contentReads atomic.Int32
+	const policy = "issuer: https://example.com\nsubject: example\n"
+
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if contentReads.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseSuccess
+			_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+				Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+				Type:     new("file"),
+				Encoding: new("base64"),
+			})
+			return
+		}
+		// Before single-flight, a concurrent response from an earlier snapshot
+		// could arrive after the 200 and replace it with a five-minute 404.
+		<-release404
+		writeGitHubNotFound(w)
+	})
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		raw string
+		err error
+	}
+	first := make(chan result, 1)
+	second := make(chan result, 1)
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		first <- result{raw, err}
+	}()
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("first GitHub contents read did not start")
+	}
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		second <- result{raw, err}
+	}()
+	// Give the second miss time to join the in-flight read before the 200.
+	time.Sleep(30 * time.Millisecond)
+	closeSuccess()
+	gotFirst := <-first
+	close404()
+	gotSecond := <-second
+	if gotFirst.err != nil || gotFirst.raw != policy || gotSecond.err != nil || gotSecond.raw != policy {
+		t.Fatalf("concurrent reads = (%q, %v), (%q, %v); want shared policy", gotFirst.raw, gotFirst.err, gotSecond.raw, gotSecond.err)
+	}
+	if reads := contentReads.Load(); reads != 1 {
+		t.Errorf("GitHub contents read %d times for the same miss, want 1", reads)
+	}
+	if cached, ok := trustPolicies.Get(key); !ok || cached != policy {
+		t.Errorf("cache = (%q, %v), want successful policy (not a late 404)", cached, ok)
+	}
+}
+
+func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "policy-after-cancel"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+	started := make(chan struct{})
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	var reads atomic.Int32
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if reads.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	s := &sts{}
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	defer cancelLeader()
+	waiterCtx, cancelWaiter := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWaiter()
+	leaderResult := make(chan error, 1)
+	waiterResult := make(chan error, 1)
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(leaderCtx, atr, 1234, key)
+		leaderResult <- err
+	}()
+	select {
+	case <-started:
+	case <-waiterCtx.Done():
+		t.Fatal("shared read did not start")
+	}
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(waiterCtx, atr, 1234, key)
+		if err == nil && raw != policy {
+			err = fmt.Errorf("shared read returned %q, want %q", raw, policy)
+		}
+		waiterResult <- err
+	}()
+	cancelLeader()
+	if err := <-leaderResult; status.Code(err) != codes.Canceled {
+		t.Errorf("canceled caller got %v, want Canceled", err)
+	}
+	closeRelease()
+	if err := <-waiterResult; err != nil {
+		t.Fatalf("waiter lost the shared read: %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub contents read %d times, want 1", got)
+	}
+}
+
 func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "cached-missing"}
 	trustPolicies.Add(key, negativeCacheConst)

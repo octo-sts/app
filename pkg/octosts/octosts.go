@@ -74,6 +74,15 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
 
+// policyReadFlight serializes cache misses for the same policy. The cache is
+// package-wide, so the flight must be too: otherwise a late 404 from another
+// STS instance could replace a successful read in the shared cache.
+var policyReadFlight singleflight.Group
+
+// A shared read outlives a caller that stops waiting, but must not keep an
+// installation token or a GitHub request alive indefinitely.
+const policyReadTimeout = 30 * time.Second
+
 // forbiddenPolicyTTL is deliberately short so a permission fix (an installation
 // regaining contents:read, an IP allowlist edit) is picked up within a minute.
 const forbiddenPolicyTTL = time.Minute
@@ -957,13 +966,23 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 // fetchTrustPolicyRaw returns the raw YAML for a trust policy, serving
 // from the LRU cache when possible and falling back to the GitHub API.
 func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	if raw, err, found := cachedTrustPolicyRaw(ctx, tpKey); found {
+		return raw, err
+	}
+	return s.fetchTrustPolicyRawAfterCacheMiss(ctx, base, install, tpKey)
+}
+
+// cachedTrustPolicyRaw checks both caches that can terminate a policy read.
+// The same check runs inside the flight: a caller can miss here and be
+// descheduled until after an earlier flight has filled a cache entry.
+func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (string, error, bool) {
 	if cached, ok := trustPolicies.Get(tpKey); ok {
 		if cached == negativeCacheConst {
 			clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-			return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+			return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity), true
 		}
 		clog.InfoContextf(ctx, "found trust policy in cache for %s", tpKey)
-		return cached, nil
+		return cached, nil, true
 	}
 
 	// A recent permission 403 short-circuits the mint/read/revoke cycle for the
@@ -972,9 +991,36 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
 	if _, ok := forbiddenPolicies.Get(tpKey); ok {
 		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
-		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
+		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity), true
 	}
+	return "", nil, false
+}
 
+// fetchTrustPolicyRawAfterCacheMiss joins the flight even if its initial cache
+// check missed. Only its leader reads GitHub and writes to the shared caches;
+// each waiter can still leave when its own request context is canceled.
+func (s *sts) fetchTrustPolicyRawAfterCacheMiss(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	key := fmt.Sprintf("%q/%q/%q/%q", s.baseURL, tpKey.owner, tpKey.repo, tpKey.identity)
+	ch := policyReadFlight.DoChan(key, func() (any, error) {
+		if raw, err, found := cachedTrustPolicyRaw(ctx, tpKey); found {
+			return raw, err
+		}
+		workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policyReadTimeout)
+		defer cancel()
+		return s.fetchTrustPolicyRawUncached(workCtx, base, install, tpKey)
+	})
+	select {
+	case <-ctx.Done():
+		return "", status.FromContextError(ctx.Err()).Err()
+	case res := <-ch:
+		if res.Err != nil {
+			return "", res.Err
+		}
+		return res.Val.(string), nil
+	}
+}
+
+func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
 	atr := ghtransport.ForInstallation(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{tpKey.repo},
