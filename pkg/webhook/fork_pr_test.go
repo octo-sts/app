@@ -101,6 +101,7 @@ func TestForkCheckSuiteUsesBasePRAndForkContent(t *testing.T) {
 			webhook := httptest.NewServer(&Validator{Transport: transport, WebhookSecret: [][]byte{secret}})
 			t.Cleanup(webhook.Close)
 			body, err := json.Marshal(&github.CheckSuiteEvent{
+				Action:       new("requested"),
 				Installation: &github.Installation{ID: new(int64(1111))},
 				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("renamed-fork"), DefaultBranch: new("main")},
 				CheckSuite:   &github.CheckSuite{HeadSHA: new("deadbeef"), BeforeSHA: new(zeroHash), HeadBranch: new("feature"), PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/foo/" + tc.baseRepo)}}}}},
@@ -252,6 +253,7 @@ func forkCheckSuiteClient(t *testing.T, handler http.Handler) *ghinstallation.Ap
 
 func forkCheckSuiteEvent(before, head, baseRepo string) *github.CheckSuiteEvent {
 	return &github.CheckSuiteEvent{
+		Action:       new("requested"),
 		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("renamed-fork"), DefaultBranch: new("main")},
 		CheckSuite: &github.CheckSuite{
@@ -349,6 +351,7 @@ func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
 			webhook := httptest.NewServer(&Validator{Transport: transport, WebhookSecret: [][]byte{secret}})
 			t.Cleanup(webhook.Close)
 			body, err := json.Marshal(&github.CheckSuiteEvent{
+				Action:       new("requested"),
 				Installation: &github.Installation{ID: new(int64(1111))},
 				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new(tc.eventRepo), DefaultBranch: new("main")},
 				CheckSuite: &github.CheckSuite{

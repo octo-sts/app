@@ -1636,6 +1636,139 @@ func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
 	}
 }
 
+// A check run the validator posts comes back as check_run created and
+// completed, attributed to the user who triggered the suite. Those actions
+// must not start another validation.
+func TestWebhookCheckRunNonRerequestedSkipped(t *testing.T) {
+	for _, action := range []string{"created", "completed", "requested_action"} {
+		t.Run(action, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("GitHub API should not be called for check_run %s events, got %s %s", action, r.Method, r.URL.Path)
+				http.Error(w, "should not be called", http.StatusInternalServerError)
+			})
+			gh := httptest.NewServer(mux)
+			defer gh.Close()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+
+			secret := []byte("hunter2")
+			v := &Validator{
+				Transport:     tr,
+				WebhookSecret: [][]byte{secret},
+			}
+			srv := httptest.NewServer(v)
+			defer srv.Close()
+
+			body, err := json.Marshal(github.CheckRunEvent{
+				Action: new(action),
+				Installation: &github.Installation{
+					ID: new(int64(1111)),
+				},
+				Repo: &github.Repository{
+					Owner: &github.User{Login: new("foo")},
+					Name:  new("bar"),
+				},
+				Sender: &github.User{
+					Login: new("some-human"),
+				},
+				CheckRun: &github.CheckRun{
+					CheckSuite: &github.CheckSuite{
+						HeadSHA:   new("abc123"),
+						BeforeSHA: new("def456"),
+					},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "check_run")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if resp.StatusCode != http.StatusAccepted {
+				out, _ := httputil.DumpResponse(resp, true)
+				t.Fatalf("expected 202 Accepted for check_run %s, got\n%s", action, string(out))
+			}
+		})
+	}
+}
+
+func TestWebhookCheckSuiteCompletedSkipped(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("GitHub API should not be called for check_suite completed events, got %s %s", r.Method, r.URL.Path)
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Action: new("completed"),
+		Installation: &github.Installation{
+			ID: new(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
+		},
+		Sender: &github.User{
+			Login: new("some-human"),
+		},
+		CheckSuite: &github.CheckSuite{
+			HeadSHA:   new("abc123"),
+			BeforeSHA: new("def456"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusAccepted {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 202 Accepted for check_suite completed, got\n%s", string(out))
+	}
+}
+
 func TestWebhookCheckSuiteBotSkipped(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
