@@ -84,6 +84,10 @@ var policyReadFlight singleflight.Group
 // alive indefinitely. It is a var so tests can shorten it.
 var policyReadTimeout = 30 * time.Second
 
+// A shared read can hit policyReadTimeout after minting its short-lived token.
+// Give revocation its own small budget instead of using the expired read context.
+const policyReadRevokeTimeout = 2 * time.Second
+
 // forbiddenPolicyTTL is deliberately short so a permission fix (an installation
 // regaining contents:read, an IP allowlist edit) is picked up within a minute.
 const forbiddenPolicyTTL = time.Minute
@@ -1046,13 +1050,16 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			Contents: new("read"),
 		},
 	}
+	var mintedToken string
 	defer func() {
-		tok, err := atr.Token(ctx)
-		if err != nil {
-			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
+		// No token was minted if client creation or token acquisition failed.
+		// In particular, do not mint a new token solely to revoke it.
+		if mintedToken == "" {
 			return
 		}
-		if err := Revoke(ctx, tok, s.baseURL); err != nil {
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policyReadRevokeTimeout)
+		defer cancel()
+		if err := Revoke(revokeCtx, mintedToken, s.baseURL); err != nil {
 			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
 		}
 	}()
@@ -1070,11 +1077,18 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 	// it), a permission-denied 403 (no app can resolve it), and a 404 (the
 	// genuine "no policy" answer that seeds the negative cache).
 	op := func() (string, error) {
-		file, _, _, err := client.Repositories.GetContents(ctx,
-			tpKey.owner, tpKey.repo,
-			fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
-			&github.RepositoryContentGetOptions{},
-		)
+		// GetContents would mint through this same transport. Acquire explicitly
+		// so revocation knows which token to use even if the read times out.
+		tok, err := atr.Token(ctx)
+		var file *github.RepositoryContent
+		if err == nil {
+			mintedToken = tok
+			file, _, _, err = client.Repositories.GetContents(ctx,
+				tpKey.owner, tpKey.repo,
+				fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
+				&github.RepositoryContentGetOptions{},
+			)
+		}
 		if err == nil {
 			if file == nil {
 				// GetContents returns a nil file when the path is a directory;

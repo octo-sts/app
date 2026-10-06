@@ -1257,6 +1257,73 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	}
 }
 
+// Sharing a rate-limit result must still let each exchange rotate to a
+// healthy installation. The next read is single-flighted too, so concurrent
+// rotations do not amplify GitHub requests for the same policy.
+func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
+	key := freshTPKey(t, "shared-rate-limit")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var limitedReads, healthyReads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		limitedReads.Add(1)
+		signalStarted()
+		<-release
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		healthyReads.Add(1)
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: healthy}, AppCount: 2}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		results <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("rate-limited policy read did not start")
+	}
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		results <- err
+	}()
+	// Keep the first flight open long enough for the second reader to join.
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("policy read did not recover after rate-limit rotation: %v", err)
+		}
+	}
+	if got := limitedReads.Load(); got != 1 {
+		t.Errorf("rate-limited installation read %d times, want 1", got)
+	}
+	if got := healthyReads.Load(); got != 1 {
+		t.Errorf("healthy installation read %d times, want 1", got)
+	}
+}
+
 func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
 	key := freshTPKey(t, "policy-after-cancel")
 	started := make(chan struct{})
@@ -1341,6 +1408,144 @@ func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
 	}
 	if _, ok := forbiddenPolicies.Get(key); ok {
 		t.Error("a timed-out read must not populate the forbidden cooldown")
+	}
+}
+
+func TestPolicyReadTimeoutRevokesMintedToken(t *testing.T) {
+	key := freshTPKey(t, "policy-read-timeout-revocation")
+	orig := policyReadTimeout
+	policyReadTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { policyReadTimeout = orig })
+
+	var mintCalls, contentsCalls, revokeCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mintCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("timeout-test-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/api/v3/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(_ http.ResponseWriter, r *http.Request) {
+		contentsCalls.Add(1)
+		<-r.Context().Done()
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer timeout-test-token" {
+			t.Errorf("unexpected revocation request: %s %s", r.Method, r.Header.Get("Authorization"))
+		}
+		revokeCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	signer := ghinstallation.NewRSASigner(jwt.SigningMethodRS256, sharedAppKey())
+	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, 1234, ghinstallation.WithSigner(signer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atr.BaseURL = srv.URL
+
+	_, err = (&sts{baseURL: srv.URL}).fetchTrustPolicyRaw(t.Context(), atr, 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("timed-out read = %v, want Unavailable", err)
+	}
+	if got := mintCalls.Load(); got != 1 {
+		t.Errorf("token mint requests = %d, want 1", got)
+	}
+	if got := contentsCalls.Load(); got != 1 {
+		t.Errorf("contents requests = %d, want 1", got)
+	}
+	if got := revokeCalls.Load(); got != 1 {
+		t.Errorf("token revocations = %d, want 1 even after the read deadline", got)
+	}
+}
+
+func TestPolicyReadFailedMintDoesNotMintForRevocation(t *testing.T) {
+	key := freshTPKey(t, "failed-mint")
+	var mintCalls, contentsCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mintCalls.Add(1)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"invalid installation"}`))
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+		contentsCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	atr := newAppsTransport(t, &fakeGitHub{mux: mux})
+	if _, err := (&sts{}).fetchTrustPolicyRaw(t.Context(), atr, 1234, key); err == nil {
+		t.Fatal("expected failed token mint to fail the policy read")
+	}
+	if got := mintCalls.Load(); got != 1 {
+		t.Errorf("token mint requests = %d, want 1 (no second mint solely for cleanup)", got)
+	}
+	if got := contentsCalls.Load(); got != 0 {
+		t.Errorf("contents requests = %d, want 0 without a token", got)
+	}
+}
+
+// Single-flight only protects concurrent cache writers. A first (possibly
+// transient) 404 is still shared and cached for five minutes, preserving
+// #1334's quota tradeoff; recovering a newly visible policy is separate.
+func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
+	key := freshTPKey(t, "first-404")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if reads.Add(1) == 1 {
+			close(started)
+			<-release
+			writeGitHubNotFound(w)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte("new policy"))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		results <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("first policy read did not start")
+	}
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		results <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	close(release)
+	for range 2 {
+		err := <-results
+		if got := status.Code(err); got != codes.NotFound {
+			t.Fatalf("policy read = %v, want NotFound", err)
+		}
+	}
+	// Even though the next GitHub response would be 200, the first 404 is
+	// cached; this PR must not add a GET for each concurrent caller.
+	if _, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key); status.Code(err) != codes.NotFound {
+		t.Fatalf("cached policy read = %v, want NotFound", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("contents requests = %d, want 1 (no retry of genuine missing policies)", got)
 	}
 }
 
