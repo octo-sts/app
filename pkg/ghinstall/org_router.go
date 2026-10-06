@@ -14,11 +14,22 @@ import (
 // Used by the legacy env-var code path where all apps serve all orgs.
 const WildcardOrg = "*"
 
-// OrgPool holds the Manager that serves a single organization, plus the
-// number of underlying apps so callers can cap rate-limit retries.
+// OrgPool holds the Manager and configured app membership for one organization,
+// plus the app count so callers can cap rate-limit retries.
 type OrgPool struct {
 	M        Manager
 	AppCount int
+	// AppIDs identifies the configured apps in this pool, including apps
+	// whose installation lookup currently fails. Callers must not modify it.
+	// A nil or empty map means the pool has no configured apps, so app pins
+	// resolve to no eligible app and fail closed. Membership is never treated
+	// as "unknown, allow all": app pinning is an org-isolation control, so an
+	// absent pool must not widen it to every configured app.
+	AppIDs map[int64]bool
+	// Quota enables capacity-aware selection for callers that pick among
+	// enumerated installations themselves (e.g. trust policy app pins).
+	// May be nil, disabling quota-aware picking.
+	Quota *QuotaConfig
 }
 
 // OrgRouter maps GitHub organization names to their dedicated app pools.

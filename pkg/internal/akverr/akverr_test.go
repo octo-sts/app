@@ -226,8 +226,7 @@ func TestSanitizedErrorIsStillWrappable(t *testing.T) {
 
 	// The original ResponseError must not remain reachable through the chain,
 	// or callers could recover the leaky message via errors.As.
-	var respErr *azcore.ResponseError
-	if errors.As(wrapped, &respErr) {
+	if _, ok := errors.AsType[*azcore.ResponseError](wrapped); ok {
 		t.Error("sanitized error still unwraps to the original *azcore.ResponseError")
 	}
 }

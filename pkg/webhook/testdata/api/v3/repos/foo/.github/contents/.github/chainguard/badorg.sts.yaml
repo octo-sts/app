@@ -1,0 +1,7 @@
+{
+  "name": "badorg.sts.yaml",
+  "path": ".github/chainguard/badorg.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vLy5naXRodWI6cmVmOnJlZnMvaGVhZHMvbWFpbgpyZXBvc2l0b3JpZXM6CiAgLSBiYXIKYXBwOiBjaS1ib3QKYXBwX3BhdHRlcm46IGNpLS4qCg==",
+  "encoding": "base64"
+}

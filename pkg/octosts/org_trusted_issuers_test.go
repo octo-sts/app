@@ -183,6 +183,26 @@ func TestCompileAllowsInlineFlags(t *testing.T) {
 	}
 }
 
+// TestCompileScopesInlineFlagsToPattern: an inline flag inside the pattern must
+// not reach the anchors the compiler adds around it. Under "^"+p+"$", "(?m)"
+// would turn the trailing "$" into an end-of-line anchor; the non-capturing
+// group keeps the outer anchors at start and end of text.
+func TestCompileScopesInlineFlagsToPattern(t *testing.T) {
+	c := &OrgTrustedIssuers{IssuerPatterns: []string{`(?m)https://a\.example\.com`}}
+	a, err := c.Compile()
+	if err != nil {
+		t.Fatalf("Compile() = %v, want nil", err)
+	}
+	if !a.Allows("https://a.example.com") {
+		t.Error("Allows() = false for the exact issuer, want true")
+	}
+	for _, issuer := range []string{"https://a.example.com\nhttps://evil.example", "https://evil.example\nhttps://a.example.com"} {
+		if a.Allows(issuer) {
+			t.Errorf("Allows(%q) = true, want false: (?m) leaked past the anchors", issuer)
+		}
+	}
+}
+
 func TestAllowsUnionOfBothLists(t *testing.T) {
 	c := &OrgTrustedIssuers{
 		Issuers:        []string{testGitHubIssuer},

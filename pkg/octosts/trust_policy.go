@@ -43,6 +43,12 @@ type TrustPolicy struct {
 	// See https://docs.github.com/en/rest/apps/apps?apiVersion=2022-11-28#create-an-installation-access-token-for-an-app
 	Permissions github.InstallationPermissions `json:"permissions,omitempty"`
 
+	// App pins exchanges to one configured app (name or numeric app ID).
+	App string `json:"app,omitempty"`
+	// App name regex pattern; exchanges route among matching apps.
+	AppPattern string         `json:"app_pattern,omitempty"`
+	appPattern *regexp.Regexp `json:"-"`
+
 	isCompiled bool `json:"-"`
 }
 
@@ -69,9 +75,9 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Issuer == "" && tp.IssuerPattern == "":
 		return errors.New("trust policy: one of issuer or issuer_pattern must be set, got neither")
 	case tp.IssuerPattern != "":
-		r, err := regexp.Compile("^" + tp.IssuerPattern + "$")
+		r, err := compileAnchored(tp.IssuerPattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid issuer_pattern: %w", err)
 		}
 		tp.issuerPattern = r
 	}
@@ -83,9 +89,9 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Subject == "" && tp.SubjectPattern == "":
 		return errors.New("trust policy: one of subject or subject_pattern must be set, got neither")
 	case tp.SubjectPattern != "":
-		r, err := regexp.Compile("^" + tp.SubjectPattern + "$")
+		r, err := compileAnchored(tp.SubjectPattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid subject_pattern: %w", err)
 		}
 		tp.subjectPattern = r
 	}
@@ -95,9 +101,9 @@ func (tp *TrustPolicy) Compile() error {
 	case tp.Audience != "" && tp.AudiencePattern != "":
 		return errors.New("trust policy: only one of audience or audience_pattern can be set, got both")
 	case tp.AudiencePattern != "":
-		r, err := regexp.Compile("^" + tp.AudiencePattern + "$")
+		r, err := compileAnchored(tp.AudiencePattern)
 		if err != nil {
-			return err
+			return fmt.Errorf("trust policy: invalid audience_pattern: %w", err)
 		}
 		tp.audiencePattern = r
 	}
@@ -105,11 +111,23 @@ func (tp *TrustPolicy) Compile() error {
 	// Compile the claim patterns.
 	tp.claimPattern = make(map[string]*regexp.Regexp, len(tp.ClaimPattern))
 	for k, v := range tp.ClaimPattern {
-		r, err := regexp.Compile("^" + v + "$")
+		r, err := compileAnchored(v)
 		if err != nil {
 			return fmt.Errorf("error compiling claim_pattern[%q]: %w", k, err)
 		}
 		tp.claimPattern[k] = r
+	}
+
+	// Check that we got oneof App[Pattern] or none.
+	switch {
+	case tp.App != "" && tp.AppPattern != "":
+		return errors.New("trust policy: only one of app or app_pattern can be set, got both")
+	case tp.AppPattern != "":
+		r, err := compileAnchored(tp.AppPattern)
+		if err != nil {
+			return err
+		}
+		tp.appPattern = r
 	}
 
 	// Mark the trust policy as compiled.
@@ -179,13 +197,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 	switch {
 	case tp.audiencePattern != nil:
 		// Check that the audience pattern matches at least one of the token's audiences.
-		found := false
-		for _, aud := range token.Audience {
-			if tp.audiencePattern.MatchString(aud) {
-				found = true
-				break
-			}
-		}
+		found := slices.ContainsFunc(token.Audience, tp.audiencePattern.MatchString)
 		if !found {
 			return act, status.Errorf(codes.PermissionDenied, "trust policy: audience_pattern %q did not match any of %q", tp.AudiencePattern, token.Audience)
 		}
@@ -204,7 +216,7 @@ func (tp *TrustPolicy) CheckToken(token *oidc.IDToken, domain string) (Actor, er
 
 	// Check the claims.
 	if len(tp.claimPattern) != 0 {
-		customClaims := make(map[string]interface{})
+		customClaims := make(map[string]any)
 		if err := token.Claims(&customClaims); err != nil {
 			return act, err
 		}

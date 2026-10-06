@@ -100,8 +100,8 @@ func IsValidIssuer(iss string) bool {
 			return false
 		}
 		// Additional validation: each path segment should be reasonable
-		segments := strings.Split(parsedURL.Path, "/")
-		for _, segment := range segments {
+		segments := strings.SplitSeq(parsedURL.Path, "/")
+		for segment := range segments {
 			if segment == "" {
 				continue // Skip empty segments (like the first one after leading /)
 			}
@@ -219,5 +219,25 @@ func isValidHostname(hostname string) bool {
 		}
 	}
 
+	return true
+}
+
+// IsValidIdentity reports whether identity is safe to interpolate into the
+// trust-policy path .github/chainguard/<identity>.sts.yaml. It must be a single
+// path segment: no "/", which would nest into a subdirectory the webhook glob
+// never validates, and not "." or ".." which would traverse the repo. This
+// keeps the policy set the exchange fetches aligned with the top-level set the
+// webhook validates.
+func IsValidIdentity(identity string) bool {
+	if identity == "" || identity == "." || identity == ".." {
+		return false
+	}
+	if strings.ContainsRune(identity, '/') {
+		return false
+	}
+	// Control characters and whitespace have no place in a path segment.
+	if strings.ContainsAny(identity, controlCharsAndWhitespace) {
+		return false
+	}
 	return true
 }

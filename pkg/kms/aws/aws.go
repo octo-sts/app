@@ -23,11 +23,11 @@ type signingMethodAWS struct {
 	client *kms.Client
 }
 
-func (s *signingMethodAWS) Verify(signingString, signature string, key interface{}) error {
+func (s *signingMethodAWS) Verify(signingString, signature string, key any) error {
 	return errors.New("not implemented")
 }
 
-func (s *signingMethodAWS) Sign(signingString string, ikey interface{}) (string, error) {
+func (s *signingMethodAWS) Sign(signingString string, ikey any) (string, error) {
 	key, ok := ikey.(string)
 	if !ok {
 		return "", fmt.Errorf("invalid key reference type: %T", ikey)

@@ -18,6 +18,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/octo-sts/app/pkg/maxsize"
 	"github.com/octo-sts/app/pkg/oidcvalidate"
+	"golang.org/x/sync/singleflight"
 )
 
 // MaximumResponseSize is the maximum size of allowed responses from
@@ -27,16 +28,54 @@ import (
 //   - Chainguard: needs around 2KiB
 const MaximumResponseSize = 100 * 1024 // 100KiB
 
+// discoveryTimeout bounds a single shared discovery, independent of any one
+// caller's own context. Discovery is single-flighted across concurrent
+// callers (see discoveryFlight below), so it must not be tied to any single
+// caller's deadline: an unrelated caller's short timeout must not abort
+// discovery for other callers sharing the same issuer, and a genuinely
+// stalled issuer must not hold the shared call open forever either.
+//
+// A var rather than a const solely so tests can override it.
+var discoveryTimeout = 20 * time.Second
+
+// negativeCacheTTL bounds how long a failed discovery is remembered before
+// the issuer is probed again. It must stay short enough that a genuinely
+// recovering issuer is not punished for long.
+var negativeCacheTTL = 5 * time.Second
+
+// negativeCacheCapacity bounds the number of distinct failing issuers
+// remembered at once, matching the providers cache below. issuer is
+// attacker-controlled (it comes from an unverified bearer token), so the
+// cache must be bounded rather than a plain unbounded map -- otherwise an
+// attacker supplying arbitrarily many distinct failing issuer strings
+// causes unbounded memory growth.
+const negativeCacheCapacity = 100
+
 var (
 	// providers is an LRU cache of recently used providers.
 	providers, _ = lru.New2Q[string, VerifierProvider](100)
+
+	// discoveryFlight collapses concurrent Get calls for the same issuer
+	// into a single in-flight discovery, so N callers naming a slow or
+	// stalled issuer pay for one discovery instead of N.
+	discoveryFlight singleflight.Group
+
+	// negativeCache remembers issuers whose discovery recently failed, so a
+	// stalling or failing issuer is not re-probed on every request during
+	// the failure window.
+	negativeCache, _ = lru.New2Q[string, negativeCacheEntry](negativeCacheCapacity)
 )
+
+type negativeCacheEntry struct {
+	err       error
+	expiresAt time.Time
+}
 
 type VerifierProvider interface {
 	Verifier(config *oidc.Config) *oidc.IDTokenVerifier
 }
 
-func Get(ctx context.Context, issuer string) (provider VerifierProvider, err error) {
+func Get(ctx context.Context, issuer string) (VerifierProvider, error) {
 	// Return any verifiers that we have already constructed
 	// to avoid paying for discovery again.
 	if v, ok := providers.Get(issuer); ok {
@@ -44,31 +83,96 @@ func Get(ctx context.Context, issuer string) (provider VerifierProvider, err err
 		return v, nil
 	}
 
-	ctx = oidc.ClientContext(ctx, &http.Client{
-		Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			// Validate redirect destination using same rules as original issuer
-			if !oidcvalidate.IsValidIssuer(req.URL.String()) {
-				return fmt.Errorf("redirect destination %q failed issuer validation", req.URL.String())
-			}
-			return nil
-		},
-	})
-
-	// Verify the token before we trust anything about it.
-	provider, err = newProviderWithRetry(ctx, issuer)
-	if err != nil {
-		return nil, fmt.Errorf("constructing %q provider: %w", issuer, err)
+	if err, ok := getNegativeCache(issuer); ok {
+		clog.InfoContext(ctx, "found issuer in negative cache", "error", err)
+		return nil, err
 	}
-
-	// Once it is built, memoize the provider so that we hit the fast
-	// path above on subsequent requests for verification.
-	providers.Add(issuer, provider)
-
-	return provider, nil
+	return getAfterCacheMiss(ctx, issuer)
 }
 
-// newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic
+// getAfterCacheMiss joins the issuer's discovery flight. A caller can be
+// descheduled between Get's cache checks and joining the flight; if the prior
+// flight has finished by then, the new leader must check both caches again.
+func getAfterCacheMiss(ctx context.Context, issuer string) (VerifierProvider, error) {
+	// Concurrent Get calls for the same issuer collapse into one discovery,
+	// so the shared discovery runs on its own context bounded only by
+	// discoveryTimeout -- not on any single caller's context. Using DoChan
+	// (rather than Do) means the shared call also keeps running in its own
+	// goroutine even if the caller that happens to trigger it stops
+	// waiting, so other callers sharing the issuer are unaffected either
+	// way.
+	ch := discoveryFlight.DoChan(issuer, func() (any, error) {
+		if p, ok := providers.Get(issuer); ok {
+			return p, nil
+		}
+		if err, ok := getNegativeCache(issuer); ok {
+			return nil, err
+		}
+
+		discoveryCtx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
+		defer cancel()
+		discoveryCtx = oidc.ClientContext(discoveryCtx, &http.Client{
+			Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				// Validate redirect destination using same rules as original issuer
+				if !oidcvalidate.IsValidIssuer(req.URL.String()) {
+					return fmt.Errorf("redirect destination %q failed issuer validation", req.URL.String())
+				}
+				return nil
+			},
+		})
+		p, err := newProviderWithRetry(discoveryCtx, issuer)
+		if err != nil {
+			wrapped := fmt.Errorf("constructing %q provider: %w", issuer, err)
+			// discoveryCtx is independent of any caller, so this error
+			// (including a context.DeadlineExceeded from discoveryTimeout
+			// itself) reflects the issuer, never a caller giving up early.
+			// It is safe to negative-cache here in a way it would not be
+			// if this ran on a caller's own context.
+			setNegativeCache(issuer, wrapped)
+			return nil, wrapped
+		}
+		// Memoize here, inside the shared flight, so a successful
+		// discovery is cached exactly once regardless of whether the
+		// caller that triggered it is still waiting for the result.
+		providers.Add(issuer, p)
+		return p, nil
+	})
+
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(VerifierProvider), nil
+	case <-ctx.Done():
+		// This caller's own context expired while waiting; the shared
+		// discovery keeps running in the background for any other callers,
+		// and memoizes its own result if it succeeds.
+		return nil, ctx.Err()
+	}
+}
+
+// getNegativeCache returns the cached error for issuer, if discovery failed
+// for it within the last negativeCacheTTL. An expired entry is not returned.
+func getNegativeCache(issuer string) (error, bool) {
+	entry, ok := negativeCache.Get(issuer)
+	if !ok || time.Now().After(entry.expiresAt) {
+		return nil, false
+	}
+	return entry.err, true
+}
+
+// setNegativeCache remembers that discovery failed for issuer, for up to
+// negativeCacheTTL.
+func setNegativeCache(issuer string, err error) {
+	negativeCache.Add(issuer, negativeCacheEntry{
+		err:       err,
+		expiresAt: time.Now().Add(negativeCacheTTL),
+	})
+}
+
+// newProviderWithRetry creates a new OIDC provider with exponential backoff retry logic.
 func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider, error) {
 	attempt := 0
 

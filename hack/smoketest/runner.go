@@ -144,8 +144,8 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	checkRun, _, err := ghc1.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
 		Name:       "octo-sts-sticky-routing-test",
 		HeadSHA:    headSHA,
-		Status:     github.Ptr("completed"),
-		Conclusion: github.Ptr("success"),
+		Status:     new("completed"),
+		Conclusion: new("success"),
 	})
 	if err != nil {
 		result.Error = fmt.Sprintf("creating check run: %v", err)
@@ -156,11 +156,11 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	defer func() {
 		if _, _, err := ghc1.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
-			Status:     github.Ptr("completed"),
-			Conclusion: github.Ptr("neutral"),
+			Status:     new("completed"),
+			Conclusion: new("neutral"),
 			Output: &github.CheckRunOutput{
-				Title:   github.Ptr("Sticky routing smoke test"),
-				Summary: github.Ptr("Automated test to verify sticky routing. Can be ignored."),
+				Title:   new("Sticky routing smoke test"),
+				Summary: new("Automated test to verify sticky routing. Can be ignored."),
 			},
 		}); err != nil {
 			clog.FromContext(ctx).Warnf("failed to clean up check run %d: %v", checkRun.GetID(), err)
@@ -183,8 +183,8 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 		}
 		_, _, updateErr := ghcN.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
-			Status:     github.Ptr("completed"),
-			Conclusion: github.Ptr("success"),
+			Status:     new("completed"),
+			Conclusion: new("success"),
 		})
 
 		if rErr := octosts.Revoke(ctx, tokenN, ""); rErr != nil {

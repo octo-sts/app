@@ -14,7 +14,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -26,7 +25,6 @@ import (
 
 	v1 "chainguard.dev/sdk/proto/platform/oidc/v1"
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/chainguard-dev/clog"
 	cloudevents "github.com/cloudevents/sdk-go/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-jose/go-jose/v4"
@@ -37,6 +35,7 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/octo-sts/app/internal/logtest"
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
 )
@@ -106,8 +105,7 @@ func TestCacheOrgIssuerEntryWarnsOnEnforcementRemoved(t *testing.T) {
 
 	// Capture the log output via a real slog handler wired through clog, so
 	// the warning itself — not just the state it keys off — is asserted.
-	var logs bytes.Buffer
-	ctx := clog.WithLogger(t.Context(), clog.New(slog.NewTextHandler(&logs, nil)))
+	ctx, logs := logtest.Capture(t)
 
 	// Present first, so staleOrgIssuers holds an enforcing entry...
 	cacheOrgIssuerEntry(ctx, "o-transition", presentOrgIssuerEntry(allow))
@@ -562,7 +560,7 @@ func TestFetchOrgIssuersOnceMintsLeastPrivilegeToken(t *testing.T) {
 	want := &github.InstallationTokenOptions{
 		Repositories: []string{".github"},
 		Permissions: &github.InstallationPermissions{
-			Contents: ptr("read"),
+			Contents: new("read"),
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -613,8 +611,8 @@ func newOrgFakeGitHub(opts ...orgFakeGitHubOption) *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", routes.mint)
@@ -655,7 +653,7 @@ func defaultOrgFakeMint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(github.InstallationToken{
-		Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+		Token:     new(base64.StdEncoding.EncodeToString(b)),
 		ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 	})
 }
@@ -671,7 +669,7 @@ func defaultOrgFakeContents(w http.ResponseWriter, r *http.Request) {
 	// os.IsNotExist and would fall into the 500 branch instead.
 	if r.PathValue("org") == "orgdir" && r.PathValue("identity") == "trusted-token-issuers.yaml" {
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("placeholder")},
+			{Type: new("file"), Name: new("placeholder")},
 		})
 		return
 	}
@@ -688,9 +686,9 @@ func defaultOrgFakeContents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(github.RepositoryContent{
-		Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
-		Type:     github.Ptr("file"),
-		Encoding: github.Ptr("base64"),
+		Content:  new(base64.StdEncoding.EncodeToString(b)),
+		Type:     new("file"),
+		Encoding: new("base64"),
 	})
 }
 
@@ -714,7 +712,7 @@ func withNoGitHubRepoAccess() orgFakeGitHubOption {
 				return
 			}
 			json.NewEncoder(w).Encode(github.InstallationToken{
-				Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+				Token:     new(base64.StdEncoding.EncodeToString(b)),
 				ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 			})
 		}
@@ -789,14 +787,19 @@ type enumMgr struct {
 	// the cheap enumeration. Set freshInstalls to a superset to model an App
 	// installed within the negative-cache TTL.
 	//
-	// Precedence is freshErr, then freshInstalls, then a fallback that mirrors
-	// GetAll exactly — installs AND err. So a fake that sets only err is a failed
-	// enumeration on BOTH paths rather than one that reports success on the
-	// confirm, while a fake that sets freshInstalls says "the confirm sees this,
-	// successfully" and err stays scoped to GetAll.
+	// When either freshErr or freshInstalls is set, GetAllFresh returns both
+	// (set both to model a partial fresh enumeration); otherwise it falls back
+	// to mirroring GetAll exactly — installs AND err. So a fake that sets only
+	// err is a failed enumeration on BOTH paths rather than one that reports
+	// success on the confirm, while a fake that sets only freshInstalls says
+	// "the confirm sees this, successfully" and err stays scoped to GetAll.
 	freshInstalls []ghinstall.Installation
 	freshErr      error
 	freshCalls    atomic.Int32
+
+	// freshGate, when set, blocks GetAllFresh until closed — for tests that
+	// pile up concurrent callers behind one in-flight walk.
+	freshGate chan struct{}
 }
 
 func (e *enumMgr) Get(_ context.Context, _, _, _ string) (*ghinstallation.AppsTransport, int64, error) {
@@ -822,11 +825,11 @@ func (e *enumMgr) GetAll(_ context.Context, _ string) ([]ghinstall.Installation,
 
 func (e *enumMgr) GetAllFresh(_ context.Context, _ string) ([]ghinstall.Installation, error) {
 	e.freshCalls.Add(1)
-	if e.freshErr != nil {
-		return nil, e.freshErr
+	if e.freshGate != nil {
+		<-e.freshGate
 	}
-	if e.freshInstalls != nil {
-		return e.freshInstalls, nil
+	if e.freshErr != nil || e.freshInstalls != nil {
+		return e.freshInstalls, e.freshErr
 	}
 	return e.installs, e.err
 }
@@ -1417,7 +1420,7 @@ func TestExchangeEnforcesOrgAllowlist(t *testing.T) {
 
 			_, err := s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    tc.owner + "/repo",
+				Scopes:   []string{tc.owner + "/repo"},
 			})
 			if tc.wantCode == codes.OK {
 				if err != nil {
@@ -1467,7 +1470,7 @@ func TestExchangeAllowlistIsCached(t *testing.T) {
 	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
 
 	for i := range 2 {
-		if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "org/repo"}); err != nil {
+		if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}}); err != nil {
 			t.Fatalf("Exchange() attempt %d = %v", i+1, err)
 		}
 	}
@@ -1500,7 +1503,7 @@ func (c *captureCEClient) Request(_ context.Context, _ cloudevents.Event) (*clou
 	return nil, nil
 }
 
-func (c *captureCEClient) StartReceiver(_ context.Context, _ interface{}) error { return nil }
+func (c *captureCEClient) StartReceiver(_ context.Context, _ any) error { return nil }
 
 func (c *captureCEClient) sent() []cloudevents.Event {
 	c.mu.Lock()
@@ -1525,7 +1528,7 @@ func TestExchangeRecordsAuditDecisionOnEvent(t *testing.T) {
 	ctx := newExchangeContext(t)
 	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1), ceclient: ce, metrics: true}
 
-	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "orgaudit/repo"}); err != nil {
+	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"orgaudit/repo"}}); err != nil {
 		t.Fatalf("Exchange() = %v, want success (audit mode never denies)", err)
 	}
 
@@ -1598,7 +1601,7 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 
 	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "orgallow/repo",
+		Scopes:   []string{"orgallow/repo"},
 	}); err == nil {
 		t.Fatal("Exchange() = nil, want an error for an owner with no installation")
 	}

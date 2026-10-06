@@ -4,6 +4,7 @@
 package ghinstall
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -29,6 +30,8 @@ import (
 	"github.com/google/go-github/v88/github"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+
+	"github.com/octo-sts/app/internal/logtest"
 )
 
 func TestGet(t *testing.T) {
@@ -39,9 +42,9 @@ func TestGet(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("my-org"),
+					Login: new("my-org"),
 				},
 			}})
 		default:
@@ -77,9 +80,9 @@ func TestGetCached(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("cached-org"),
+					Login: new("cached-org"),
 				},
 			}})
 		default:
@@ -120,9 +123,9 @@ func TestGetNotFound(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -169,8 +172,8 @@ func TestRoundRobin(t *testing.T) {
 			switch r.URL.Path {
 			case "/app/installations":
 				json.NewEncoder(w).Encode([]github.Installation{{
-					ID:      github.Ptr(installID),
-					Account: &github.User{Login: github.Ptr("my-org")},
+					ID:      new(installID),
+					Account: &github.User{Login: new("my-org")},
 				}})
 			default:
 				w.WriteHeader(http.StatusNotImplemented)
@@ -215,8 +218,8 @@ func TestRoundRobinFallback(t *testing.T) {
 		switch r.URL.Path {
 		case "/app/installations":
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("my-org")},
+				ID:      new(installID),
+				Account: &github.User{Login: new("my-org")},
 			}})
 		default:
 			w.WriteHeader(http.StatusNotImplemented)
@@ -311,8 +314,8 @@ func makeManagersWithDistinctInstalls(t *testing.T, appIDs []int64) ([]Manager, 
 		atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/app/installations" {
 				_ = json.NewEncoder(w).Encode([]github.Installation{{
-					ID:      github.Ptr(installID),
-					Account: &github.User{Login: github.Ptr(testOwner)},
+					ID:      new(installID),
+					Account: &github.User{Login: new(testOwner)},
 				}})
 				return
 			}
@@ -386,9 +389,9 @@ func TestGetNotFoundCached(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -437,9 +440,9 @@ func TestGetNotFoundCacheExpires(t *testing.T) {
 		case "/app/installations":
 			calls++
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(int64(1)),
+				ID: new(int64(1)),
 				Account: &github.User{
-					Login: github.Ptr("other-org"),
+					Login: new("other-org"),
 				},
 			}})
 		default:
@@ -538,9 +541,9 @@ func TestGetWithBaseURL(t *testing.T) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/app/installations"):
 			json.NewEncoder(w).Encode([]github.Installation{{
-				ID: github.Ptr(installID),
+				ID: new(installID),
 				Account: &github.User{
-					Login: github.Ptr("my-org"),
+					Login: new("my-org"),
 				},
 			}})
 		default:
@@ -589,10 +592,10 @@ func newTestClient(t *testing.T, h http.Handler, appIDs ...int64) *ghinstallatio
 
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		DialTLS: func(network, addr string) (net.Conn, error) {
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "https://"), tlsConfig)
 		},
-		Dial: func(network, addr string) (net.Conn, error) {
+		DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "http://"), tlsConfig)
 		},
 	}
@@ -660,7 +663,7 @@ func TestManagerGetAll(t *testing.T) {
 		if r.URL.Path == "/app/installations" {
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -771,6 +774,16 @@ func (s *stubManager) GetAllFresh(_ context.Context, _ string) ([]Installation, 
 }
 
 var _ Manager = (*stubManager)(nil)
+
+type cancelingManager struct {
+	stubManager
+	cancel context.CancelFunc
+}
+
+func (m *cancelingManager) GetAllFresh(context.Context, string) ([]Installation, error) {
+	m.cancel()
+	return nil, status.Errorf(codes.Internal, "listing installations: %v", context.Canceled)
+}
 
 func TestRoundRobinGetAll(t *testing.T) {
 	t.Run("concatenates and dedups", func(t *testing.T) {
@@ -928,7 +941,7 @@ func TestManagerGetAllFreshBypassesNegativeCache(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -996,7 +1009,7 @@ func TestManagerGetAllFreshUsesPositiveCache(t *testing.T) {
 			listCalls.Add(1)
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}
@@ -1104,16 +1117,23 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	})
 
 	t.Run("one manager failing yields a partial result AND an error", func(t *testing.T) {
+		ctx, logs := logtest.Capture(t)
 		rr := NewRoundRobin([]Manager{
 			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
 			&stubManager{freshErr: errors.New("boom")},
 		})
-		got, err := rr.GetAllFresh(context.Background(), "org")
+		got, err := rr.GetAllFresh(ctx, "org")
 		if err == nil {
 			t.Fatal("GetAllFresh() = nil error, want an error for a partial enumeration")
 		}
+		if status.Code(err) != codes.Unavailable {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Unavailable)
+		}
 		if len(got) != 1 {
 			t.Errorf("GetAllFresh() returned %d installations, want the 1 that succeeded", len(got))
+		}
+		if !bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Error("GetAllFresh() did not log the incomplete enumeration")
 		}
 	})
 
@@ -1131,7 +1151,8 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 	// GetAll and GetAllFresh share one aggregation helper, so this covers the
 	// cancellation bail-out for both.
 	t.Run("a cancelled context bails instead of collecting N identical errors", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
+		ctx, logs := logtest.Capture(t)
+		ctx, cancel := context.WithCancel(ctx)
 		cancel()
 
 		rr := NewRoundRobin([]Manager{
@@ -1142,8 +1163,67 @@ func TestRoundRobinGetAllFresh(t *testing.T) {
 		if err == nil {
 			t.Fatal("GetAllFresh() = nil error, want the cancellation")
 		}
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
 		if len(got) != 0 {
 			t.Errorf("GetAllFresh() returned %d installations, want 0 — it must bail before querying any manager", len(got))
+		}
+		if bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Error("GetAllFresh() logged an incomplete enumeration for cancellation")
+		}
+	})
+
+	t.Run("an expired deadline preserves its status", func(t *testing.T) {
+		ctx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Second))
+		defer cancel()
+
+		rr := NewRoundRobin([]Manager{&stubManager{}})
+		got, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.DeadlineExceeded {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.DeadlineExceeded)
+		}
+		if len(got) != 0 {
+			t.Errorf("GetAllFresh() returned %d installations, want 0", len(got))
+		}
+	})
+
+	t.Run("mid-walk cancellation returns partial results", func(t *testing.T) {
+		ctx, logs := logtest.Capture(t)
+		ctx, cancel := context.WithCancel(ctx)
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshInstalls: []Installation{{ID: 1, AppID: 10}}},
+			&cancelingManager{cancel: cancel},
+			&stubManager{freshInstalls: []Installation{{ID: 3, AppID: 30}}},
+		})
+		got, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
+		if len(got) != 1 || got[0].ID != 1 {
+			t.Errorf("GetAllFresh() = %v, want only installation 1", got)
+		}
+		if bytes.Contains(logs.Bytes(), []byte("enumeration incomplete")) {
+			t.Errorf("GetAllFresh() logged an incomplete enumeration for cancellation: %s", logs.Bytes())
+		}
+	})
+
+	t.Run("a genuine failure before cancellation is kept and logged", func(t *testing.T) {
+		ctx, logs := logtest.Capture(t)
+		ctx, cancel := context.WithCancel(ctx)
+		rr := NewRoundRobin([]Manager{
+			&stubManager{freshErr: errors.New("boom")},
+			&cancelingManager{cancel: cancel},
+		})
+		_, err := rr.GetAllFresh(ctx, "org")
+		if status.Code(err) != codes.Canceled {
+			t.Errorf("GetAllFresh() code = %v, want %v", status.Code(err), codes.Canceled)
+		}
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Errorf("GetAllFresh() = %v, want the genuine failure in the message", err)
+		}
+		if !bytes.Contains(logs.Bytes(), []byte("1 of 2 managers failed")) {
+			t.Errorf("GetAllFresh() log = %q, want 1 of 2 managers failed", logs.String())
 		}
 	})
 }
@@ -1171,7 +1251,7 @@ func TestManagerGetAllFreshRepairsCoexistingCacheEntries(t *testing.T) {
 			listCalls.Add(1)
 			_ = json.NewEncoder(w).Encode([]github.Installation{{
 				ID:      github.Ptr(installID),
-				Account: &github.User{Login: github.Ptr("org")},
+				Account: &github.User{Login: new("org")},
 			}})
 			return
 		}

@@ -103,15 +103,7 @@ func (c *OrgTrustedIssuers) Compile() (*IssuerAllowlist, error) {
 		if err := checkPatternCannotSpanHost(i, p); err != nil {
 			return nil, err
 		}
-		// Compile p ALONE first: the group below hides an unbalanced ")", so
-		// "token\.example\.com)|(" wraps to "^(?:token\.example\.com)|()$", whose "()$"
-		// alternative matches everything. A legitimate top-level "a|b" still compiles.
-		if _, err := regexp.Compile(p); err != nil {
-			return nil, fmt.Errorf("invalid issuer_pattern %q: %w", p, err)
-		}
-		// Non-capturing group required: "|" binds looser than the anchors, so
-		// "^"+p+"$" parses as "(^A)|(B$)", leaving an alternation unanchored.
-		re, err := regexp.Compile("^(?:" + p + ")$")
+		re, err := compileAnchored(p)
 		if err != nil {
 			return nil, fmt.Errorf("invalid issuer_pattern %q: %w", p, err)
 		}

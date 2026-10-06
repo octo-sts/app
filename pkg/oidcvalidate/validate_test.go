@@ -519,3 +519,33 @@ func TestIsValidAudience(t *testing.T) {
 		})
 	}
 }
+
+func TestIsValidIdentity(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		identity string
+		want     bool
+	}{
+		{"simple", "foo", true},
+		{"hyphen", "my-bot", true},
+		{"underscore", "my_bot", true},
+		{"dotted name", "foo.bar", true},
+		{"digits", "bot123", true},
+		{"empty", "", false},
+		{"dot", ".", false},
+		{"dotdot", "..", false},
+		{"nested", "sub/foo", false},
+		{"traversal", "../secrets", false},
+		{"deep nested", "a/b/c", false},
+		{"leading slash", "/foo", false},
+		{"trailing slash", "foo/", false},
+		{"newline", "foo\nbar", false},
+		{"space", "foo bar", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsValidIdentity(tc.identity); got != tc.want {
+				t.Errorf("IsValidIdentity(%q) = %v, want %v", tc.identity, got, tc.want)
+			}
+		})
+	}
+}

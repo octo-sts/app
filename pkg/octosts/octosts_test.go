@@ -15,8 +15,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math/big"
 	"net"
 	"net/http"
@@ -43,6 +45,9 @@ import (
 
 	"github.com/octo-sts/app/pkg/ghinstall"
 	"github.com/octo-sts/app/pkg/provider"
+	"github.com/octo-sts/app/pkg/routekey"
+	"github.com/octo-sts/app/pkg/stickystore"
+	"github.com/octo-sts/app/pkg/stickystore/memory"
 )
 
 type fakeInstallMgr struct {
@@ -79,9 +84,9 @@ func newFakeGitHub() *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID: github.Ptr(int64(1234)),
+			ID: new(int64(1234)),
 			Account: &github.User{
-				Login: github.Ptr("org"),
+				Login: new("org"),
 			},
 		}})
 	})
@@ -93,7 +98,7 @@ func newFakeGitHub() *fakeGitHub {
 		}
 
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -107,7 +112,7 @@ func newFakeGitHub() *fakeGitHub {
 		// is not os.IsNotExist and would fall into the 500 branch instead.
 		if r.PathValue("org") == "orgdir" && r.PathValue("identity") == "trusted-token-issuers.yaml" {
 			json.NewEncoder(w).Encode([]*github.RepositoryContent{
-				{Type: github.Ptr("file"), Name: github.Ptr("placeholder")},
+				{Type: new("file"), Name: new("placeholder")},
 			})
 			return
 		}
@@ -126,9 +131,9 @@ func newFakeGitHub() *fakeGitHub {
 			return
 		}
 		json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  github.Ptr(base64.StdEncoding.EncodeToString(b)),
-			Type:     github.Ptr("file"),
-			Encoding: github.Ptr("base64"),
+			Content:  new(base64.StdEncoding.EncodeToString(b)),
+			Type:     new("file"),
+			Encoding: new("base64"),
 		})
 	})
 	// Revoke() posts to this path, but it does NOT reach this fake. Revoke's URL
@@ -177,8 +182,8 @@ func newFakeGitHubNoContents() *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("other-org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("other-org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +193,7 @@ func newFakeGitHubNoContents() *fakeGitHub {
 			return
 		}
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -248,12 +253,12 @@ func TestExchange(t *testing.T) {
 			name: "repo",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			},
 			want: &github.InstallationTokenOptions{
 				Repositories: []string{"repo"},
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.Ptr("write"),
+					PullRequests: new("write"),
 				},
 			},
 		},
@@ -261,11 +266,11 @@ func TestExchange(t *testing.T) {
 			name: "org",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "org",
+				Scopes:   []string{"org"},
 			},
 			want: &github.InstallationTokenOptions{
 				Permissions: &github.InstallationPermissions{
-					PullRequests: github.Ptr("write"),
+					PullRequests: new("write"),
 				},
 			},
 		},
@@ -288,6 +293,84 @@ func TestExchange(t *testing.T) {
 				t.Error(diff)
 			}
 		})
+	}
+}
+
+// TestExchangeMismatchDoesNotLeakPolicy verifies that a caller whose token does
+// not match a trust policy learns nothing about the policy's contents: neither
+// the patterns CheckToken compared against nor the app pin, which used to be
+// resolved (and its error returned) before the token was checked.
+func TestExchangeMismatchDoesNotLeakPolicy(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "private"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "repo:attacker/whatever:ref:refs/heads/main",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: newAppsTransport(t, newFakeGitHub())},
+		AppCount: 1,
+	}
+	ce := &captureCEClient{}
+	sts := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool}), ceclient: ce, metrics: true}
+
+	_, err = sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "private", Scopes: []string{"org/repo"}})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("Exchange() code = %v, want PermissionDenied; err = %v", got, err)
+	}
+	if got, want := status.Convert(err).Message(), "token does not match trust policy"; got != want {
+		t.Errorf("Exchange() message = %q, want %q", got, want)
+	}
+
+	// The operator-facing audit event keeps the detail the caller does not get.
+	sent := ce.sent()
+	if len(sent) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(sent))
+	}
+	var ev Event
+	if err := json.Unmarshal(sent[0].Data(), &ev); err != nil {
+		t.Fatalf("decoding event data: %v", err)
+	}
+	if !strings.Contains(ev.Error, "secret-internal-repo") {
+		t.Errorf("Event.Error = %q, want the detailed mismatch reason", ev.Error)
+	}
+	if ev.InstallationID != 1234 {
+		t.Errorf("Event.InstallationID = %d, want 1234 (the installation that read the policy)", ev.InstallationID)
+	}
+
+	// A malformed policy must be indistinguishable from a missing one.
+	_, missing := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "does-not-exist", Scopes: []string{"org/repo"}})
+	_, malformed := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "malformed", Scopes: []string{"org/repo"}})
+	for _, id := range []string{"does-not-exist", "malformed"} {
+		k := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: id}
+		t.Cleanup(func() { trustPolicies.Remove(k) })
+	}
+	if status.Code(missing) != codes.NotFound {
+		t.Fatalf("Exchange(missing) = %v, want NotFound", missing)
+	}
+	if got, want := strings.ReplaceAll(status.Convert(malformed).Message(), "malformed", "does-not-exist"), status.Convert(missing).Message(); status.Code(malformed) != codes.NotFound || got != want {
+		t.Errorf("Exchange(malformed) = %v, want same response as missing policy (%v)", malformed, missing)
 	}
 }
 
@@ -338,7 +421,7 @@ func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
 
 	tok, err := sts.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org",
+		Scopes:   []string{"org"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v", err)
@@ -356,7 +439,7 @@ func TestExchangeCustomOrgPolicyRepo(t *testing.T) {
 	// test would fail if the lookup silently fell back to the default repo.
 	want := &github.InstallationTokenOptions{
 		Permissions: &github.InstallationPermissions{
-			Contents: github.Ptr("read"),
+			Contents: new("read"),
 		},
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -410,21 +493,42 @@ func TestExchangeValidation(t *testing.T) {
 			name: "empty scope",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
-				Scope:    "",
+				Scope:    "", //nolint:staticcheck // exercises deprecated Scope fallback (case 0)
 			},
 		},
 		{
 			name: "empty identity",
 			req: &v1.ExchangeRequest{
 				Identity: "",
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			},
 		},
 		{
 			name: "both empty",
 			req: &v1.ExchangeRequest{
 				Identity: "",
-				Scope:    "",
+				Scope:    "", //nolint:staticcheck // exercises deprecated Scope fallback (case 0)
+			},
+		},
+		{
+			name: "nested identity",
+			req: &v1.ExchangeRequest{
+				Identity: "sub/foo",
+				Scopes:   []string{"org/repo"},
+			},
+		},
+		{
+			name: "traversal identity",
+			req: &v1.ExchangeRequest{
+				Identity: "../secrets",
+				Scopes:   []string{"org/repo"},
+			},
+		},
+		{
+			name: "dotdot identity",
+			req: &v1.ExchangeRequest{
+				Identity: "..",
+				Scopes:   []string{"org/repo"},
 			},
 		},
 		{
@@ -454,9 +558,9 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID: github.Ptr(int64(1234)),
+			ID: new(int64(1234)),
 			Account: &github.User{
-				Login: github.Ptr("org"),
+				Login: new("org"),
 			},
 		}})
 	})
@@ -468,7 +572,7 @@ func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 		}
 
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -570,7 +674,7 @@ func TestExchangeRateLimit(t *testing.T) {
 			s := &sts{router: router}
 			_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 				Identity: tc.identity,
-				Scope:    "org/repo",
+				Scopes:   []string{"org/repo"},
 			})
 			if err == nil {
 				t.Fatal("expected error, got nil")
@@ -692,7 +796,7 @@ func TestPolicyReadUsesRoundRobin(t *testing.T) {
 	// Trust policy lives on the rrm server.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v — policy read did not use rrm transport", err)
@@ -705,9 +809,13 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
 	})
 
 	orgIssuers.Add("org", absentOrgIssuerEntry())
@@ -754,7 +862,7 @@ func TestPolicyReadRetriesOnRateLimit(t *testing.T) {
 	// working transport. Exchange should succeed.
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange failed: %v — rate-limit retry did not recover", err)
@@ -767,9 +875,13 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
 	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
 	t.Cleanup(func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
 	})
 
 	orgIssuers.Add("org", absentOrgIssuerEntry())
@@ -814,7 +926,7 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	s := &sts{router: router}
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error, got nil — all apps are rate-limited")
@@ -828,15 +940,16 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 	}
 }
 
-// newFakeGitHubNotFoundCounter returns a fake GitHub server that returns 404
-// for content requests and counts how many times the endpoint was hit.
-func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
-	var counter atomic.Int32
+// newFakeGitHubForbidden returns a fake GitHub whose policy read answers with a
+// bare 403 carrying no rate-limit headers, so go-github surfaces a plain
+// *github.ErrorResponse rather than a *RateLimitError. This is the
+// permission-denied case of issue #1320, distinct from newFakeGitHubRateLimit.
+func newFakeGitHubForbidden() *fakeGitHub {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
-			ID:      github.Ptr(int64(1234)),
-			Account: &github.User{Login: github.Ptr("org")},
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
 		}})
 	})
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
@@ -846,7 +959,120 @@ func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
 			return
 		}
 		json.NewEncoder(w).Encode(github.InstallationToken{
-			Token:     github.Ptr(base64.StdEncoding.EncodeToString(b)),
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		// Keep the org allowlist read out of the way, as newFakeGitHubRateLimit does.
+		if r.PathValue("identity") == "trusted-token-issuers.yaml" {
+			writeGitHubNotFound(w)
+			return
+		}
+		// A bare 403: no X-RateLimit-Remaining, no Retry-After. This is a
+		// permission failure, not a rate limit.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(github.ErrorResponse{
+			Response: &http.Response{StatusCode: http.StatusForbidden},
+			Message:  "Resource not accessible by integration",
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		fmt.Fprintf(io.MultiWriter(w, os.Stdout), "%s %s not implemented\n", r.Method, r.URL.Path)
+	})
+	return &fakeGitHub{mux: mux}
+}
+
+// TestPolicyReadForbiddenDoesNotRotate covers issue #1320's wasteful-rotation
+// impact: a bare 403 on the first app must surface as PermissionDenied without
+// rotating to the next app. The pool's second transport works, so a rotation
+// would succeed; a PermissionDenied result proves the retry loop stopped.
+func TestPolicyReadForbiddenDoesNotRotate(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
+	trustPolicies.Remove(key)
+	staleTrustPolicies.Remove(key)
+	forbiddenPolicies.Remove(key)
+	t.Cleanup(func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+		// A 403 in these tests seeds the forbidden cooldown for org/repo/foo,
+		// a key other tests share; clear it so they do not inherit it.
+		forbiddenPolicies.Remove(key)
+	})
+
+	orgIssuers.Add("org", absentOrgIssuerEntry())
+	t.Cleanup(func() {
+		orgIssuers.Remove("org")
+		staleOrgIssuers.Remove("org")
+	})
+
+	ctx := context.Background()
+	forbiddenAtr := newAppsTransport(t, newFakeGitHubForbidden())
+	workingAtr := newAppsTransport(t, newFakeGitHub())
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "foo",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+	ctx = metadata.NewIncomingContext(ctx, metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool := &ghinstall.OrgPool{
+		M: &sequentialInstallMgr{
+			transports: []*ghinstallation.AppsTransport{forbiddenAtr, workingAtr},
+		},
+		AppCount: 2,
+	}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+	s := &sts{router: router}
+	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
+		Identity: "foo",
+		Scopes:   []string{"org/repo"},
+	})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("code = %v, want PermissionDenied (a 403 must not rotate to the next app); err = %v", got, err)
+	}
+}
+
+// newFakeGitHubNotFoundCounter returns a fake GitHub server that returns 404
+// for content requests and counts how many times the endpoint was hit.
+func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
+	var counter atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode([]github.Installation{{
+			ID:      new(int64(1234)),
+			Account: &github.User{Login: new("org")},
+		}})
+	})
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
@@ -919,7 +1145,10 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
 	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
-	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer)
+	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer, func(*OrgTrustPolicy) error {
+		t.Fatal("authorize called for a negatively cached policy")
+		return nil
+	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -1021,7 +1250,7 @@ func TestExchangeOrgNotConfigured(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "other-org/repo",
+		Scopes:   []string{"other-org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error for unconfigured org")
@@ -1087,7 +1316,7 @@ func TestExchangeOrgIsolation(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "org/repo",
+		Scopes:   []string{"org/repo"},
 	})
 	if err != nil {
 		t.Fatalf("Exchange for org failed: %v", err)
@@ -1100,7 +1329,7 @@ func TestExchangeOrgIsolation(t *testing.T) {
 
 	_, err = s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
-		Scope:    "other-org/repo",
+		Scopes:   []string{"other-org/repo"},
 	})
 	if err == nil {
 		t.Fatal("expected error for other-org (no contents), got nil")
@@ -1138,10 +1367,10 @@ func newAppsTransport(t *testing.T, h http.Handler) *ghinstallation.AppsTranspor
 	// that uses this transport to go through this server, regardless of the URL.
 	transport := &http.Transport{
 		TLSClientConfig: tlsConfig,
-		DialTLS: func(network, addr string) (net.Conn, error) {
+		DialTLSContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "https://"), tlsConfig)
 		},
-		Dial: func(network, addr string) (net.Conn, error) {
+		DialContext: func(_ context.Context, network, addr string) (net.Conn, error) {
 			return tls.Dial(network, strings.TrimPrefix(srv.URL, "http://"), tlsConfig)
 		},
 	}
@@ -1224,4 +1453,536 @@ func TestExtractUserAgent(t *testing.T) {
 			}
 		})
 	}
+}
+
+func poolOf(m ghinstall.Manager) *ghinstall.OrgPool {
+	// Shared by the pin tests in this package, which configure apps 101
+	// (ci-a), 102 (ci-b), 103 (ci-c, from pin_order_test.go and
+	// pin_snapshot_test.go), and 201 (deploy), so mark them all as pool
+	// members. eligibleApps fails closed on a nil AppIDs map, and production
+	// always sets it, so the pool must set it here too.
+	return &ghinstall.OrgPool{M: m, AppCount: 3, AppIDs: map[int64]bool{101: true, 102: true, 103: true, 201: true}}
+}
+
+func TestGetExchangeInstallAppPin(t *testing.T) {
+	ctx := context.Background()
+	pool := poolOf(&enumMgr{installs: []ghinstall.Installation{
+		{ID: 11, AppID: 101},
+		{ID: 12, AppID: 102},
+		{ID: 21, AppID: 201},
+	}})
+	appNames := map[string]int64{"ci-a": 101, "ci-b": 102, "deploy": 201}
+	appIDs := map[int64]bool{101: true, 102: true, 201: true}
+	checksWrite := github.InstallationPermissions{Checks: github.Ptr("write")}
+	stickyKey := routekey.Key("org/repo", "id", "subj")
+
+	compile := func(t *testing.T, tp *TrustPolicy) *TrustPolicy {
+		t.Helper()
+		tp.Issuer = "https://example.com"
+		tp.Subject = "subject"
+		if err := tp.Compile(); err != nil {
+			t.Fatalf("Compile: %v", err)
+		}
+		return tp
+	}
+	exchange := func(t *testing.T, s *sts, pool *ghinstall.OrgPool, tp *TrustPolicy) (int64, error) {
+		t.Helper()
+		_, id, err := s.getExchangeInstall(ctx, pool, "org", "org/repo", "id", "subj", tp, nil, 999)
+		return id, err
+	}
+	seedSticky := func(t *testing.T, id int64) stickystore.Store {
+		t.Helper()
+		store := memory.New()
+		if err := store.Put(ctx, stickyKey, id, "org/repo", "id", "subj"); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	t.Run("no pin returns read installation", func(t *testing.T) {
+		id, err := exchange(t, &sts{}, pool, compile(t, &TrustPolicy{}))
+		if err != nil || id != 999 {
+			t.Fatalf("got (%d, %v), want (999, nil)", id, err)
+		}
+	})
+
+	t.Run("no pin checks:write uses sticky", func(t *testing.T) {
+		s := &sts{sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{Permissions: checksWrite})
+		first, err := exchange(t, s, pool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := exchange(t, s, pool, tp)
+		if err != nil || again != first {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, first)
+		}
+	})
+
+	t.Run("exact app pin", func(t *testing.T) {
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "deploy"}))
+		if err != nil || id != 21 {
+			t.Fatalf("got (%d, %v), want (21, nil)", id, err)
+		}
+	})
+
+	t.Run("numeric app pin", func(t *testing.T) {
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "102"}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want (12, nil)", id, err)
+		}
+	})
+
+	t.Run("unconfigured numeric app pin fails without enumeration", func(t *testing.T) {
+		mgr := &enumMgr{}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		_, err := exchange(t, s, poolOf(mgr), compile(t, &TrustPolicy{App: "999"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+		if got := mgr.freshCalls.Load(); got != 0 {
+			t.Errorf("GetAllFresh called %d times, want 0 (rejected before enumeration)", got)
+		}
+	})
+
+	t.Run("concurrent pin misses share one confirmation walk", func(t *testing.T) {
+		pinMisses.Purge()
+		gate := make(chan struct{})
+		mgr := &enumMgr{freshGate: gate}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		const n = 8
+		var wg sync.WaitGroup
+		errs := make([]error, n)
+		for i := range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _, errs[i] = s.getExchangeInstall(ctx, poolOf(mgr), "flightorg", "flightorg/repo", "id", "subj", tp, nil, 999)
+			}()
+		}
+		// Generous settle time: a goroutine reaching the singleflight after
+		// the gated leader completes would start a second walk and flake the
+		// ==1 assertion.
+		time.Sleep(300 * time.Millisecond)
+		close(gate)
+		wg.Wait()
+		for i, err := range errs {
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Errorf("goroutine %d: got %v, want FailedPrecondition", i, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (coalesced)", got)
+		}
+	})
+
+	t.Run("cancelled caller still records the detached confirmation", func(t *testing.T) {
+		pinMisses.Purge()
+		gate := make(chan struct{})
+		mgr := &enumMgr{freshGate: gate}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		if _, _, err := s.getExchangeInstall(cctx, poolOf(mgr), "detachorg", "detachorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.Canceled {
+			t.Fatalf("got %v, want Canceled", err)
+		}
+
+		missKey := pinMissKey("detachorg", map[int64]bool{201: true})
+		if _, confirmed := pinMisses.Get(missKey); confirmed {
+			t.Fatal("miss confirmed before the walk completed")
+		}
+
+		close(gate)
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			if _, confirmed := pinMisses.Get(missKey); confirmed {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatal("detached confirmation never recorded")
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+
+		if _, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "detachorg", "detachorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition from the recorded confirmation", err)
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1", got)
+		}
+	})
+
+	t.Run("confirmation walk timeout surfaces as Unavailable", func(t *testing.T) {
+		pinMisses.Purge()
+		mgr := &enumMgr{freshErr: status.Error(codes.DeadlineExceeded, "context deadline exceeded")}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		if _, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "timeoutorg", "timeoutorg/repo", "id", "subj", tp, nil, 999); status.Code(err) != codes.Unavailable {
+			t.Fatalf("got %v, want Unavailable for the walk's own timeout", err)
+		}
+	})
+
+	t.Run("unknown app", func(t *testing.T) {
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{App: "ghost"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("pinned app not installed", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: map[string]int64{"ghost": 301}, IDs: map[int64]bool{301: true}}}
+		// ghost/301 is a pool member but has no installation, so the pin must
+		// reach installation enumeration and fail there, not on membership.
+		ghostPool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: map[int64]bool{301: true}}
+		_, err := exchange(t, s, ghostPool, compile(t, &TrustPolicy{App: "ghost"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	assertRotates := func(t *testing.T, s *sts, pool *ghinstall.OrgPool, tp *TrustPolicy) {
+		t.Helper()
+		seen := map[int64]bool{}
+		for range 4 {
+			id, err := exchange(t, s, pool, tp)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id != 11 && id != 12 {
+				t.Fatalf("got %d, want a ci install", id)
+			}
+			seen[id] = true
+		}
+		if !seen[11] || !seen[12] {
+			t.Fatalf("picks welded to %v, want rotation across both ci installs", seen)
+		}
+	}
+
+	t.Run("pattern pin rotates across candidates without quota data", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		assertRotates(t, s, pool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
+	})
+
+	t.Run("pattern pin prefers quota headroom", func(t *testing.T) {
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		qstore.Update(11, 100, 15000)
+		qstore.Update(12, 12000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: appIDs, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		id, err := exchange(t, s, qpool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want headroom pick (12, nil)", id, err)
+		}
+	})
+
+	t.Run("sticky pin ignores quota for deterministic assignment", func(t *testing.T) {
+		idx := routekey.Index("org/repo", "id", "subj", 2)
+		expected := []int64{11, 12}[idx]
+		other := []int64{12, 11}[idx]
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		// Quota argmax favors the OTHER install; sticky assignment must stay
+		// deterministic so concurrent replicas agree.
+		qstore.Update(expected, 100, 15000)
+		qstore.Update(other, 14000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: appIDs, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		id, err := exchange(t, s, qpool, tp)
+		if err != nil || id != expected {
+			t.Fatalf("got (%d, %v), want deterministic (%d, nil) despite quota favoring %d", id, err, expected, other)
+		}
+		again, err := exchange(t, s, qpool, tp)
+		if err != nil || again != expected {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, expected)
+		}
+	})
+
+	t.Run("checks:write pin stays deterministic without a sticky store", func(t *testing.T) {
+		idx := routekey.Index("org/repo", "id", "subj", 2)
+		expected := []int64{11, 12}[idx]
+		other := []int64{12, 11}[idx]
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		qstore.Update(expected, 100, 15000)
+		qstore.Update(other, 14000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: appIDs, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		// No sticky store configured: determinism must hold anyway so
+		// check-run ownership stays on one app.
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		for range 3 {
+			id, err := exchange(t, s, qpool, tp)
+			if err != nil || id != expected {
+				t.Fatalf("got (%d, %v), want deterministic (%d, nil) despite quota favoring %d", id, err, expected, other)
+			}
+		}
+	})
+
+	t.Run("pattern pin rotates when quota data is incomplete", func(t *testing.T) {
+		qstore := ghinstall.NewQuotaStore(time.Minute)
+		// Install 12 has no quota data: all-or-nothing disables quota picking.
+		qstore.Update(11, 12000, 15000)
+		qpool := &ghinstall.OrgPool{M: pool.M, AppCount: 3, AppIDs: appIDs, Quota: &ghinstall.QuotaConfig{Store: qstore, SoftFloor: 5000, HardFloor: 1500}}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		assertRotates(t, s, qpool, compile(t, &TrustPolicy{AppPattern: "ci-.*"}))
+	})
+
+	t.Run("storeless checks:write pin rejects partial candidate sets", func(t *testing.T) {
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		_, err := exchange(t, s, partial, tp)
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the raw enumeration error (a partial set is not a stable routing set)", err)
+		}
+	})
+
+	t.Run("storeless checks:write pin heals negative-cache omissions before hashing", func(t *testing.T) {
+		pinMisses.Purge()
+		// GetAll omits install 12 behind a nil error; the fresh confirm must
+		// complete the set before the ownership hash.
+		mgr := &enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
+		}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		expected := []int64{11, 12}[routekey.Index("healorg/repo", "id", "subj", 2)]
+		_, id, err := s.getExchangeInstall(ctx, poolOf(mgr), "healorg", "healorg/repo", "id", "subj", tp, nil, 999)
+		if err != nil || id != expected {
+			t.Fatalf("got (%d, %v), want (%d, nil) hashed over the healed set", id, err, expected)
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1", got)
+		}
+	})
+
+	t.Run("storeless checks:write pin throttles confirmed-incomplete sets", func(t *testing.T) {
+		pinMisses.Purge()
+		// The fresh walk confirms the pattern genuinely matches only one
+		// installed app: hash the confirmed set and stop re-walking.
+		mgr := &enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}},
+		}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		for i := range 3 {
+			_, id, err := s.getExchangeInstall(ctx, poolOf(mgr), "incorg", "incorg/repo", "id", "subj", tp, nil, 999)
+			if err != nil || id != 11 {
+				t.Fatalf("call %d: got (%d, %v), want (11, nil)", i, id, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (confirmed incompleteness cached)", got)
+		}
+	})
+
+	t.Run("pattern rotation is isolated per candidate set", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		exactTP := compile(t, &TrustPolicy{App: "deploy"})
+		patternTP := compile(t, &TrustPolicy{AppPattern: "ci-.*"})
+		seen := map[int64]bool{}
+		for range 10 {
+			// The interleaved singleton pin must not phase-lock the
+			// pattern's rotation.
+			if _, err := exchange(t, s, pool, exactTP); err != nil {
+				t.Fatal(err)
+			}
+			id, err := exchange(t, s, pool, patternTP)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seen[id] = true
+		}
+		if !seen[11] || !seen[12] {
+			t.Fatalf("pattern picks welded to %v under interleaving, want rotation across both", seen)
+		}
+	})
+
+	t.Run("storeless checks:write pin tolerates partial enumeration when the eligible set is complete", func(t *testing.T) {
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
+			err:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		expected := []int64{11, 12}[routekey.Index("org/repo", "id", "subj", 2)]
+		for range 3 {
+			id, err := exchange(t, s, partial, tp)
+			if err != nil || id != expected {
+				t.Fatalf("got (%d, %v), want deterministic (%d, nil): a complete eligible set cannot flip", id, err, expected)
+			}
+		}
+	})
+
+	t.Run("pattern alternation stays anchored", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: map[string]int64{"ci": 1, "deploy": 2, "ci-privileged": 3}}}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci|deploy"})
+		anchorPool := &ghinstall.OrgPool{AppIDs: map[int64]bool{1: true, 2: true, 3: true}}
+		eligible, err := s.eligibleApps(anchorPool, "org", tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := map[int64]bool{1: true, 2: true}
+		if !maps.Equal(eligible, want) {
+			t.Errorf("eligibleApps() = %v, want %v", eligible, want)
+		}
+	})
+
+	t.Run("pattern matches nothing", func(t *testing.T) {
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{AppPattern: "nope-.*"}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("checks:write sticky honored within pin set", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: memory.New()}
+		tp := compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})
+		first, err := exchange(t, s, pool, tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		again, err := exchange(t, s, pool, tp)
+		if err != nil || again != first {
+			t.Fatalf("got (%d, %v), want sticky %d", again, err, first)
+		}
+	})
+
+	t.Run("checks:write sticky outside pin set reassigns", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, pool, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if id != 11 && id != 12 {
+			t.Fatalf("got %d, want reassignment within ci apps", id)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != id {
+			t.Fatalf("sticky = (%d, %t), want (%d, true)", cached, ok, id)
+		}
+	})
+
+	t.Run("negative-cached pin recovered by fresh enumeration", func(t *testing.T) {
+		hidden := poolOf(&enumMgr{freshInstalls: []ghinstall.Installation{{ID: 21, AppID: 201}}})
+		id, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, hidden, compile(t, &TrustPolicy{App: "deploy"}))
+		if err != nil || id != 21 {
+			t.Fatalf("got (%d, %v), want (21, nil)", id, err)
+		}
+	})
+
+	t.Run("negative-cached sticky recovered by fresh enumeration", func(t *testing.T) {
+		store := seedSticky(t, 12)
+		hidden := poolOf(&enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 12, AppID: 102}},
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 12 {
+			t.Fatalf("got (%d, %v), want sticky (12, nil)", id, err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 12 {
+			t.Fatalf("sticky = (%d, %t), want preserved (12, true)", cached, ok)
+		}
+	})
+
+	t.Run("confirmed pin miss throttles fresh enumeration", func(t *testing.T) {
+		pinMisses.Purge()
+		mgr := &enumMgr{}
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		tp := compile(t, &TrustPolicy{App: "deploy"})
+		for i := range 3 {
+			_, _, err := s.getExchangeInstall(ctx, poolOf(mgr), "missorg", "missorg/repo", "id", "subj", tp, nil, 999)
+			if status.Code(err) != codes.FailedPrecondition {
+				t.Fatalf("call %d: got %v, want FailedPrecondition", i, err)
+			}
+		}
+		if got := mgr.freshCalls.Load(); got != 1 {
+			t.Errorf("GetAllFresh called %d times, want 1 (confirmed miss cached)", got)
+		}
+	})
+
+	t.Run("sticky proven ineligible fails closed on partial enumeration", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		// Install 21 is enumerated (proving it ineligible for ci-.*), but an
+		// unrelated manager failed: reassigning over the partial set could
+		// diverge from a replica holding the complete set.
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
+			err:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		_, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the raw enumeration error (no reassignment over a partial set)", err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 21 {
+			t.Fatalf("sticky = (%d, %t), want preserved (21, true)", cached, ok)
+		}
+	})
+
+	t.Run("fresh partial proof of ineligibility fails closed", func(t *testing.T) {
+		store := seedSticky(t, 21)
+		// The fresh walk proves 21 ineligible but is itself partial: its
+		// error now travels with the swapped candidate set, so the pick
+		// fails closed instead of hashing a subset.
+		hidden := poolOf(&enumMgr{
+			installs:      []ghinstall.Installation{{ID: 11, AppID: 101}},
+			freshInstalls: []ghinstall.Installation{{ID: 11, AppID: 101}, {ID: 21, AppID: 201}},
+			freshErr:      errors.New("unrelated manager failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		_, err := exchange(t, s, hidden, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want the fresh walk's error (no reassignment over a partial set)", err)
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 21 {
+			t.Fatalf("sticky = (%d, %t), want preserved (21, true)", cached, ok)
+		}
+	})
+
+	t.Run("partial enumeration preserves sticky install", func(t *testing.T) {
+		store := seedSticky(t, 12)
+		// Install 12 holds the sticky mapping but is absent from the partial result.
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		if _, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite})); err == nil {
+			t.Fatal("want enumeration error, got nil")
+		}
+		if cached, ok, _ := store.Get(ctx, stickyKey); !ok || cached != 12 {
+			t.Fatalf("sticky = (%d, %t), want preserved (12, true)", cached, ok)
+		}
+	})
+
+	t.Run("partial enumeration still honors present sticky", func(t *testing.T) {
+		store := seedSticky(t, 11)
+		partial := poolOf(&enumMgr{
+			installs: []ghinstall.Installation{{ID: 11, AppID: 101}},
+			err:      errors.New("enumeration failed"),
+		})
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, sticky: store}
+		id, err := exchange(t, s, partial, compile(t, &TrustPolicy{AppPattern: "ci-.*", Permissions: checksWrite}))
+		if err != nil || id != 11 {
+			t.Fatalf("got (%d, %v), want (11, nil)", id, err)
+		}
+	})
+
+	t.Run("enumeration error with no candidates propagates", func(t *testing.T) {
+		errPool := poolOf(&enumMgr{err: errors.New("boom")})
+		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, errPool, compile(t, &TrustPolicy{App: "deploy"}))
+		if err == nil || status.Code(err) == codes.FailedPrecondition {
+			t.Fatalf("got %v, want raw enumeration error", err)
+		}
+	})
 }

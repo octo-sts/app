@@ -39,11 +39,11 @@ type signingMethodAKV struct {
 	client signerClient
 }
 
-func (s *signingMethodAKV) Verify(string, string, interface{}) error {
+func (s *signingMethodAKV) Verify(string, string, any) error {
 	return errors.New("not implemented")
 }
 
-func (s *signingMethodAKV) Sign(signingString string, ikey interface{}) (string, error) {
+func (s *signingMethodAKV) Sign(signingString string, ikey any) (string, error) {
 	ref, ok := ikey.(keyRef)
 
 	if !ok {

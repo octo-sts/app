@@ -328,3 +328,65 @@ func TestPickByQuotaSkipsNonNotFoundErrors(t *testing.T) {
 		t.Errorf("picked install %d, want 3 (max remaining among healthy managers)", id)
 	}
 }
+
+func TestPickByQuotaInstallations(t *testing.T) {
+	ctx := context.Background()
+	store := NewQuotaStore(time.Minute)
+	q := &QuotaConfig{Store: store, SoftFloor: 5000, HardFloor: 1500}
+	insts := []Installation{{ID: 1}, {ID: 2}, {ID: 3}}
+
+	if _, ok := PickByQuota(ctx, insts, nil); ok {
+		t.Error("nil config: want ok=false")
+	}
+	if _, ok := PickByQuota(ctx, nil, q); ok {
+		t.Error("no candidates: want ok=false")
+	}
+
+	store.Update(1, 12000, 15000)
+	store.Update(2, 3000, 15000)
+	if _, ok := PickByQuota(ctx, insts, q); ok {
+		t.Error("missing quota data for one candidate: want ok=false")
+	}
+
+	store.Update(3, 14000, 15000)
+	inst, ok := PickByQuota(ctx, insts, q)
+	if !ok || inst.ID != 3 {
+		t.Errorf("got (%d, %t), want comfortable argmax (3, true)", inst.ID, ok)
+	}
+
+	store.Update(1, 2000, 15000)
+	store.Update(2, 3000, 15000)
+	store.Update(3, 900, 15000)
+	inst, ok = PickByQuota(ctx, insts, q)
+	if !ok || inst.ID != 2 {
+		t.Errorf("got (%d, %t), want tight-tier argmax (2, true)", inst.ID, ok)
+	}
+}
+
+// countingPickerManager counts Get probes to pin evaluation-order behavior.
+type countingPickerManager struct {
+	fakePickerManager
+	gets int
+}
+
+func (c *countingPickerManager) Get(ctx context.Context, owner, scope, identity string) (*ghinstallation.AppsTransport, int64, error) {
+	c.gets++
+	return c.fakePickerManager.Get(ctx, owner, scope, identity)
+}
+
+func TestPickByQuotaShortCircuitsOnMissingData(t *testing.T) {
+	store := NewQuotaStore(time.Minute)
+	q := &QuotaConfig{Store: store, SoftFloor: 5000, HardFloor: 1500}
+	m1 := &countingPickerManager{fakePickerManager: fakePickerManager{installID: 1, installed: true}}
+	m2 := &countingPickerManager{fakePickerManager: fakePickerManager{installID: 2, installed: true}}
+	m3 := &countingPickerManager{fakePickerManager: fakePickerManager{installID: 3, installed: true}}
+	store.Update(2, 12000, 15000)
+	store.Update(3, 12000, 15000) // install 1 (first candidate) has no data
+
+	if _, _, ok := pickByQuota(context.Background(), []Manager{m1, m2, m3}, "org", "org/repo", "id", q); ok {
+		t.Fatal("want ok=false on missing quota data")
+	}
+	if m1.gets != 1 || m2.gets != 0 || m3.gets != 0 {
+		t.Errorf("gets = (%d,%d,%d), want (1,0,0): a quota-missing candidate must short-circuit before probing further managers", m1.gets, m2.gets, m3.gets)
+	}
+}

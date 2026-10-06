@@ -30,10 +30,8 @@ func (rt *ms) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 
 	resp.Body = &lr{
-		LimitedReader: io.LimitedReader{
-			R: resp.Body,
-			N: rt.maxBodySize,
-		},
+		R:     resp.Body,
+		N:     rt.maxBodySize,
 		close: resp.Body.Close,
 	}
 	return resp, nil

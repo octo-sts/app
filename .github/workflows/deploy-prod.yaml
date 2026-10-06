@@ -1,16 +1,24 @@
 # Copyright 2024 Chainguard, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-# Production deploys are manual only, and this workflow is intentionally kept
-# separate from staging so it can be disabled from the Actions UI without
-# affecting the staging auto-deploy on merge to main.
+# Production deploys run automatically when a (non-pre)release is published for
+# a version tag (vX.Y.Z). A raw tag push does not deploy. To roll back, dispatch
+# this workflow manually against the previous version tag.
 #
-# NOTE: the production Workload Identity Federation binding must trust this
-# workflow ref (.github/workflows/deploy-prod.yaml) before the first dispatch;
-# see env/octo-sts/bootstrap/main.tf.
+# This workflow is intentionally kept separate from staging so it can be
+# disabled from the Actions UI without affecting the staging auto-deploy on
+# merge to main.
+#
+# NOTE: the production Workload Identity Federation binding only trusts this
+# workflow (.github/workflows/deploy-prod.yaml) running on a version tag ref
+# (refspec = "version_tags"); see env/octo-sts/bootstrap/main.tf. Dispatching
+# from a branch will fail to authenticate to GCP.
 name: Deploy (production)
 
 on:
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 # Serialize production deploys and never cancel one in progress.
@@ -20,6 +28,11 @@ permissions: {}
 
 jobs:
   production:
+    # Only deploy from version tags, never prereleases. The WIF binding rejects
+    # any ref that is not a vX[.Y[.Z]] tag (so e.g. v0.12.0-rc1 cannot federate).
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') &&
+      (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease)
     permissions:
       contents: read # clone the repository contents (in the reusable workflow)
       id-token: write # federate with GCP via Workload Identity (in the reusable workflow)

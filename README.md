@@ -63,6 +63,10 @@ permissions:
 This policy will allow OIDC tokens from Google accounts of folks with a
 Chainguard email address to federate and read the repo contents.
 
+Every pattern is matched against the whole value: `subject_pattern: "[0-9]+"`
+accepts `123` but not `123x`, and `refs/heads/main|refs/heads/develop` accepts
+exactly those two refs. Do not add `^` or `$` yourself.
+
 #### Autocomplete
 
 [JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:
@@ -261,8 +265,16 @@ policy.
 
 ### Release cadence
 
-Our release cadence at this moment is set to when is needed, meaning if we have a bug fix or a new feature
-we will might make a new release.
+We cut a release when there is a bug fix or feature to ship. Changes reach
+each environment as follows:
+
+- Merging to `main` deploys staging.
+- Pushing a `v*` tag publishes the container images.
+- Publishing a release (not a pre-release) for a `vX.Y.Z` tag deploys
+  production. Pre-releases and tag pushes without a published release do not
+  deploy.
+- To roll back production, run the `deploy-prod.yaml` workflow manually against
+  the previous version tag.
 
 ### Container images
 
@@ -369,6 +381,81 @@ Notes:
   `org_name` on any app requires it on all of them (use `"*"` for a fallback
   pool), and every app needs a KMS key (`key_version > 0`); both are enforced
   at `terraform plan` time.
+
+#### App Pinning (trust policy `app` / `app_pattern`)
+
+By default a multi-App pool load-balances exchanges across its installations.
+Some workloads need one *specific* App — different permission grants, a
+dedicated rate limit, or deterministic check-run ownership. A trust policy can
+pin the App that mints its tokens:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+issuer: https://token.actions.githubusercontent.com
+subject: repo:my-org/my-repo:ref:refs/heads/main
+
+permissions:
+  contents: read
+  checks: write
+
+# Exactly one of:
+app: reviewer-bot     # a configured app name, or a numeric app ID
+# app_pattern: ci-.*  # route among all apps whose name matches (anchored)
+```
+
+Apps are named with the optional `app_name` field in `APP_CONFIG_FILE`
+entries:
+
+```yaml
+orgs:
+  - name: org-a
+    apps:
+      - app_id: 111
+        app_name: reviewer-bot
+        kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
+```
+
+Unnamed apps (and legacy `GITHUB_APP_IDS` deployments) can still be pinned by
+numeric app ID. Names must be unique and non-numeric; with the terraform
+module, set `app_name` on `github_apps` entries — uniqueness, non-numeric
+names, and the org-mode requirement are enforced at `terraform plan` time.
+
+Routing semantics:
+
+- Selection precedence is: policy pin, then the sticky mapping (for
+  `checks: write`), then the installation that read the policy. Policies
+  without a pin behave exactly as before.
+- `app` selects one App from the target organization's pool. `app_pattern`
+  selects apps in that pool whose names match the anchored regexp;
+  exchanges then use the same
+  capacity-aware selection as unpinned routing. Policies with `checks: write`
+  instead pick deterministically within the matched set, independent of App
+  configuration order — with or without a sticky store — so check-run
+  ownership stays on one App.
+- Pins fail closed with `FailedPrecondition` rather than silently re-routing:
+  an unknown name or ID, a pattern matching no configured app, or a pinned
+  App not installed on the target org all reject the exchange. A newly
+  installed App is picked up within about a minute.
+
+Notes:
+
+- Deploy new `app`/`webhook` binaries **before** any policy uses `app:` or
+  any config uses `app_name:` — older binaries reject unknown fields (the
+  webhook fails the check run; the exchange returns an error).
+- The webhook PR check validates pin syntax (the `app`/`app_pattern` oneof
+  and regexp validity) but has no access to server configuration, so a pin
+  naming a nonexistent App passes the check and fails at exchange time.
+- Changing or narrowing a pin reassigns sticky mappings that fall outside the
+  new set; check runs created by the previously assigned App can no longer be
+  updated by the new one. Symmetrically, installing an additional App matched
+  by an `app_pattern` can remap `checks: write` callers in deployments without
+  a sticky store once the new App becomes visible.
+- Upgrading from routing based on App configuration order to canonical ordering
+  can remap existing `checks: write` pattern routes once when no sticky store
+  is configured. Existing eligible sticky assignments are preserved.
+- A pinned App forfeits load balancing: its installation absorbs all of that
+  policy's traffic and downstream token usage. That dedicated rate limit is
+  usually the point — but budget for it.
 
 ### GitHub Enterprise Server (GHES)
 

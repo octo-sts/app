@@ -1,0 +1,7 @@
+{
+  "name": "org.sts.yaml",
+  "path": ".github/chainguard/org.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vLy5naXRodWI6cmVmOnJlZnMvaGVhZHMvbWFpbgpyZXBvc2l0b3JpZXM6CiAgLSBiYXIKcGVybWlzc2lvbnM6CiAgY29udGVudHM6IHJlYWQK",
+  "encoding": "base64"
+}

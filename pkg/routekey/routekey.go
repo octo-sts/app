@@ -13,7 +13,17 @@ import (
 // improving distribution across installations while preserving check-run
 // ownership.
 func Key(scope, identity, subject string) string {
+	return fmt.Sprintf("%d", sum(scope, identity, subject))
+}
+
+// Index maps a (scope, identity, subject) tuple to a stable index in [0, n),
+// so the same caller always lands on the same slot without shared state.
+func Index(scope, identity, subject string, n int) int {
+	return int(sum(scope, identity, subject) % uint32(n)) //nolint:gosec // n is a small positive count
+}
+
+func sum(scope, identity, subject string) uint32 {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(scope + ":" + identity + ":" + subject))
-	return fmt.Sprintf("%d", h.Sum32())
+	return h.Sum32()
 }

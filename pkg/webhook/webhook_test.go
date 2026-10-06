@@ -5,6 +5,7 @@ package webhook
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
@@ -32,6 +33,8 @@ import (
 	"github.com/chainguard-dev/clog"
 	"github.com/chainguard-dev/clog/slogtest"
 	metrics "github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
+	cloudevents "github.com/cloudevents/sdk-go/v2"
+	"github.com/cloudevents/sdk-go/v2/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
 	"github.com/octo-sts/app/pkg/octosts"
@@ -64,8 +67,63 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.Context(t)
-	if err := validatePolicies(ctx, gh, "foo", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// prefetchGitHub returns a client serving the prefetched testdata API tree.
+func prefetchGitHub(t *testing.T) *github.Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			t.Logf("%s not found", path)
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	gh, err := github.NewClient(
+		github.WithHTTPClient(srv.Client()),
+		github.WithEnterpriseURLs(srv.URL, srv.URL),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gh
+}
+
+func TestValidatePolicyCompileFailure(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github")
+	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
+		t.Fatalf("validatePolicies = %v, want compile error about app/app_pattern", err)
+	}
+}
+
+func TestValidateOrgPolicyCompiles(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github"); err != nil {
+		t.Fatalf("validatePolicies = %v, want nil (org policy with repositories compiles)", err)
+	}
+}
+
+func TestValidateOrgPolicyCompileFailure(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github")
+	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
+		t.Fatalf("validatePolicies = %v, want org-arm compile error about app/app_pattern", err)
 	}
 }
 
@@ -106,11 +164,11 @@ func TestOrgFilter(t *testing.T) {
 		t.Run(tc.org, func(t *testing.T) {
 			body, err := json.Marshal(github.PushEvent{
 				Organization: &github.Organization{
-					Login: github.Ptr(tc.org),
+					Login: new(tc.org),
 				},
 				Repo: &github.PushEventRepository{
 					Owner: &github.User{
-						Login: github.Ptr(tc.org),
+						Login: new(tc.org),
 					},
 				},
 				Commits: []*github.HeadCommit{{
@@ -197,19 +255,19 @@ func TestWebhookOK(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -240,15 +298,15 @@ func TestWebhookOK(t *testing.T) {
 	want := []*github.CreateCheckRunOptions{{
 		Name:       "Trust Policy Validation",
 		HeadSHA:    "5678",
-		ExternalID: github.Ptr("5678"),
-		Status:     github.Ptr("completed"),
-		Conclusion: github.Ptr("success"),
+		ExternalID: new("5678"),
+		Status:     new("completed"),
+		Conclusion: new("success"),
 		// Use time from the response to ignore it.
 		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
 		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr("Valid trust policy."),
-			Summary: github.Ptr(""),
+			Title:   new("Valid trust policy."),
+			Summary: new(""),
 		},
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -347,19 +405,19 @@ func TestWebhookDeletedSTS(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("9876"),
-		After:  github.Ptr("4321"),
+		Before: new("9876"),
+		After:  new("4321"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test2.sts.yaml"},
 		}, {
@@ -392,15 +450,15 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	want := []*github.CreateCheckRunOptions{{
 		Name:       "Trust Policy Validation",
 		HeadSHA:    "4321",
-		ExternalID: github.Ptr("4321"),
-		Status:     github.Ptr("completed"),
-		Conclusion: github.Ptr("success"),
+		ExternalID: new("4321"),
+		Status:     new("completed"),
+		Conclusion: new("success"),
 		// Use time from the response to ignore it.
 		StartedAt:   &github.Timestamp{Time: got[0].StartedAt.Time},
 		CompletedAt: &github.Timestamp{Time: got[0].CompletedAt.Time},
 		Output: &github.CheckRunOutput{
-			Title:   github.Ptr("Valid trust policy."),
-			Summary: github.Ptr(""),
+			Title:   new("Valid trust policy."),
+			Summary: new(""),
 		},
 	}}
 	if diff := cmp.Diff(want, got); diff != "" {
@@ -408,7 +466,7 @@ func TestWebhookDeletedSTS(t *testing.T) {
 	}
 }
 
-func TestFilesFromPushEvent(t *testing.T) {
+func TestPathsToValidateFromPushEvent(t *testing.T) {
 	v := &Validator{}
 	for _, tc := range []struct {
 		name    string
@@ -437,12 +495,12 @@ func TestFilesFromPushEvent(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "multiple commits deduplicated downstream",
+			name: "multiple commits deduplicated",
 			commits: []*github.HeadCommit{
 				{Added: []string{".github/chainguard/a.sts.yaml"}},
 				{Modified: []string{".github/chainguard/a.sts.yaml"}},
 			},
-			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/a.sts.yaml"},
+			want: []string{".github/chainguard/a.sts.yaml"},
 		},
 		{
 			name: "non-sts files filtered out",
@@ -479,6 +537,36 @@ func TestFilesFromPushEvent(t *testing.T) {
 			want: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"},
 		},
 		{
+			// The headline behaviour change: previously the path was collected
+			// from Added and never removed again, so it was sent for
+			// validation, 404'd at the head SHA, and failed the check run for
+			// a policy that no longer exists.
+			name: "added then deleted across commits excluded",
+			commits: []*github.HeadCommit{
+				{Added: []string{".github/chainguard/ephemeral.sts.yaml"}},
+				{Removed: []string{".github/chainguard/ephemeral.sts.yaml"}},
+			},
+			want: nil,
+		},
+		{
+			name: "modified then deleted across commits excluded",
+			commits: []*github.HeadCommit{
+				{Modified: []string{".github/chainguard/doomed.sts.yaml"}},
+				{Removed: []string{".github/chainguard/doomed.sts.yaml"}},
+			},
+			want: nil,
+		},
+		{
+			// The inverse must still be validated: the policy exists at the
+			// head SHA, so it is live and has to be read.
+			name: "deleted then re-added across commits included",
+			commits: []*github.HeadCommit{
+				{Removed: []string{".github/chainguard/revived.sts.yaml"}},
+				{Added: []string{".github/chainguard/revived.sts.yaml"}},
+			},
+			want: []string{".github/chainguard/revived.sts.yaml"},
+		},
+		{
 			name: "no sts files in any commit",
 			commits: []*github.HeadCommit{
 				{Added: []string{"README.md"}},
@@ -489,9 +577,9 @@ func TestFilesFromPushEvent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			event := &github.PushEvent{Commits: tc.commits}
-			got := v.filesFromPushEvent("some-service", event)
+			got := pathsToValidate(v.policyChangesFromPushEvent("some-service", event))
 			if diff := cmp.Diff(tc.want, got); diff != "" {
-				t.Errorf("filesFromPushEvent() mismatch (-want +got):\n%s", diff)
+				t.Errorf("pathsToValidate() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
@@ -554,19 +642,19 @@ func TestWebhookPushTruncatedFallback(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before:  github.Ptr("1234"),
-		After:   github.Ptr("5678"),
+		Before:  new("1234"),
+		After:   new("5678"),
 		Commits: commits,
 	})
 	if err != nil {
@@ -646,19 +734,19 @@ func TestWebhookPushNoSTSFiles(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{
 			{Added: []string{"README.md"}},
 			{Modified: []string{"go.mod", "main.go"}},
@@ -745,19 +833,19 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Organization: &github.Organization{
-			Login: github.Ptr("foo"),
+			Login: new("foo"),
 		},
 		Repo: &github.PushEventRepository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name: github.Ptr("bar"),
+			Name: new("bar"),
 		},
-		Before:  github.Ptr("1234"),
-		After:   github.Ptr("5678"),
+		Before:  new("1234"),
+		After:   new("5678"),
 		Commits: commits,
 	})
 	if err != nil {
@@ -842,23 +930,23 @@ func TestCheckSuiteNewBranchNoPRsSkipped(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("feature-x"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("feature-x"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -893,6 +981,14 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 
 	prFilesHit := false
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/pulls/42", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(&github.PullRequest{
+			Head:         &github.PullRequestBranch{SHA: new("deadbeef")},
+			Base:         &github.PullRequestBranch{SHA: new("base123")},
+			ChangedFiles: new(1),
+		})
+	})
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
 		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
@@ -949,25 +1045,25 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:         github.Ptr(int64(1)),
-			HeadSHA:    github.Ptr("deadbeef"),
-			HeadBranch: github.Ptr("feature-x"),
-			BeforeSHA:  github.Ptr(zeroHash),
+			ID:         new(int64(1)),
+			HeadSHA:    new("deadbeef"),
+			HeadBranch: new("feature-x"),
+			BeforeSHA:  new(zeroHash),
 			PullRequests: []*github.PullRequest{
-				{Number: github.Ptr(42)},
+				{Number: new(42)},
 			},
 		},
 	})
@@ -1019,9 +1115,9 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("test.sts.yaml"),
-				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+				Type: new("file"),
+				Name: new("test.sts.yaml"),
+				Path: new(".github/chainguard/test.sts.yaml"),
 			},
 		})
 	})
@@ -1055,23 +1151,23 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1104,6 +1200,190 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 	}
 }
 
+// TestCheckSuiteNoPolicyDirSkipped exercises the zeroHash / initial-commit
+// branch of handleCheckSuite when the repository has no .github/chainguard
+// directory: the directory scan 404s, which must be treated as "no policies"
+// (logged, no check run) rather than failing the delivery with a 500.
+func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: new(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: new("foo"),
+			},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs when policy directory is missing, got %d", len(got))
+	}
+}
+
+// TestCheckSuiteNonNotFoundDirScanError verifies that a non-404 error from the
+// policy-directory scan still fails the delivery (so it is redelivered) rather
+// than being swallowed like a missing directory.
+func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
+	got := []*github.CreateCheckRunOptions{}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		got = append(got, opt)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"message": "Internal Server Error"}`, http.StatusInternalServerError)
+	})
+	// Catch-all serves the installation token mint (and anything else) from
+	// testdata so the request reaches the directory scan above.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		io.Copy(w, f)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.CheckSuiteEvent{
+		Installation: &github.Installation{
+			ID: new(int64(1111)),
+		},
+		Repo: &github.Repository{
+			Owner: &github.User{
+				Login: new("foo"),
+			},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
+		CheckSuite: &github.CheckSuite{
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
+			PullRequests: []*github.PullRequest{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "check_suite")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode == 200 {
+		t.Fatal("expected non-200 for a non-404 directory scan error, got 200")
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected 0 check runs on scan error, got %d", len(got))
+	}
+}
+
 // TestCheckSuiteDefaultBranchSkipsNonPolicyFiles exercises the zeroHash /
 // initial-commit branch of handleCheckSuite, which lists the policy directory
 // instead of diffing it. The listing contains a README.md alongside the trust
@@ -1130,14 +1410,14 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("test.sts.yaml"),
-				Path: github.Ptr(".github/chainguard/test.sts.yaml"),
+				Type: new("file"),
+				Name: new("test.sts.yaml"),
+				Path: new(".github/chainguard/test.sts.yaml"),
 			},
 			{
-				Type: github.Ptr("file"),
-				Name: github.Ptr("README.md"),
-				Path: github.Ptr(".github/chainguard/README.md"),
+				Type: new("file"),
+				Name: new("README.md"),
+				Path: new(".github/chainguard/README.md"),
 			},
 		}); err != nil {
 			t.Error(err)
@@ -1187,23 +1467,23 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1304,23 +1584,23 @@ func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
 			Owner: &github.User{
-				Login: github.Ptr("foo"),
+				Login: new("foo"),
 			},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("5678"),
-			HeadBranch:   github.Ptr("feature-y"),
-			BeforeSHA:    github.Ptr("abcd1234"),
+			ID:           new(int64(1)),
+			HeadSHA:      new("5678"),
+			HeadBranch:   new("feature-y"),
+			BeforeSHA:    new("abcd1234"),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1381,20 +1661,20 @@ func TestWebhookCheckSuiteBotSkipped(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Action: github.Ptr("requested"),
+		Action: new("requested"),
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
 		Sender: &github.User{
-			Login: github.Ptr("octo-sts[bot]"),
+			Login: new("octo-sts[bot]"),
 		},
 		CheckSuite: &github.CheckSuite{
-			HeadSHA:   github.Ptr("abc123"),
-			BeforeSHA: github.Ptr("def456"),
+			HeadSHA:   new("abc123"),
+			BeforeSHA: new("def456"),
 		},
 	})
 	if err != nil {
@@ -1443,21 +1723,21 @@ func TestWebhookCheckRunBotSkipped(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckRunEvent{
-		Action: github.Ptr("created"),
+		Action: new("created"),
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.Repository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
 		Sender: &github.User{
-			Login: github.Ptr("some-other-app[bot]"),
+			Login: new("some-other-app[bot]"),
 		},
 		CheckRun: &github.CheckRun{
 			CheckSuite: &github.CheckSuite{
-				HeadSHA:   github.Ptr("abc123"),
-				BeforeSHA: github.Ptr("def456"),
+				HeadSHA:   new("abc123"),
+				BeforeSHA: new("def456"),
 			},
 		},
 	})
@@ -1530,14 +1810,14 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{
-			ID: github.Ptr(int64(1111)),
+			ID: new(int64(1111)),
 		},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{
 				".github/chainguard/a.sts.yaml",
@@ -1638,19 +1918,19 @@ func TestWebhookPullRequestActionSkipped(t *testing.T) {
 			defer srv.Close()
 
 			body, err := json.Marshal(github.PullRequestEvent{
-				Action: github.Ptr(action),
-				Number: github.Ptr(1),
+				Action: new(action),
+				Number: new(1),
 				Installation: &github.Installation{
-					ID: github.Ptr(int64(1111)),
+					ID: new(int64(1111)),
 				},
 				Repo: &github.Repository{
-					Owner: &github.User{Login: github.Ptr("foo")},
-					Name:  github.Ptr("bar"),
+					Owner: &github.User{Login: new("foo")},
+					Name:  new("bar"),
 				},
 				PullRequest: &github.PullRequest{
-					Head: &github.PullRequestBranch{SHA: github.Ptr("abc123")},
+					Head: &github.PullRequestBranch{SHA: new("abc123")},
 				},
-				Sender: &github.User{Login: github.Ptr("someone")},
+				Sender: &github.User{Login: new("someone")},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1720,13 +2000,13 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.PushEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -1736,7 +2016,7 @@ func TestWebhookInstallationTokenCached(t *testing.T) {
 	}
 
 	// Deliver the same event twice; the second must reuse the cached client.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
 		if err != nil {
 			t.Fatal(err)
@@ -1842,14 +2122,14 @@ func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
 	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("test.sts.yaml"), Path: github.Ptr(".github/chainguard/test.sts.yaml")},
-			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(".github/chainguard/trusted-token-issuers.yaml")},
-			{Type: github.Ptr("file"), Name: github.Ptr("README.md"), Path: github.Ptr(".github/chainguard/README.md")},
+			{Type: new("file"), Name: new("test.sts.yaml"), Path: new(".github/chainguard/test.sts.yaml")},
+			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: new(".github/chainguard/trusted-token-issuers.yaml")},
+			{Type: new("file"), Name: new("README.md"), Path: new(".github/chainguard/README.md")},
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/") {
-			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"))
+		if after, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"); ok {
+			fetched = append(fetched, after)
 		}
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -1876,20 +2156,20 @@ func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.Repository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr("bar"),
-			FullName:      github.Ptr("foo/bar"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -1993,7 +2273,7 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/.github/chainguard", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: github.Ptr("file"), Name: github.Ptr("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
+			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
 		}); err != nil {
 			t.Error(err)
 		}
@@ -2002,18 +2282,18 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 		fetched = append(fetched, allowlistPath)
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(&github.RepositoryContent{
-			Type:     github.Ptr("file"),
-			Name:     github.Ptr("trusted-token-issuers.yaml"),
+			Type:     new("file"),
+			Name:     new("trusted-token-issuers.yaml"),
 			Path:     github.Ptr(allowlistPath),
-			Encoding: github.Ptr("base64"),
-			Content:  github.Ptr(base64.StdEncoding.EncodeToString([]byte(allowlist))),
+			Encoding: new("base64"),
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(allowlist))),
 		}); err != nil {
 			t.Error(err)
 		}
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/") {
-			fetched = append(fetched, strings.TrimPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/"))
+		if after, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/foo/.github/contents/"); ok {
+			fetched = append(fetched, after)
 		}
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -2040,20 +2320,20 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 	defer srv.Close()
 
 	body, err := json.Marshal(github.CheckSuiteEvent{
-		Installation: &github.Installation{ID: github.Ptr(int64(1111))},
+		Installation: &github.Installation{ID: new(int64(1111))},
 		Repo: &github.Repository{
-			Owner:         &github.User{Login: github.Ptr("foo")},
-			Name:          github.Ptr(".github"),
-			FullName:      github.Ptr("foo/.github"),
-			DefaultBranch: github.Ptr("main"),
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new(".github"),
+			FullName:      new("foo/.github"),
+			DefaultBranch: new("main"),
 		},
-		Sender: &github.User{Login: github.Ptr("test-user")},
-		Action: github.Ptr("requested"),
+		Sender: &github.User{Login: new("test-user")},
+		Action: new("requested"),
 		CheckSuite: &github.CheckSuite{
-			ID:           github.Ptr(int64(1)),
-			HeadSHA:      github.Ptr("deadbeef"),
-			HeadBranch:   github.Ptr("main"),
-			BeforeSHA:    github.Ptr(zeroHash),
+			ID:           new(int64(1)),
+			HeadSHA:      new("deadbeef"),
+			HeadBranch:   new("main"),
+			BeforeSHA:    new(zeroHash),
 			PullRequests: []*github.PullRequest{},
 		},
 	})
@@ -2246,11 +2526,11 @@ func TestWebhookEnrichesMetricsContext(t *testing.T) {
 	body, err := json.Marshal(github.PushEvent{
 		Installation: &github.Installation{ID: github.Ptr(installationID)},
 		Repo: &github.PushEventRepository{
-			Owner: &github.User{Login: github.Ptr("foo")},
-			Name:  github.Ptr("bar"),
+			Owner: &github.User{Login: new("foo")},
+			Name:  new("bar"),
 		},
-		Before: github.Ptr("1234"),
-		After:  github.Ptr("5678"),
+		Before: new("1234"),
+		After:  new("5678"),
 		Commits: []*github.HeadCommit{{
 			Added: []string{".github/chainguard/test.sts.yaml"},
 		}},
@@ -2294,5 +2574,1123 @@ func TestWebhookEnrichesMetricsContext(t *testing.T) {
 		"organization": "foo",
 	}); ok {
 		t.Error("found a github_rate_limit_remaining series with an empty app_id label")
+	}
+}
+
+// fakeCEClient records the events a handler publishes. A nil Send result is an
+// ACK as far as the SDK is concerned, so delivery always "succeeds".
+type fakeCEClient struct {
+	mu     sync.Mutex
+	events []cloudevents.Event
+}
+
+func (f *fakeCEClient) Send(_ context.Context, e cloudevents.Event) protocol.Result {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+	return nil
+}
+
+func (f *fakeCEClient) Request(ctx context.Context, e cloudevents.Event) (*cloudevents.Event, protocol.Result) {
+	return nil, f.Send(ctx, e)
+}
+
+func (f *fakeCEClient) StartReceiver(context.Context, any) error { return nil }
+
+func (f *fakeCEClient) sent() []cloudevents.Event {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.events)
+}
+
+// drainEvents shuts the emitter down and returns everything that reached ce.
+// Delivery is asynchronous, so assertions have to run against a settled queue;
+// draining rather than sleeping also exercises the shutdown path.
+func drainEvents(t *testing.T, p *PolicyEmitter, ce *fakeCEClient) []cloudevents.Event {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := p.Shutdown(ctx); err != nil {
+		t.Fatalf("emitter did not drain: %v", err)
+	}
+	return ce.sent()
+}
+
+func TestPolicyChangesFromCompare(t *testing.T) {
+	v := &Validator{}
+	for _, tc := range []struct {
+		name  string
+		files []*github.CommitFile
+		want  []PolicyChange
+	}{{
+		name: "added, modified and removed",
+		files: []*github.CommitFile{
+			{Filename: new(".github/chainguard/a.sts.yaml"), Status: new("added")},
+			{Filename: new(".github/chainguard/b.sts.yaml"), Status: new("modified")},
+			{Filename: new(".github/chainguard/c.sts.yaml"), Status: new("removed")},
+		},
+		want: []PolicyChange{
+			{Path: ".github/chainguard/a.sts.yaml", Policy: "a", Action: PolicyCreated},
+			{Path: ".github/chainguard/b.sts.yaml", Policy: "b", Action: PolicyUpdated},
+			{Path: ".github/chainguard/c.sts.yaml", Policy: "c", Action: PolicyDeleted},
+		},
+	}, {
+		name: "rename records both sides",
+		files: []*github.CommitFile{{
+			Filename:         new(".github/chainguard/new.sts.yaml"),
+			PreviousFilename: new(".github/chainguard/old.sts.yaml"),
+			Status:           new("renamed"),
+		}},
+		want: []PolicyChange{
+			{Path: ".github/chainguard/new.sts.yaml", Policy: "new", Action: PolicyCreated},
+			{Path: ".github/chainguard/old.sts.yaml", Policy: "old", Action: PolicyDeleted},
+		},
+	}, {
+		// GitHub includes unchanged entries in some compares; the file is
+		// byte-identical across the range, so nothing happened to it.
+		name: "unchanged files are not updates",
+		files: []*github.CommitFile{
+			{Filename: new(".github/chainguard/steady.sts.yaml"), Status: new("unchanged")},
+		},
+		want: nil,
+	}, {
+		name: "unrecognised status is reported rather than dropped",
+		files: []*github.CommitFile{
+			{Filename: new(".github/chainguard/odd.sts.yaml"), Status: new("something-new")},
+		},
+		want: []PolicyChange{{
+			Path: ".github/chainguard/odd.sts.yaml", Policy: "odd", Action: PolicyUpdated,
+		}},
+	}, {
+		name: "non-policy files ignored",
+		files: []*github.CommitFile{
+			{Filename: new("README.md"), Status: new("added")},
+			{Filename: new(".github/chainguard/README.md"), Status: new("modified")},
+		},
+		want: nil,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := v.policyChangesFromCompare(slogtest.Context(t), "some-service", tc.files)
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("policyChangesFromCompare() mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestPathsToValidateExcludesDeletions(t *testing.T) {
+	changes := []PolicyChange{
+		{Path: ".github/chainguard/a.sts.yaml", Action: PolicyCreated},
+		{Path: ".github/chainguard/b.sts.yaml", Action: PolicyDeleted},
+		{Path: ".github/chainguard/c.sts.yaml", Action: PolicyUpdated},
+	}
+	want := []string{".github/chainguard/a.sts.yaml", ".github/chainguard/c.sts.yaml"}
+	if diff := cmp.Diff(want, pathsToValidate(changes)); diff != "" {
+		t.Errorf("pathsToValidate() mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// TestValidatePoliciesPerFileVerdicts pins the property the audit trail depends
+// on: one broken policy must not taint the verdict of the others in the push.
+func TestValidatePoliciesPerFileVerdicts(t *testing.T) {
+	gh := githubTestServer(t, nil)
+	ctx := slogtest.Context(t)
+
+	results, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{
+		".github/chainguard/test.sts.yaml",
+		".github/chainguard/missing.sts.yaml",
+	}, ".github")
+	if err == nil {
+		t.Fatal("expected an aggregate error for the unreadable policy")
+	}
+
+	if verr, ok := results[".github/chainguard/test.sts.yaml"]; !ok || verr != nil {
+		t.Errorf("valid policy: got (%v, present=%t), want (nil, present=true)", verr, ok)
+	}
+	if verr, ok := results[".github/chainguard/missing.sts.yaml"]; !ok || verr == nil {
+		t.Errorf("unreadable policy: got (%v, present=%t), want (non-nil, present=true)", verr, ok)
+	}
+}
+
+// githubTestServer serves the testdata tree as the GitHub API, routing check
+// run creations to onCheckRun when non-nil.
+func githubTestServer(t *testing.T, onCheckRun func(*github.CreateCheckRunOptions)) *github.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		opt := new(github.CreateCheckRunOptions)
+		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if onCheckRun != nil {
+			onCheckRun(opt)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		path := filepath.Join("testdata", r.URL.Path)
+		f, err := os.Open(path)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	client, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return client
+}
+
+// TestPushEmitsPolicyEvents covers the audit trail end to end: one event per
+// policy, per-file verdicts, and an unknown (nil) verdict for a deletion, which
+// is never read at the head SHA and so cannot be called valid.
+func TestPushEmitsPolicyEvents(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+		Emitter:       emitter,
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	push := github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("mallory"), ID: new(int64(99))},
+		Commits: []*github.HeadCommit{{
+			Added:   []string{".github/chainguard/test.sts.yaml", ".github/chainguard/missing.sts.yaml"},
+			Removed: []string{".github/chainguard/gone.sts.yaml"},
+		}},
+	}
+	body, err := json.Marshal(push)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 3 {
+		t.Fatalf("expected one event per policy change, got %d", len(events))
+	}
+
+	byPath := map[string]PolicyEvent{}
+	seenIndex := map[int]bool{}
+	for _, e := range events {
+		if e.Type() != "dev.octo-sts.policy" {
+			t.Errorf("unexpected event type %q", e.Type())
+		}
+		var pe PolicyEvent
+		if err := json.Unmarshal(e.Data(), &pe); err != nil {
+			t.Fatal(err)
+		}
+		if pe.Org != "foo" || pe.Repo != "bar" {
+			t.Errorf("got org/repo %q/%q, want foo/bar", pe.Org, pe.Repo)
+		}
+		if pe.Actor != "mallory" {
+			t.Errorf("got actor %q, want mallory", pe.Actor)
+		}
+		if want := "foo/bar/" + pe.Change.Policy; e.Subject() != want {
+			t.Errorf("got subject %q, want %q", e.Subject(), want)
+		}
+		if pe.ChangeCount != 3 {
+			t.Errorf("got ChangeCount %d, want 3", pe.ChangeCount)
+		}
+		if pe.Detection != DetectionCommits {
+			t.Errorf("got detection %q, want %q", pe.Detection, DetectionCommits)
+		}
+		seenIndex[pe.ChangeIndex] = true
+		byPath[pe.Change.Path] = pe
+	}
+
+	// Indices must cover 0..n-1 so a consumer can spot a dropped event.
+	for i := range 3 {
+		if !seenIndex[i] {
+			t.Errorf("missing ChangeIndex %d", i)
+		}
+	}
+
+	valid, ok := byPath[".github/chainguard/test.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the valid policy")
+	}
+	if valid.Change.Action != PolicyCreated {
+		t.Errorf("got action %q, want created", valid.Change.Action)
+	}
+	if valid.Valid == nil || !*valid.Valid {
+		t.Errorf("valid policy: got Valid=%v, want true", valid.Valid)
+	}
+	if valid.Error != "" {
+		t.Errorf("valid policy carried another file's error: %q", valid.Error)
+	}
+
+	broken, ok := byPath[".github/chainguard/missing.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the unreadable policy")
+	}
+	if broken.Valid == nil || *broken.Valid {
+		t.Errorf("unreadable policy: got Valid=%v, want false", broken.Valid)
+	}
+	if broken.Error == "" {
+		t.Error("unreadable policy: expected an error to be recorded")
+	}
+
+	deleted, ok := byPath[".github/chainguard/gone.sts.yaml"]
+	if !ok {
+		t.Fatal("no event for the deleted policy")
+	}
+	if deleted.Change.Action != PolicyDeleted {
+		t.Errorf("got action %q, want deleted", deleted.Change.Action)
+	}
+	if deleted.Valid != nil {
+		t.Errorf("deletion: got Valid=%v, want nil (never validated)", deleted.Valid)
+	}
+}
+
+// TestPushNonDefaultBranchEmitsNothing keeps the audit trail scoped to policies
+// that are actually live.
+func TestPushNonDefaultBranchEmitsNothing(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	v := &Validator{
+		Transport:     tr,
+		WebhookSecret: [][]byte{secret},
+		Emitter:       emitter,
+	}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:     new("refs/heads/feature"),
+		Before:  new("1234"),
+		After:   new("5678"),
+		Commits: []*github.HeadCommit{{Added: []string{".github/chainguard/test.sts.yaml"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	if got := drainEvents(t, emitter, ce); len(got) != 0 {
+		t.Fatalf("expected no events for a non-default branch, got %d", len(got))
+	}
+}
+
+func TestPolicyName(t *testing.T) {
+	for _, tc := range []struct {
+		path string
+		want string
+	}{
+		{".github/chainguard/foo.sts.yaml", "foo"},
+		{".github/chainguard/foo.bar.sts.yaml", "foo.bar"},
+		{octosts.OrgTrustedIssuersPath, OrgTrustedIssuersPolicyName},
+		// A literal ".sts.yaml" matches the glob octo-sts validates but has no
+		// stem to name it by, so the filename stands in.
+		{".github/chainguard/.sts.yaml", ".sts.yaml"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			if got := policyName(tc.path); got != tc.want {
+				t.Errorf("policyName(%q) = %q, want %q", tc.path, got, tc.want)
+			}
+			// Every name must be non-empty, or the event subject ends up with a
+			// dangling separator.
+			if policyName(tc.path) == "" {
+				t.Error("policy name must not be empty")
+			}
+		})
+	}
+}
+
+// policyTreeServer serves the two calls policySnapshot makes — a commit lookup
+// to prove the ref resolves, then a listing of the policy directory — from an
+// in-memory view of each ref. A ref absent from trees resolves but has no
+// policy directory; a ref listed in unresolvable 404s the commit lookup, which
+// is how a rewound-away SHA behaves once GitHub has collected it.
+func policyTreeServer(t *testing.T, trees map[string][]string, unresolvable ...string) *github.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		if slices.Contains(unresolvable, r.PathValue("ref")) {
+			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
+		paths, ok := trees[r.URL.Query().Get("ref")]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		entries := make([]map[string]string, 0, len(paths))
+		for _, p := range paths {
+			// "path:sha" so a test can hold a path steady while its content moves.
+			name, sha, _ := strings.Cut(p, ":")
+			entries = append(entries, map[string]string{
+				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
+			})
+		}
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			t.Error(err)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func TestPolicyChangesFromSnapshot(t *testing.T) {
+	const (
+		added   = ".github/chainguard/added.sts.yaml"
+		kept    = ".github/chainguard/kept.sts.yaml"
+		edited  = ".github/chainguard/edited.sts.yaml"
+		removed = ".github/chainguard/removed.sts.yaml"
+	)
+
+	for _, tc := range []struct {
+		name          string
+		before, after []string
+		beforeRef     string
+		unresolvable  []string
+		want          []PolicyChange
+		wantErr       bool
+	}{{
+		name:      "restores a policy deleted before the rewind",
+		beforeRef: "before",
+		before:    []string{},
+		after:     []string{added + ":sha1"},
+		want:      []PolicyChange{{Path: added, Policy: "added", Action: PolicyCreated}},
+	}, {
+		name:      "content change at a steady path is an update",
+		beforeRef: "before",
+		before:    []string{edited + ":old"},
+		after:     []string{edited + ":new"},
+		want:      []PolicyChange{{Path: edited, Policy: "edited", Action: PolicyUpdated}},
+	}, {
+		name:      "identical blobs report nothing",
+		beforeRef: "before",
+		before:    []string{kept + ":same"},
+		after:     []string{kept + ":same"},
+		want:      nil,
+	}, {
+		name:      "policy gone at after is a deletion",
+		beforeRef: "before",
+		before:    []string{removed + ":sha1"},
+		after:     []string{},
+		want:      []PolicyChange{{Path: removed, Policy: "removed", Action: PolicyDeleted}},
+	}, {
+		name:      "a created ref has no prior state",
+		beforeRef: zeroHash,
+		after:     []string{added + ":sha1"},
+		want:      []PolicyChange{{Path: added, Policy: "added", Action: PolicyCreated}},
+	}, {
+		// The whole point of resolving the ref first: without it a collected
+		// SHA would 404 and read as "no policies", turning every live policy
+		// into a spurious deletion.
+		name:         "an unreachable before is an error, not an empty tree",
+		beforeRef:    "before",
+		after:        []string{kept + ":sha1"},
+		unresolvable: []string{"before"},
+		wantErr:      true,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			trees := map[string][]string{"after": tc.after}
+			if tc.before != nil {
+				trees["before"] = tc.before
+			}
+			client := policyTreeServer(t, trees, tc.unresolvable...)
+
+			v := &Validator{}
+			got, _, err := v.policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", tc.beforeRef, "after")
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got changes %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if diff := cmp.Diff(tc.want, got); diff != "" {
+				t.Errorf("unexpected changes (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// TestValidatePoliciesCompilesTrustPolicies proves validatePolicies COMPILES
+// repo and org trust policies rather than merely unmarshalling them. "[unclosed"
+// is a well-formed YAML string, so yaml.UnmarshalStrict accepts it; only
+// Compile() rejects it. Without compiling, the check run reports such a file
+// Valid and the policy fails only at token-exchange time. The org trusted-issuer
+// allowlist already gets this treatment, and the two must not diverge.
+func TestValidatePoliciesCompilesTrustPolicies(t *testing.T) {
+	tests := []struct {
+		name    string
+		repo    string
+		policy  string
+		wantErr string
+	}{{
+		name:    "repo policy with uncompilable subject_pattern",
+		repo:    "bar",
+		policy:  "issuer: https://example.com\nsubject_pattern: \"[unclosed\"\n",
+		wantErr: "subject_pattern",
+	}, {
+		name:    "org policy with uncompilable issuer_pattern",
+		repo:    ".github",
+		policy:  "issuer_pattern: \"[unclosed\"\nsubject: s\n",
+		wantErr: "issuer_pattern",
+	}, {
+		name:    "repo policy with a claim_pattern that escapes the anchoring group",
+		repo:    "bar",
+		policy:  "issuer: https://example.com\nsubject: s\nclaim_pattern:\n  ref: \"a)|(\"\n",
+		wantErr: "claim_pattern",
+	}, {
+		name:   "repo policy with a top-level alternation compiles",
+		repo:   "bar",
+		policy: "issuer: https://example.com\nsubject_pattern: \"a|b\"\n",
+	}, {
+		// GitHub preserves repository-name case, so ".GitHub" must still reach
+		// the org arm, and that arm must compile.
+		name:    "org policy in a case-folded repo name is compiled",
+		repo:    ".GitHub",
+		policy:  "issuer_pattern: \"[unclosed\"\nsubject: s\n",
+		wantErr: "issuer_pattern",
+	}, {
+		// "repositories" is only valid on an org policy: strict-unmarshalling
+		// this as a repo-level TrustPolicy would reject it.
+		name:   "org policy in a case-folded repo name keeps its org-only fields",
+		repo:   ".GitHub",
+		policy: "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n",
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const path = ".github/chainguard/test.sts.yaml"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/contents/"+path) {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(&github.RepositoryContent{
+					Type:     new("file"),
+					Name:     new("test.sts.yaml"),
+					Path:     github.Ptr(path),
+					Encoding: new("base64"),
+					Content:  new(base64.StdEncoding.EncodeToString([]byte(tt.policy))),
+				}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer srv.Close()
+
+			gh, err := github.NewClient(
+				github.WithHTTPClient(srv.Client()),
+				github.WithEnterpriseURLs(srv.URL, srv.URL),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			results, err := validatePoliciesForRepo(slogtest.Context(t), gh, "foo", tt.repo, tt.repo, "deadbeef", []string{path}, ".github")
+			if verr, ok := results[path]; !ok || (verr != nil) != (tt.wantErr != "") {
+				t.Errorf("results[%q] = (%v, present=%t), want (err=%t, present=true)", path, verr, ok, tt.wantErr != "")
+			}
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("validatePolicies() = %v, want nil", err)
+			case tt.wantErr != "" && err == nil:
+				t.Fatalf("validatePolicies() = nil, want an error naming %s", tt.wantErr)
+			case tt.wantErr != "" && !strings.Contains(err.Error(), tt.wantErr):
+				t.Errorf("validatePolicies() = %q, want it to name %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// forcedPushServer stands up the GitHub endpoints a forced push to the default
+// branch exercises: the token mint and policy file reads come from testdata,
+// while the policy directory listing is driven per-ref by trees.
+func forcedPushServer(t *testing.T, trees map[string][]string, unresolvable ...string) *httptest.Server {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		if slices.Contains(unresolvable, r.PathValue("ref")) {
+			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/"+policyDir, func(w http.ResponseWriter, r *http.Request) {
+		paths, ok := trees[r.URL.Query().Get("ref")]
+		if !ok {
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+			return
+		}
+		entries := make([]map[string]string, 0, len(paths))
+		for _, p := range paths {
+			name, sha, _ := strings.Cut(p, ":")
+			entries = append(entries, map[string]string{
+				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
+			})
+		}
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			t.Error(err)
+		}
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// sendForcedPush posts a forced push of an empty commit list to the default
+// branch — the shape a pure rewind (git reset --hard <ancestor>; push -f) has.
+func sendForcedPush(t *testing.T, v *Validator, secret []byte) {
+	t.Helper()
+
+	srv := httptest.NewServer(v)
+	t.Cleanup(srv.Close)
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:     new("refs/heads/main"),
+		Before:  new("before"),
+		After:   new("after"),
+		Forced:  new(true),
+		Sender:  &github.User{Login: new("mallory"), ID: new(int64(99))},
+		Commits: []*github.HeadCommit{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+}
+
+func forcedPushValidator(t *testing.T, gh *httptest.Server, ce *fakeCEClient) (*Validator, []byte, *PolicyEmitter) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	return &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}, secret, emitter
+}
+
+// TestForcedPushRewindEmitsRestoredPolicy covers the suppression primitive a
+// commit-derived audit trail has: deleting a policy is recorded, then a rewind
+// force-push makes it live again while carrying no commits at all. Detection
+// has to compare state, not commits, or the stream's last word on the policy
+// stays "deleted" while the policy is back in force.
+func TestForcedPushRewindEmitsRestoredPolicy(t *testing.T) {
+	const restored = ".github/chainguard/test.sts.yaml"
+
+	gh := forcedPushServer(t, map[string][]string{
+		"before": {},
+		"after":  {restored + ":sha1"},
+	})
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected the restored policy to be reported, got %d events", len(events))
+	}
+
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change == nil {
+		t.Fatal("expected a change to be attached")
+	}
+	if pe.Change.Path != restored || pe.Change.Action != PolicyCreated {
+		t.Errorf("got %s %q, want %s created", pe.Change.Action, pe.Change.Path, restored)
+	}
+	if pe.Detection != DetectionSnapshot {
+		t.Errorf("got detection %q, want %q", pe.Detection, DetectionSnapshot)
+	}
+	if !pe.Forced {
+		t.Error("expected the event to record that the push was forced")
+	}
+	// The restored policy is live, so its verdict has to be authoritative
+	// rather than the unknown a deletion would carry.
+	if pe.Valid == nil || !*pe.Valid {
+		t.Errorf("got Valid=%v, want true", pe.Valid)
+	}
+}
+
+// TestForcedPushDegradedEmitsMarker covers the case where the pre-push SHA has
+// been collected and the diff cannot be computed. Silence is what suppression
+// looks like, so the gap has to be published rather than merely logged — and
+// because only the *previous* SHA is unresolvable, the listing at the pushed
+// SHA still says which policies the rewind left in force.
+func TestForcedPushDegradedEmitsMarker(t *testing.T) {
+	gh := forcedPushServer(t, map[string][]string{
+		"after": {".github/chainguard/test.sts.yaml:sha1"},
+	}, "before")
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 2 {
+		t.Fatalf("expected a marker and a live policy record, got %d events", len(events))
+	}
+
+	var marker, record PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(events[1].Data(), &record); err != nil {
+		t.Fatal(err)
+	}
+
+	// The marker states that the change list cannot be trusted to be complete,
+	// which is a statement about the push rather than about any one policy.
+	if marker.Change != nil {
+		t.Errorf("marker should carry no change, got %+v", marker.Change)
+	}
+	if marker.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", marker.Detection, DetectionDegraded)
+	}
+	if marker.DetectionError == "" {
+		t.Error("expected the marker to explain why detection degraded")
+	}
+	// A marker with no policy attached still has to be attributable.
+	if want := "foo/bar"; events[0].Subject() != want {
+		t.Errorf("got subject %q, want %q", events[0].Subject(), want)
+	}
+	if marker.Actor != "mallory" {
+		t.Errorf("got actor %q, want mallory", marker.Actor)
+	}
+
+	// The record names a policy that is live after the rewind. Its action is
+	// "present", not "created": without the prior state there is no honest way
+	// to say whether this push changed it.
+	if record.Change == nil {
+		t.Fatal("expected a per-policy record for the policy live after the rewind")
+	}
+	if got, want := record.Change.Path, ".github/chainguard/test.sts.yaml"; got != want {
+		t.Errorf("got path %q, want %q", got, want)
+	}
+	if record.Change.Action != PolicyPresent {
+		t.Errorf("got action %q, want %q", record.Change.Action, PolicyPresent)
+	}
+	if record.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", record.Detection, DetectionDegraded)
+	}
+	// The check-run gate is the point of listing the live state: the policy
+	// was read and has an authoritative verdict, rather than the unknown the
+	// commit-list fallback would have left behind.
+	if record.Valid == nil || !*record.Valid {
+		t.Errorf("got Valid=%v, want true — the live policy should still be validated", record.Valid)
+	}
+	if want := "foo/bar/test"; events[1].Subject() != want {
+		t.Errorf("got subject %q, want %q", events[1].Subject(), want)
+	}
+}
+
+// TestPushAddThenDeleteCreatesNoCheckRun pins the behaviour change that came
+// with sharing one change list between reporting and validation.
+//
+// A policy added and then removed in the same push does not exist at the head
+// SHA. Validating it would 404 and fail the check run for a file the push
+// deliberately left absent, which is the same reasoning the old code already
+// applied to removals within a single diff — it just never applied it across
+// commits. The removal is still reported, because it is a real policy change.
+func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
+	const ephemeral = ".github/chainguard/ephemeral.sts.yaml"
+
+	var checkRuns atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		checkRuns.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	// Deliberately unregistered: reading the policy at the head SHA would 404,
+	// which is exactly the failure this test asserts we no longer provoke.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("octocat"), ID: new(int64(1))},
+		Commits: []*github.HeadCommit{
+			{Added: []string{ephemeral}},
+			{Removed: []string{ephemeral}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	if got := checkRuns.Load(); got != 0 {
+		t.Errorf("created %d check runs for a policy that does not exist at the head SHA, want 0", got)
+	}
+
+	// The deletion is still a policy change and still has to be reported.
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected the deletion to be reported, got %d events", len(events))
+	}
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change == nil || pe.Change.Action != PolicyDeleted {
+		t.Errorf("got %+v, want a deletion of %s", pe.Change, ephemeral)
+	}
+	if pe.Valid != nil {
+		t.Errorf("got Valid=%v, want nil — the path was never read", pe.Valid)
+	}
+	if pe.PushError != "" {
+		t.Errorf("nothing failed handling this push, got push_error %q", pe.PushError)
+	}
+}
+
+// TestRateLimitedPushReportsNoVerdict covers the distinction PushError draws.
+//
+// A rate limit aborts validation partway, so the policies it never reached have
+// no verdict. Reporting them as valid would be a fabricated pass and reporting
+// them as invalid would be a fabricated failure, so they report neither: Valid
+// is nil and PushError carries the reason the answer is missing.
+func TestRateLimitedPushReportsNoVerdict(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("CheckRun should not be created when rate-limited")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/api/v3/repos/foo/bar/contents/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(map[string]string{"message": "API rate limit exceeded"}) //nolint:errcheck // test server
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:    new("refs/heads/main"),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("octocat"), ID: new(int64(1))},
+		Commits: []*github.HeadCommit{{
+			Added: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected %d so GitHub acks the delivery, got %d", http.StatusOK, resp.StatusCode)
+	}
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 2 {
+		t.Fatalf("expected both policy changes to be reported, got %d events", len(events))
+	}
+	for _, e := range events {
+		var pe PolicyEvent
+		if err := json.Unmarshal(e.Data(), &pe); err != nil {
+			t.Fatal(err)
+		}
+		if pe.Valid != nil {
+			t.Errorf("%s: got Valid=%v, want nil — the rate limit means there is no verdict", pe.Change.Path, *pe.Valid)
+		}
+		if pe.PushError == "" {
+			t.Errorf("%s: want push_error explaining why the verdict is missing", pe.Change.Path)
+		}
+		// The change itself is still reported: it came from the signed
+		// payload, which the rate limit does not affect.
+		if pe.Change == nil || pe.Change.Action != PolicyCreated {
+			t.Errorf("got %+v, want the creation to be reported regardless", pe.Change)
+		}
+	}
+}
+
+// TestForcedPushDegradedBothRefsUnresolvable covers the far end of the
+// degraded path: when even the pushed SHA cannot be listed there is no live
+// state to report, so the marker is all that can honestly be published and the
+// commit list is the only thing left to validate against.
+func TestForcedPushDegradedBothRefsUnresolvable(t *testing.T) {
+	gh := forcedPushServer(t, map[string][]string{}, "before", "after")
+	ce := &fakeCEClient{}
+	v, secret, emitter := forcedPushValidator(t, gh, ce)
+	sendForcedPush(t, v, secret)
+
+	events := drainEvents(t, emitter, ce)
+	if len(events) != 1 {
+		t.Fatalf("expected only the detection marker, got %d events", len(events))
+	}
+
+	var pe PolicyEvent
+	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+		t.Fatal(err)
+	}
+	if pe.Change != nil {
+		t.Errorf("nothing could be listed, so no policy record is warranted: %+v", pe.Change)
+	}
+	if pe.Detection != DetectionDegraded {
+		t.Errorf("got detection %q, want %q", pe.Detection, DetectionDegraded)
+	}
+	if pe.DetectionError == "" {
+		t.Error("expected the marker to explain why detection degraded")
 	}
 }
