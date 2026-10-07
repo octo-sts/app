@@ -1257,6 +1257,65 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	}
 }
 
+// The flight key must carry the whole policy key. Two identities in the same
+// repository that miss the cache together must each read their own policy;
+// sharing one flight would hand one caller the other identity's policy.
+func TestConcurrentPolicyReadsForDifferentIdentitiesDoNotShareFlight(t *testing.T) {
+	keyA := freshTPKey(t, "identity-a")
+	keyB := freshTPKey(t, "identity-b")
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	policyFor := func(identity string) string {
+		return "issuer: https://example.com\nsubject: " + identity + "\n"
+	}
+	read := func(w http.ResponseWriter, r *http.Request) {
+		identity := strings.TrimSuffix(r.PathValue("identity"), ".sts.yaml")
+		started <- struct{}{}
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policyFor(identity)))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		raw string
+		err error
+	}
+	results := make(map[string]chan result)
+	for _, key := range []cacheTrustPolicyKey{keyA, keyB} {
+		ch := make(chan result, 1)
+		results[key.identity] = ch
+		// One AppsTransport per leader: ghinstallation v2.19.0 refreshToken writes
+		// BaseURL and Client back into the shared AppsTransport, which races
+		// with NewFromAppsTransport in a concurrent leader.
+		atr := newPolicyReadTransport(t, read)
+		go func() {
+			raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+			ch <- result{raw, err}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("both identities must start their own GitHub read; one joined the other's flight")
+		}
+	}
+	closeRelease()
+	for identity, ch := range results {
+		got := <-ch
+		if got.err != nil || got.raw != policyFor(identity) {
+			t.Errorf("read for %s = (%q, %v), want its own policy", identity, got.raw, got.err)
+		}
+	}
+}
+
 // Sharing a rate-limit result must still let each exchange rotate to a
 // healthy installation. The next read is single-flighted too, so concurrent
 // rotations do not amplify GitHub requests for the same policy.
