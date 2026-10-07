@@ -57,16 +57,16 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, allowedIssuers []string) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		router:        router,
-		sticky:        sticky,
-		apps:          apps,
-		ceclient:      ceclient,
-		domain:        domain,
-		metrics:       metrics,
-		baseURL:       baseURL,
-		orgPolicyRepo: orgPolicyRepo,
+		router:         router,
+		sticky:         sticky,
+		apps:           apps,
+		ceclient:       ceclient,
+		domain:         domain,
+		metrics:        metrics,
+		baseURL:        baseURL,
+		orgPolicyRepo:  orgPolicyRepo,
 		allowedIssuers: allowedIssuers,
 	}
 }
@@ -149,6 +149,7 @@ type sts struct {
 func (s *sts) issuerAllowed(issuer string) bool {
 	return len(s.allowedIssuers) == 0 || slices.Contains(s.allowedIssuers, issuer)
 }
+
 // pinFallbacks rotates non-checks:write pattern picks while quota data is
 // incomplete, mirroring roundRobin's cold-start counter. One counter per
 // (owner, eligible set) so unrelated pins cannot phase-lock each other;
