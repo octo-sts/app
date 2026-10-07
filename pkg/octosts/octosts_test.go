@@ -1234,14 +1234,16 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first GitHub contents read did not start")
 	}
+	secondCtx := newFlightJoinObserver(ctx)
 	go func() {
-		raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		raw, err := s.fetchTrustPolicyRaw(secondCtx, atr, 1234, key)
 		second <- result{raw, err}
 	}()
-	// Give the second miss time to join the in-flight read before the 200. If
-	// it joins late instead, the recheck inside its own flight serves the
-	// cached 200, so the assertions below hold either way.
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-secondCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
 	closeSuccess()
 	gotFirst := <-first
 	close404()
@@ -1363,12 +1365,16 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("rate-limited policy read did not start")
 	}
+	waiterCtx := newFlightJoinObserver(ctx)
 	go func() {
-		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
 		results <- err
 	}()
-	// Keep the first flight open long enough for the second reader to join.
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
 	close(release)
 	for range 2 {
 		if err := <-results; err != nil {
@@ -1690,11 +1696,16 @@ func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("first policy read did not start")
 	}
+	secondCtx := newFlightJoinObserver(ctx)
 	go func() {
-		_, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		_, err := s.fetchTrustPolicyRaw(secondCtx, atr, 1234, key)
 		results <- err
 	}()
-	time.Sleep(30 * time.Millisecond)
+	select {
+	case <-secondCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
 	close(release)
 	for range 2 {
 		err := <-results
