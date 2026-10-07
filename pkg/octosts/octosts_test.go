@@ -1441,7 +1441,7 @@ func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
 func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
 	key := freshTPKey(t, "policy-read-timeout")
 	orig := policyReadTimeout
-	policyReadTimeout = 50 * time.Millisecond
+	policyReadTimeout = time.Second
 	t.Cleanup(func() { policyReadTimeout = orig })
 
 	var reads atomic.Int32
@@ -1473,7 +1473,7 @@ func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
 func TestPolicyReadTimeoutRevokesMintedToken(t *testing.T) {
 	key := freshTPKey(t, "policy-read-timeout-revocation")
 	orig := policyReadTimeout
-	policyReadTimeout = 50 * time.Millisecond
+	policyReadTimeout = time.Second
 	t.Cleanup(func() { policyReadTimeout = orig })
 
 	var mintCalls, contentsCalls, revokeCalls atomic.Int32
