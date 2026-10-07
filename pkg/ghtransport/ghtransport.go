@@ -124,3 +124,12 @@ func New(ctx context.Context, appID int64, kmsKey string, env *envConfig.EnvConf
 		KMSKey:         kmsKey,
 	}, env, kmsClient, quota)
 }
+
+// ForInstallation derives a per-installation Transport from a private copy of
+// base. ghinstallation's token refresh writes BaseURL and Client back into the
+// AppsTransport the Transport was derived from, so deriving directly from a
+// base shared across requests races with every other concurrent derivation.
+func ForInstallation(base *ghinstallation.AppsTransport, installationID int64) *ghinstallation.Transport {
+	clone := *base
+	return ghinstallation.NewFromAppsTransport(&clone, installationID)
+}

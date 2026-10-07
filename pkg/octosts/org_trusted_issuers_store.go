@@ -248,7 +248,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	// Label rate-limit metrics with the installation consuming the quota.
 	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
 
-	atr := ghinstallation.NewFromAppsTransport(base, install)
+	atr := ghtransport.ForInstallation(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{s.policyRepo()},
 		Permissions: &github.InstallationPermissions{

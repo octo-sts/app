@@ -288,7 +288,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 
 	// Synthesize a token for the requested scope and permissions based on the
 	// trust policy.
-	atr := ghinstallation.NewFromAppsTransport(base, e.InstallationID)
+	atr := ghtransport.ForInstallation(base, e.InstallationID)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: e.TrustPolicy.Repositories,
 		Permissions:  &e.TrustPolicy.Permissions,
@@ -937,7 +937,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
 	}
 
-	atr := ghinstallation.NewFromAppsTransport(base, install)
+	atr := ghtransport.ForInstallation(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{tpKey.repo},
 		Permissions: &github.InstallationPermissions{

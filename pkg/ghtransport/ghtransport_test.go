@@ -16,10 +16,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	gkms "cloud.google.com/go/kms/apiv1"
+	"github.com/bradleyfalzon/ghinstallation/v2"
+	jwt "github.com/golang-jwt/jwt/v4"
 	"github.com/octo-sts/app/pkg/appconfig"
 	"github.com/octo-sts/app/pkg/envconfig"
 	"github.com/octo-sts/app/pkg/ghinstall"
@@ -342,4 +345,46 @@ func generateTestCertificateFile(t *testing.T) string {
 	}
 
 	return tmpFile.Name()
+}
+
+func TestForInstallationDoesNotShareAppsTransport(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"token":      "installation-token",
+			"expires_at": time.Now().Add(time.Hour).Format(time.RFC3339),
+		})
+	}))
+	t.Cleanup(srv.Close)
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer := ghinstallation.NewRSASigner(jwt.SigningMethodRS256, key)
+	base, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, 1234, ghinstallation.WithSigner(signer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.BaseURL = srv.URL
+	baseClient := base.Client
+
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			tok, err := ForInstallation(base, int64(i+1)).Token(t.Context())
+			if err != nil {
+				t.Errorf("installation %d: %v", i+1, err)
+				return
+			}
+			if tok != "installation-token" {
+				t.Errorf("installation %d token = %q", i+1, tok)
+			}
+		}()
+	}
+	wg.Wait()
+	// Token refresh writes Client back into the AppsTransport it was derived
+	// from; a shared base would have been replaced by the first refresh.
+	assert.Same(t, baseClient, base.Client)
+	assert.Equal(t, srv.URL, base.BaseURL)
 }
