@@ -81,7 +81,7 @@ func TestExchangeChecksAllowlistBeforeDiscovery(t *testing.T) {
 	})
 
 	s := &sts{allowedIssuers: []string{"https://token.actions.githubusercontent.com"}}
-	_, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "org/repo"})
+	_, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}})
 	if err == nil {
 		t.Fatal("Exchange() succeeded, wanted a refusal")
 	}
@@ -109,7 +109,7 @@ func TestExchangeWithoutAllowlistPerformsDiscovery(t *testing.T) {
 	})
 
 	s := &sts{}
-	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scope: "org/repo"}); err == nil {
+	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: "foo", Scopes: []string{"org/repo"}}); err == nil {
 		t.Fatal("Exchange() succeeded, wanted discovery against the stub to fail")
 	}
 	if hits.Load() == 0 {
