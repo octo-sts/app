@@ -198,7 +198,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			event.SetType("dev.octo-sts.exchange")
 			event.SetSubject(fmt.Sprintf("%s/%s", requestScope, request.GetIdentity()))
 			event.SetSource(fmt.Sprintf("https://%s", s.domain))
-			if err != nil {
+			if err != nil && e.Error == "" {
 				e.Error = err.Error()
 			}
 			if err := event.SetData(cloudevents.ApplicationJSON, e); err != nil {
@@ -272,17 +272,24 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 		return nil, status.Error(codes.InvalidArgument, "identity must be a single path segment")
 	}
 
-	var base *ghinstallation.AppsTransport
-	base, e.InstallationID, e.TrustPolicy, e.IssuerAllowlist, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject, issuer)
-	if err != nil {
-		return nil, err
+	// Check the token against the federation rules. The trust policy may live
+	// in a private repo, so the detailed reason (which names the policy's
+	// patterns) goes to the log and the event, never to the caller.
+	authorize := func(tp *OrgTrustPolicy) error {
+		clog.FromContext(ctx).Infof("trust policy: %#v", tp)
+		var cerr error
+		e.Actor, cerr = tp.CheckToken(tok, s.domain)
+		if cerr != nil {
+			clog.FromContext(ctx).Warnf("token does not match trust policy: %v", cerr)
+			e.Error = cerr.Error()
+			return status.Error(codes.PermissionDenied, "token does not match trust policy")
+		}
+		return nil
 	}
-	clog.FromContext(ctx).Infof("trust policy: %#v", e.TrustPolicy)
 
-	// Check the token against the federation rules.
-	e.Actor, err = e.TrustPolicy.CheckToken(tok, s.domain)
+	var base *ghinstallation.AppsTransport
+	base, e.InstallationID, e.TrustPolicy, e.IssuerAllowlist, err = s.lookupInstallAndTrustPolicy(ctx, requestScope, request.GetIdentity(), tok.Subject, issuer, authorize)
 	if err != nil {
-		clog.FromContext(ctx).Warnf("token does not match trust policy: %v", err)
 		return nil, err
 	}
 
@@ -702,7 +709,12 @@ func locate(insts []ghinstall.Installation, eligible map[int64]bool, id int64) (
 }
 
 // lookupInstallAndTrustPolicy resolves the installation, enforces the
-// organization trusted-issuer allowlist, and loads the trust policy.
+// organization trusted-issuer allowlist, loads the trust policy, and calls
+// authorize on it before picking the exchange installation.
+//
+// The caller is unauthorized until authorize passes, so the app pin is only
+// resolved (and its errors surfaced) after it. If authorize fails, the policy
+// and the installation that read it are still returned for the audit event.
 //
 // issuer must be the value apiauth.ExtractIssuer returned — the same one
 // provider.Get was given — because allowlist entries are always written with a
@@ -712,7 +724,7 @@ func locate(insts []ghinstall.Installation, eligible map[int64]bool, id int64) (
 // TrustPolicy.CheckToken rejects that outright because
 // oidcvalidate.IsValidIssuer returns false for it. Passing the normalized value
 // is the conservative choice should either of those change.
-func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, subject, issuer string) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, *IssuerDecision, error) {
+func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, subject, issuer string, authorize func(*OrgTrustPolicy) error) (*ghinstallation.AppsTransport, int64, *OrgTrustPolicy, *IssuerDecision, error) {
 	otp := &OrgTrustPolicy{}
 	var tp trustPolicy = &otp.TrustPolicy
 
@@ -766,7 +778,11 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, decision, err
 	}
 
-	// Now that we know the permissions, pick the exchange installation.
+	if err := authorize(otp); err != nil {
+		return nil, readID, otp, decision, err
+	}
+
+	// Now that the caller is authorized, pick the exchange installation.
 	atr, id, err := s.getExchangeInstall(ctx, pool, owner, scope, identity, subject, &otp.TrustPolicy, readAtr, readID)
 	if err != nil {
 		return nil, 0, nil, decision, err
@@ -907,11 +923,11 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 
 	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
-		return status.Errorf(codes.NotFound, "unable to parse trust policy found for %q", tpKey.identity)
+		return status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 	if err := tp.Compile(); err != nil {
 		clog.InfoContextf(ctx, "failed to compile trust policy: %v", err)
-		return status.Errorf(codes.NotFound, "unable to compile trust policy found for %q", tpKey.identity)
+		return status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 	}
 	return nil
 }
@@ -977,12 +993,13 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			if file == nil {
 				// GetContents returns a nil file when the path is a directory;
 				// GetContent would panic on it. Treat it as no policy.
-				return "", backoff.Permanent(status.Errorf(codes.NotFound, "trust policy path is not a file for %q", tpKey.identity))
+				clog.InfoContextf(ctx, "trust policy path is not a file for %s", tpKey)
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 			}
 			raw, rerr := file.GetContent()
 			if rerr != nil {
 				clog.ErrorContextf(ctx, "failed to read trust policy: %v", rerr)
-				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to read trust policy found for %q", tpKey.identity))
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 			}
 			// Populate the caches on the fresh-fetch path only. The stale-serve
 			// branch below must not reach here, or it would renew the stale

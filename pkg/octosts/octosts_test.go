@@ -296,6 +296,84 @@ func TestExchange(t *testing.T) {
 	}
 }
 
+// TestExchangeMismatchDoesNotLeakPolicy verifies that a caller whose token does
+// not match a trust policy learns nothing about the policy's contents: neither
+// the patterns CheckToken compared against nor the app pin, which used to be
+// resolved (and its error returned) before the token was checked.
+func TestExchangeMismatchDoesNotLeakPolicy(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "private"}
+	trustPolicies.Remove(key)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("cannot generate RSA key %v", err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatalf("jose.NewSigner() = %v", err)
+	}
+	iss := "https://token.actions.githubusercontent.com"
+	token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+		Subject:  "repo:attacker/whatever:ref:refs/heads/main",
+		Issuer:   iss,
+		Audience: josejwt.Audience{"octosts"},
+		Expiry:   josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+	}).Serialize()
+	if err != nil {
+		t.Fatalf("CompactSerialize failed: %v", err)
+	}
+	provider.AddTestKeySetVerifier(t, iss, &oidc.StaticKeySet{
+		PublicKeys: []crypto.PublicKey{pk.Public()},
+	})
+	ctx := metadata.NewIncomingContext(context.Background(), metadata.MD{"authorization": []string{"Bearer " + token}})
+
+	pool := &ghinstall.OrgPool{
+		M:        &fakeInstallMgr{atr: newAppsTransport(t, newFakeGitHub())},
+		AppCount: 1,
+	}
+	ce := &captureCEClient{}
+	sts := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool}), ceclient: ce, metrics: true}
+
+	_, err = sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "private", Scopes: []string{"org/repo"}})
+	if got := status.Code(err); got != codes.PermissionDenied {
+		t.Fatalf("Exchange() code = %v, want PermissionDenied; err = %v", got, err)
+	}
+	if got, want := status.Convert(err).Message(), "token does not match trust policy"; got != want {
+		t.Errorf("Exchange() message = %q, want %q", got, want)
+	}
+
+	// The operator-facing audit event keeps the detail the caller does not get.
+	sent := ce.sent()
+	if len(sent) != 1 {
+		t.Fatalf("emitted %d events, want 1", len(sent))
+	}
+	var ev Event
+	if err := json.Unmarshal(sent[0].Data(), &ev); err != nil {
+		t.Fatalf("decoding event data: %v", err)
+	}
+	if !strings.Contains(ev.Error, "secret-internal-repo") {
+		t.Errorf("Event.Error = %q, want the detailed mismatch reason", ev.Error)
+	}
+	if ev.InstallationID != 1234 {
+		t.Errorf("Event.InstallationID = %d, want 1234 (the installation that read the policy)", ev.InstallationID)
+	}
+
+	// A malformed policy must be indistinguishable from a missing one.
+	_, missing := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "does-not-exist", Scopes: []string{"org/repo"}})
+	_, malformed := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: "malformed", Scopes: []string{"org/repo"}})
+	for _, id := range []string{"does-not-exist", "malformed"} {
+		k := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: id}
+		t.Cleanup(func() { trustPolicies.Remove(k) })
+	}
+	if status.Code(missing) != codes.NotFound {
+		t.Fatalf("Exchange(missing) = %v, want NotFound", missing)
+	}
+	if got, want := strings.ReplaceAll(status.Convert(malformed).Message(), "malformed", "does-not-exist"), status.Convert(missing).Message(); status.Code(malformed) != codes.NotFound || got != want {
+		t.Errorf("Exchange(malformed) = %v, want same response as missing policy (%v)", malformed, missing)
+	}
+}
+
 // TestExchangeCustomOrgPolicyRepo verifies that an org-scoped exchange reads
 // its trust policy from the repo named by ORG_POLICY_REPO rather than the
 // hardcoded ".github" default.
@@ -1067,7 +1145,10 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
 	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
-	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer)
+	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer, func(*OrgTrustPolicy) error {
+		t.Fatal("authorize called for a negatively cached policy")
+		return nil
+	})
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}

@@ -1,0 +1,7 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Fails strict parsing (unknown field); see TestExchangeMismatchDoesNotLeakPolicy.
+issuer: https://token.actions.githubusercontent.com
+subject: foo
+not_a_real_field: true

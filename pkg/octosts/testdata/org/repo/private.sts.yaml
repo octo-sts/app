@@ -1,0 +1,12 @@
+# Copyright 2026 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+# Stands in for a policy in a private repo. Nothing below may reach a caller
+# whose token does not match (see TestExchangeMismatchDoesNotLeakPolicy).
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:org/secret-internal-repo:environment:prod"
+audience: octosts
+app: secret-pinned-app
+
+permissions:
+  pull_requests: write
