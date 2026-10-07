@@ -1383,6 +1383,110 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 	}
 }
 
+// flightJoinObserver reports when a policy-read caller is parked on the
+// flight. The waiter's first call to Done is the select after DoChan has
+// registered it, so the leader can be held until the join is certain.
+type flightJoinObserver struct {
+	context.Context
+	once   sync.Once
+	joined chan struct{}
+}
+
+func newFlightJoinObserver(ctx context.Context) *flightJoinObserver {
+	return &flightJoinObserver{Context: ctx, joined: make(chan struct{})}
+}
+
+func (o *flightJoinObserver) Done() <-chan struct{} {
+	o.once.Do(func() { close(o.joined) })
+	return o.Context.Done()
+}
+
+func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) {
+	key := freshTPKey(t, "foreign-rate-limit")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	var limitedReads, healthyReads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		limitedReads.Add(1)
+		signalStarted()
+		<-release
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		healthyReads.Add(1)
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	// Rotation only ever hands out the limited installation, so the waiter
+	// can recover only by re-reading on the healthy one it already holds.
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: limited}, AppCount: 2}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		leaderDone <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("rate-limited policy read did not start")
+	}
+
+	waiterCtx := newFlightJoinObserver(ctx)
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		waiterDone <- err
+	}()
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("waiter never joined the flight")
+	}
+	closeRelease()
+
+	if err := <-waiterDone; err != nil {
+		t.Fatalf("waiter on a healthy installation = %v, want success", err)
+	}
+	<-leaderDone
+	if got := healthyReads.Load(); got != 1 {
+		t.Errorf("healthy installation read %d times, want 1", got)
+	}
+	if got := limitedReads.Load(); got < 1 || got > 2 {
+		t.Errorf("limited installation read %d times, want 1 (leader) or 2 (leader plus its rotation)", got)
+	}
+}
+
+func TestPolicyReadLeaderKeepsItsOwnRateLimit(t *testing.T) {
+	key := freshTPKey(t, "own-rate-limit")
+	var reads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	_, err := (&sts{}).fetchTrustPolicyRaw(t.Context(), limited, 100, key)
+	if got := status.Code(err); got != codes.ResourceExhausted {
+		t.Fatalf("code = %v, want ResourceExhausted; err = %v", got, err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub read %d times, want 1: a leader must not re-read on its own rate limit", got)
+	}
+}
+
 func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
 	key := freshTPKey(t, "policy-after-cancel")
 	started := make(chan struct{})
