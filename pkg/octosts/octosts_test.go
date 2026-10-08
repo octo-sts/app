@@ -1290,13 +1290,10 @@ func TestConcurrentPolicyReadsForDifferentIdentitiesDoNotShareFlight(t *testing.
 		err error
 	}
 	results := make(map[string]chan result)
+	atr := newPolicyReadTransport(t, read)
 	for _, key := range []cacheTrustPolicyKey{keyA, keyB} {
 		ch := make(chan result, 1)
 		results[key.identity] = ch
-		// One AppsTransport per leader: ghinstallation v2.19.0 refreshToken writes
-		// BaseURL and Client back into the shared AppsTransport, which races
-		// with NewFromAppsTransport in a concurrent leader.
-		atr := newPolicyReadTransport(t, read)
 		go func() {
 			raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
 			ch <- result{raw, err}
@@ -1386,6 +1383,82 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 	}
 	if got := healthyReads.Load(); got != 1 {
 		t.Errorf("healthy installation read %d times, want 1", got)
+	}
+}
+
+// The flight shares the policy read, never the authorization decision: each
+// caller's token is checked against the shared policy after the flight, so a
+// refactor that moved the authorize gate inside the flight would fail here.
+func TestConcurrentCallersShareOneFlightButAuthorizeSeparately(t *testing.T) {
+	key := freshTPKey(t, "authorize-gate")
+	orgIssuers.Remove(key.owner)
+	t.Cleanup(func() { orgIssuers.Remove(key.owner) })
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	const allowed = "repo:org/repo:ref:refs/heads/main"
+	const policy = "issuer: https://example.com\nsubject: " + allowed + "\n"
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, r *http.Request) {
+		// The helper routes the org allowlist path here too; no allowlist applies.
+		if strings.HasSuffix(r.URL.Path, OrgTrustedIssuersPath) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			return
+		}
+		reads.Add(1)
+		signalStarted()
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
+	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool}), domain: "octo-sts.dev"}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	authorizeAs := func(sub string) func(*OrgTrustPolicy) error {
+		tok := &oidc.IDToken{Issuer: "https://example.com", Subject: sub, Audience: []string{"octo-sts.dev"}}
+		return func(otp *OrgTrustPolicy) error {
+			_, err := otp.CheckToken(tok, s.domain)
+			return err
+		}
+	}
+	lookup := func(ctx context.Context, sub string) error {
+		_, _, _, _, err := s.lookupInstallAndTrustPolicy(ctx, "org/repo", key.identity, sub, "https://example.com", authorizeAs(sub))
+		return err
+	}
+
+	matching := make(chan error, 1)
+	go func() { matching <- lookup(ctx, allowed) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("the first caller's policy read did not start")
+	}
+	waiterCtx := newFlightJoinObserver(ctx)
+	mismatched := make(chan error, 1)
+	go func() { mismatched <- lookup(waiterCtx, "repo:attacker/other:ref:refs/heads/main") }()
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("the second caller never joined the flight")
+	}
+	closeRelease()
+
+	if err := <-matching; err != nil {
+		t.Errorf("matching caller: %v, want success", err)
+	}
+	if err := <-mismatched; status.Code(err) != codes.PermissionDenied {
+		t.Errorf("mismatched caller: %v, want PermissionDenied from its own authorize gate", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("policy read %d times, want 1 shared flight", got)
 	}
 }
 
