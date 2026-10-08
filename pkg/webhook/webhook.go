@@ -518,7 +518,7 @@ func (e *Validator) clientForInstallation(installationID int64) (*github.Client,
 	}
 
 	opts := []github.ClientOptionsFunc{
-		github.WithTransport(ghinstallation.NewFromAppsTransport(e.Transport, installationID)),
+		github.WithTransport(ghtransport.ForInstallation(e.Transport, installationID)),
 	}
 	if e.Transport.BaseURL != "" {
 		opts = append(opts, github.WithEnterpriseURLs(e.Transport.BaseURL, e.Transport.BaseURL))
