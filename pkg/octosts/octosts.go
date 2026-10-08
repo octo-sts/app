@@ -57,16 +57,17 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, allowedIssuers []string) pboidc.SecurityTokenServiceServer {
 	return &sts{
-		router:        router,
-		sticky:        sticky,
-		apps:          apps,
-		ceclient:      ceclient,
-		domain:        domain,
-		metrics:       metrics,
-		baseURL:       baseURL,
-		orgPolicyRepo: orgPolicyRepo,
+		router:         router,
+		sticky:         sticky,
+		apps:           apps,
+		ceclient:       ceclient,
+		domain:         domain,
+		metrics:        metrics,
+		baseURL:        baseURL,
+		orgPolicyRepo:  orgPolicyRepo,
+		allowedIssuers: allowedIssuers,
 	}
 }
 
@@ -121,6 +122,10 @@ type sts struct {
 	baseURL       string
 	orgPolicyRepo string
 
+	// allowedIssuers, when non-empty, confines OIDC discovery to these
+	// issuers. Empty means any issuer the trust policies allow.
+	allowedIssuers []string
+
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
 	orgIssuerFlight singleflight.Group
@@ -134,6 +139,15 @@ type sts struct {
 	// initialized lazily for callers that need a fresh confirmation.
 	pinCandidatesOnce sync.Once
 	pinCandidates     *expirablelru.LRU[string, pinCandidateSnapshot]
+}
+
+// issuerAllowed reports whether issuer may be used for OIDC discovery. An
+// empty allowlist permits any issuer, preserving the behaviour of deployments
+// that have not set one.
+//
+// Matching is exact, as it is for the org-level issuers list.
+func (s *sts) issuerAllowed(issuer string) bool {
+	return len(s.allowedIssuers) == 0 || slices.Contains(s.allowedIssuers, issuer)
 }
 
 // pinFallbacks rotates non-checks:write pattern picks while quota data is
@@ -233,6 +247,14 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// Validate issuer format
 	if !oidcvalidate.IsValidIssuer(issuer) {
 		return nil, status.Error(codes.InvalidArgument, "invalid issuer format")
+	}
+
+	// Confine discovery to issuers the operator named, if any. The bearer
+	// token is still unverified here and names its own issuer, so without
+	// this the caller chooses the host the next line connects to.
+	if !s.issuerAllowed(issuer) {
+		clog.FromContext(ctx).Warnf("issuer not permitted by OCTOSTS_ALLOWED_ISSUERS: %q", issuer)
+		return nil, status.Error(codes.InvalidArgument, "issuer is not allowed")
 	}
 
 	// Fetch the provider from the cache or create a new one and add to the cache
