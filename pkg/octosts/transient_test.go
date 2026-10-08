@@ -109,6 +109,29 @@ func TestFetchTrustPolicyRawRetriesTransient(t *testing.T) {
 	}
 }
 
+// TestFetchTrustPolicyRawTransientHidesCause keeps the transient cause out of
+// the error a caller sees. This error is returned before the caller's token is
+// checked against the policy, and a failed token mint names the installation
+// ID ("could not refresh installation id N's token"). The cause belongs in the
+// server log only.
+func TestFetchTrustPolicyRawTransientHidesCause(t *testing.T) {
+	key := freshTPKey(t, "mint-fails")
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	})
+	atr := newAppsTransport(t, &fakeGitHub{mux: mux})
+	s := &sts{}
+
+	_, err := s.fetchTrustPolicyRaw(context.Background(), atr, 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable; err = %v", got, err)
+	}
+	if want := `transient error fetching trust policy for "mint-fails"`; status.Convert(err).Message() != want {
+		t.Errorf("message = %q, want %q", status.Convert(err).Message(), want)
+	}
+}
+
 // TestFetchTrustPolicyRawRecoversAfterTransient proves the retry actually heals
 // a blip rather than merely reclassifying it.
 func TestFetchTrustPolicyRawRecoversAfterTransient(t *testing.T) {

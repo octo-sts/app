@@ -1099,8 +1099,10 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		if _, ok := status.FromError(err); ok {
 			return "", err
 		}
+		// The cause stays in the log. The caller has not been checked against
+		// the policy yet, and a failed token mint names the installation ID.
 		clog.WarnContextf(ctx, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
-		return "", status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q: %v", tpKey.identity, err)
+		return "", status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q", tpKey.identity)
 	}
 	return raw, nil
 }
