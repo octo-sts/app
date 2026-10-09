@@ -18,7 +18,7 @@ const (
 	maxRetry   = 3
 
 	// policyEventQueueSize bounds the audit backlog held in memory. Sized to
-	// absorb a bulk policy migration plus GitHub's redelivery of it, while
+	// absorb a bulk policy migration plus a manual redelivery of it, while
 	// staying small enough that a wedged sink costs bounded memory.
 	policyEventQueueSize = 2048
 	// policyEmitWorkers deliver concurrently so one slow request does not hold
@@ -34,11 +34,11 @@ const (
 // path.
 //
 // GitHub allows a webhook roughly ten seconds to respond and treats an overrun
-// as a failed delivery, which it then redelivers. Sending inline meant a slow
-// or unavailable ingress could both stall the response and, through that
-// redelivery, duplicate the very events it was failing to accept — while also
-// delaying the policy validation the same request performs. Handlers now
-// enqueue and return.
+// as a failed delivery, which GitHub does not retry automatically, so the event
+// is dropped unless redelivered manually. Sending inline meant a slow or
+// unavailable ingress could stall the response and push the request past that
+// limit, losing the event and delaying the policy validation the same request
+// performs. Handlers now enqueue and return.
 //
 // Enqueue never blocks. Under sustained sink failure the choice is between
 // dropping audit events and stalling webhook responses, and stalling would

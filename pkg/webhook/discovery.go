@@ -16,7 +16,7 @@ import (
 )
 
 // isProvenWebhookRateLimit excludes ordinary permission 403s so discovery
-// failures remain visible while genuine limits do not trigger redelivery.
+// failures remain visible while genuine limits are acknowledged rather than failing the delivery.
 func isProvenWebhookRateLimit(err error) bool {
 	var rate *github.RateLimitError
 	var abuse *github.AbuseRateLimitError

@@ -563,8 +563,10 @@ func (e *Validator) clientForInstallation(installationID int64) (*github.Client,
 // The two fields are deliberately separate from handleSHA's returned error,
 // because "something went wrong" and "what should the HTTP response be" are
 // different questions: a rate limit has to be reported on the events while
-// still answering 200, since a 5xx would have GitHub redeliver the push and
-// amplify load on the API that just rate-limited us.
+// still answering 200: a 5xx would only mark the delivery failed in GitHub's
+// delivery log. GitHub does not retry it, so the event would be dropped unless
+// someone redelivers it, and a manual redelivery would hit the API that just
+// rate-limited us.
 type validationOutcome struct {
 	// verdicts holds one entry per file that was read: nil for a policy that
 	// parsed cleanly, otherwise its own error. A file absent from the map was
@@ -622,8 +624,9 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 		results, err = validatePolicyFiles(ctx, client, owner, readRepo, sha, files, e.policyRepo())
 	}
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
-	// Returning an error would surface as a 5xx, which GitHub treats as a
-	// failed delivery and redelivers — amplifying load on the rate-limited API.
+	// Returning an error would surface as a 5xx, which marks the delivery
+	// failed in GitHub's delivery log. GitHub does not retry it automatically,
+	// so the event would be dropped unless redelivered manually.
 	if isProvenWebhookRateLimit(err) {
 		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, readRepo, sha)
 		// Files validated before the limit was hit still have real verdicts;
