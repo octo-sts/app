@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"time"
 
+	"github.com/chainguard-dev/clog"
 	"github.com/google/go-github/v88/github"
 )
 
@@ -54,6 +56,28 @@ const (
 
 var errPRHeadMismatch = errors.New("pull request head differs from event commit")
 
+// errTooManyPRFiles marks a PR whose diff GitHub cannot list completely. A
+// partial list could miss a changed policy, so callers must not use one.
+var errTooManyPRFiles = errors.New("pull request has more changed files than GitHub lists")
+
+// prTooLargeError reports a PR past GitHub's list-files cap. It matches
+// errTooManyPRFiles. scanErr is set when the policy directory scan that
+// replaces the diff also failed, leaving the head commit unvalidated.
+type prTooLargeError struct {
+	number, count int
+	scanErr       error
+}
+
+func (e *prTooLargeError) Error() string {
+	msg := fmt.Sprintf("pull request %d has %d changed files; GitHub lists at most %d", e.number, e.count, maxPRFiles)
+	if e.scanErr != nil {
+		msg += fmt.Sprintf("; policy directory scan failed: %v", e.scanErr)
+	}
+	return msg
+}
+
+func (e *prTooLargeError) Is(target error) bool { return target == errTooManyPRFiles }
+
 // policyFilesFromPR lists a complete, stable PR diff before selecting policies.
 // owner/repo is where the PR lives; classifyRepo is the repository name used to
 // decide which listed paths are policies, so selection matches how the files
@@ -82,8 +106,11 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 			}
 			return nil, fmt.Errorf("pull request %d head %s differs from event head %s: %w", number, head, expectedHead, errPRHeadMismatch)
 		}
-		if count < 0 || count > maxPRFiles {
-			return nil, fmt.Errorf("pull request %d has %d changed files; GitHub lists at most %d", number, count, maxPRFiles)
+		if count < 0 {
+			return nil, fmt.Errorf("pull request %d reports %d changed files", number, count)
+		}
+		if count > maxPRFiles {
+			return nil, &prTooLargeError{number: number, count: count}
 		}
 
 		seen := make(map[string]struct{}, count)
@@ -144,10 +171,73 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 	return nil, fmt.Errorf("pull request %d file listing stayed incomplete after retry", number)
 }
 
+// prPolicyFiles returns the policy paths to validate for a PR at sha. The PR
+// is listed in prOwner/prRepo; content is read from readOwner/readRepo and
+// classified as classifyRepo, matching how the files will be parsed.
+//
+// When the diff is too large for GitHub to list, every policy in the read
+// repository's policy directory at sha is validated instead. A rate limit
+// during that scan is returned as is. Any other scan failure returns a
+// *prTooLargeError with scanErr set, so the caller can fail the check run
+// rather than skip it.
+func (e *Validator) prPolicyFiles(ctx context.Context, client *github.Client, prOwner, prRepo string, number int, sha, readOwner, readRepo, classifyRepo string) ([]string, error) {
+	files, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, number, sha, classifyRepo)
+	tooLarge, ok := errors.AsType[*prTooLargeError](err)
+	if !ok {
+		return files, err
+	}
+	clog.FromContext(ctx).Warnf("%v; validating every policy in %s/%s@%s instead", tooLarge, readOwner, readRepo, sha)
+	snapshot, err := e.policyTreeSnapshotAs(ctx, client, readOwner, readRepo, classifyRepo, sha)
+	if err != nil {
+		if isProvenWebhookRateLimit(err) {
+			return nil, err
+		}
+		return nil, &prTooLargeError{number: tooLarge.number, count: tooLarge.count, scanErr: err}
+	}
+	files = make([]string, 0, len(snapshot))
+	for path := range snapshot {
+		files = append(files, path)
+	}
+	sort.Strings(files)
+	return files, nil
+}
+
+// reportPRTooLarge posts a failed check run for a PR that could be validated
+// neither by its diff nor by a policy directory scan. The conclusion must be
+// failure: branch protection treats neutral and skipped as passing, so either
+// would let a PR padded past GitHub's cap skip validation.
+func (e *Validator) reportPRTooLarge(ctx context.Context, client *github.Client, owner, repo, sha string, tooLarge *prTooLargeError) (*github.CheckRun, error) {
+	clog.FromContext(ctx).Warnf("failing check run: %v", tooLarge)
+	summary := fmt.Sprintf("Pull request #%d changes %d files. GitHub lists at most %d changed files for a pull request, "+
+		"so the trust policies it touches cannot be identified, and scanning the policy directory instead failed: %v\n\n"+
+		"Split this pull request into smaller ones so each changes at most %d files.",
+		tooLarge.number, tooLarge.count, maxPRFiles, tooLarge.scanErr, maxPRFiles)
+	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
+		Name:        "Trust Policy Validation",
+		HeadSHA:     sha,
+		ExternalID:  new(sha),
+		Status:      new("completed"),
+		Conclusion:  new("failure"),
+		StartedAt:   &github.Timestamp{Time: time.Now()},
+		CompletedAt: &github.Timestamp{Time: time.Now()},
+		Output: &github.CheckRunOutput{
+			Title:   new("Pull request too large to validate"),
+			Summary: new(summary),
+		},
+	})
+	return cr, err
+}
+
 // policyTreeSnapshot reads only the policy directory at a commit and refuses
 // incomplete responses. It avoids both the Compare API's 300-file limit and
 // GitHub's recursive tree limit for large repositories.
 func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Client, owner, repo, ref string) (map[string]string, error) {
+	return e.policyTreeSnapshotAs(ctx, client, owner, repo, repo, ref)
+}
+
+// policyTreeSnapshotAs is policyTreeSnapshot reading from owner/repo but
+// selecting validated paths as classifyRepo, for content read from a fork.
+func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Client, owner, repo, classifyRepo, ref string) (map[string]string, error) {
 	commit, _, err := client.Git.GetCommit(ctx, owner, repo, ref)
 	if err != nil {
 		return nil, err
@@ -190,7 +280,7 @@ func (e *Validator) policyTreeSnapshot(ctx context.Context, client *github.Clien
 		switch entry.GetType() {
 		case "blob":
 			path := policyDir + "/" + entry.GetPath()
-			if isValidatedPath(repo, path, e.policyRepo()) {
+			if isValidatedPath(classifyRepo, path, e.policyRepo()) {
 				out[path] = entry.GetSHA()
 			}
 		case "tree", "commit":

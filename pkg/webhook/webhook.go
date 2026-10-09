@@ -1055,8 +1055,11 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 
-	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha, repo)
+	files, err := e.prPolicyFiles(ctx, client, owner, repo, pr.GetNumber(), sha, owner, repo, repo)
 	if err != nil {
+		if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
+			return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
+		}
 		if errors.Is(err, errPRHeadMismatch) || isProvenWebhookRateLimit(err) {
 			log.Warnf("skipping PR file validation: %v", err)
 			return nil, nil
@@ -1178,8 +1181,11 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if strings.EqualFold(prOwner, owner) && strings.EqualFold(prRepo, e.policyRepo()) {
 			classification = prRepo
 		}
-		prFiles, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, classification)
+		prFiles, err := e.prPolicyFiles(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, owner, repo, classification)
 		if err != nil {
+			if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
+				return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
+			}
 			if errors.Is(err, errPRHeadMismatch) {
 				log.Warnf("PR %s/%s#%d head differs from check suite commit; skipping CheckRun: %v", prOwner, prRepo, pr.GetNumber(), err)
 				return nil, nil

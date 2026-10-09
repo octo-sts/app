@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -555,5 +556,266 @@ func TestNewRefPushAtPayloadLimit(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPolicyFilesFromPRRefusesTooManyFiles(t *testing.T) {
+	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v3/repos/o/r/pulls/7" {
+			t.Errorf("unexpected request %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(&github.PullRequest{
+			Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1),
+		})
+	}))
+	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
+	if !errors.Is(err, errTooManyPRFiles) || files != nil {
+		t.Fatalf("files=%v err=%v, want errTooManyPRFiles", files, err)
+	}
+}
+
+// largePRContent encodes raw as a GitHub contents API file.
+func largePRContent(raw string) *github.RepositoryContent {
+	return &github.RepositoryContent{Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(raw)))}
+}
+
+// serveLargePRPolicyTree answers the Git API reads policyTreeSnapshot makes for
+// commit head in base (e.g. "/api/v3/repos/foo/bar"), listing names in the
+// policy directory. It reports whether the path was one of those reads.
+func serveLargePRPolicyTree(w http.ResponseWriter, r *http.Request, base string, policyStatus int, truncated bool, names ...string) bool {
+	switch r.URL.Path {
+	case base + "/git/commits/head":
+		json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new("root")}})
+	case base + "/git/trees/root":
+		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), SHA: new("github-tree")}}})
+	case base + "/git/trees/github-tree":
+		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), SHA: new("policy-tree")}}})
+	case base + "/git/trees/policy-tree":
+		if policyStatus != http.StatusOK {
+			w.WriteHeader(policyStatus)
+			return true
+		}
+		entries := make([]*github.TreeEntry, 0, len(names))
+		for _, name := range names {
+			entries = append(entries, &github.TreeEntry{Path: new(name), Type: new("blob"), SHA: new("blob-" + name)})
+		}
+		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(truncated), Entries: entries})
+	default:
+		return false
+	}
+	return true
+}
+
+// TestLargePullRequestScansPolicyDirectory covers a PR past GitHub's
+// list-files cap: the policy directory at the head replaces the diff, and a
+// scan that cannot complete fails the check run instead of answering 500.
+func TestLargePullRequestScansPolicyDirectory(t *testing.T) {
+	const (
+		policyPath = ".github/chainguard/test.sts.yaml"
+		valid      = "issuer: https://token.actions.githubusercontent.com\nsubject: s\n"
+		invalid    = "issuer: https://token.actions.githubusercontent.com\nsubject: s\nbogus: field\n"
+	)
+	for _, tc := range []struct {
+		name           string
+		policyStatus   int
+		truncated      bool
+		policy         string
+		wantStatus     int
+		wantChecks     int
+		wantConclusion string
+		wantTitle      string
+		wantSummary    []string
+	}{
+		{name: "valid policy", policyStatus: http.StatusOK, policy: valid, wantStatus: http.StatusOK, wantChecks: 1, wantConclusion: "success", wantTitle: "Valid trust policy."},
+		{name: "invalid policy", policyStatus: http.StatusOK, policy: invalid, wantStatus: http.StatusOK, wantChecks: 1, wantConclusion: "failure", wantTitle: "Invalid trust policy.", wantSummary: []string{policyPath, "bogus"}},
+		{name: "truncated policy directory", policyStatus: http.StatusOK, truncated: true, policy: valid, wantStatus: http.StatusOK, wantChecks: 1, wantConclusion: "failure", wantTitle: "Pull request too large to validate", wantSummary: []string{"3001", "3000", "truncated", "Split"}},
+		{name: "policy directory error", policyStatus: http.StatusInternalServerError, wantStatus: http.StatusOK, wantChecks: 1, wantConclusion: "failure", wantTitle: "Pull request too large to validate", wantSummary: []string{"3001", "3000", "Split"}},
+		{name: "policy directory rate limited", policyStatus: http.StatusTooManyRequests, wantStatus: http.StatusOK, wantChecks: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var checks []github.CreateCheckRunOptions
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				if serveLargePRPolicyTree(w, r, "/api/v3/repos/foo/bar", tc.policyStatus, tc.truncated, "test.sts.yaml", "README.md") {
+					return
+				}
+				switch r.URL.Path {
+				case "/app/installations/1111/access_tokens":
+					json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
+				case "/api/v3/repos/foo/bar/pulls/7":
+					json.NewEncoder(w).Encode(&github.PullRequest{
+						Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1),
+					})
+				case "/api/v3/repos/foo/bar/contents/" + policyPath:
+					if r.URL.Query().Get("ref") != "head" {
+						t.Errorf("content ref = %q, want head", r.URL.Query().Get("ref"))
+					}
+					json.NewEncoder(w).Encode(largePRContent(tc.policy))
+				case "/api/v3/repos/foo/bar/check-runs":
+					var options github.CreateCheckRunOptions
+					if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+						t.Error(err)
+					}
+					checks = append(checks, options)
+					json.NewEncoder(w).Encode(&github.CheckRun{})
+				default:
+					t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			transport.BaseURL = gh.URL
+			secret := []byte("test-secret")
+			webhook := httptest.NewServer(&Validator{Transport: transport, WebhookSecret: [][]byte{secret}})
+			t.Cleanup(webhook.Close)
+			body, err := json.Marshal(&github.PullRequestEvent{
+				Action:       new("synchronize"),
+				Number:       new(7),
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), FullName: new("foo/bar")},
+				PullRequest:  &github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, webhook.URL, bytes.NewReader(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(github.SHA256SignatureHeader, signature(secret, body))
+			req.Header.Set(HeaderEvent, "pull_request")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := webhook.Client().Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus || len(checks) != tc.wantChecks {
+				t.Fatalf("status=%d checks=%d, want status=%d checks=%d", resp.StatusCode, len(checks), tc.wantStatus, tc.wantChecks)
+			}
+			if tc.wantChecks == 0 {
+				return
+			}
+			check := checks[0]
+			if check.GetConclusion() != tc.wantConclusion || check.GetHeadSHA() != "head" || check.GetStatus() != "completed" {
+				t.Errorf("check conclusion=%q head=%q status=%q, want %q on head, completed", check.GetConclusion(), check.GetHeadSHA(), check.GetStatus(), tc.wantConclusion)
+			}
+			if check.Output.GetTitle() != tc.wantTitle {
+				t.Errorf("check title = %q, want %q", check.Output.GetTitle(), tc.wantTitle)
+			}
+			for _, want := range tc.wantSummary {
+				if !strings.Contains(check.Output.GetSummary(), want) {
+					t.Errorf("check summary %q does not mention %q", check.Output.GetSummary(), want)
+				}
+			}
+		})
+	}
+}
+
+// TestLargeForkCheckSuitePRScansForkContent pins the large-PR fallback to the
+// fork handling: the PR is listed in its base repository, while the policy
+// directory is read from the event repository and classified as the same
+// owner's policy repository, so the org allowlist is validated.
+func TestLargeForkCheckSuitePRScansForkContent(t *testing.T) {
+	const (
+		orgOnlyPolicy = "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n"
+		allowlist     = "mode: audit\nissuers:\n  - https://token.actions.githubusercontent.com\n"
+	)
+	var conclusion string
+	checks, reads := 0, map[string]int{}
+	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveLargePRPolicyTree(w, r, "/api/v3/repos/foo/renamed-fork", http.StatusOK, false, "x.sts.yaml", "trusted-token-issuers.yaml") {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/repos/foo/renamed-fork/compare/before...head":
+			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new("README.md"), Status: new("modified")}}})
+		case "/api/v3/repos/foo/.github/pulls/7":
+			json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1)})
+		case "/api/v3/repos/foo/renamed-fork/contents/.github/chainguard/x.sts.yaml":
+			reads[r.URL.Path]++
+			json.NewEncoder(w).Encode(largePRContent(orgOnlyPolicy))
+		case "/api/v3/repos/foo/renamed-fork/contents/.github/chainguard/trusted-token-issuers.yaml":
+			reads[r.URL.Path]++
+			json.NewEncoder(w).Encode(largePRContent(allowlist))
+		case "/api/v3/repos/foo/renamed-fork/check-runs":
+			checks++
+			var options github.CreateCheckRunOptions
+			if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+				t.Error(err)
+			}
+			conclusion = options.GetConclusion()
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	v := &Validator{Transport: client}
+	if _, err := v.handleCheckSuite(context.Background(), largeForkCheckSuiteEvent()); err != nil {
+		t.Fatal(err)
+	}
+	if checks != 1 || conclusion != "success" {
+		t.Fatalf("checks=%d conclusion=%q, want one success", checks, conclusion)
+	}
+	if len(reads) != 2 {
+		t.Fatalf("fork content reads = %v, want the policy and the allowlist", reads)
+	}
+}
+
+// TestLargeCheckSuitePRUnscannableFailsCheck covers the check suite path: a
+// PR past the cap whose policy directory cannot be listed completely gets a
+// failed check run, not a 500 and not a skipped check.
+func TestLargeCheckSuitePRUnscannableFailsCheck(t *testing.T) {
+	var checks []github.CreateCheckRunOptions
+	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveLargePRPolicyTree(w, r, "/api/v3/repos/foo/renamed-fork", http.StatusOK, true, "x.sts.yaml") {
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/repos/foo/renamed-fork/compare/before...head":
+			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new("README.md"), Status: new("modified")}}})
+		case "/api/v3/repos/foo/.github/pulls/7":
+			json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1)})
+		case "/api/v3/repos/foo/renamed-fork/check-runs":
+			var options github.CreateCheckRunOptions
+			if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+				t.Error(err)
+			}
+			checks = append(checks, options)
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	v := &Validator{Transport: client}
+	if _, err := v.handleCheckSuite(context.Background(), largeForkCheckSuiteEvent()); err != nil {
+		t.Fatal(err)
+	}
+	if len(checks) != 1 || checks[0].GetConclusion() != "failure" || checks[0].Output.GetTitle() != "Pull request too large to validate" {
+		t.Fatalf("checks = %+v, want one failed too-large check", checks)
+	}
+}
+
+// largeForkCheckSuiteEvent is a check suite on foo/renamed-fork for head,
+// whose PR #7 lives in the same owner's policy repository, foo/.github.
+func largeForkCheckSuiteEvent() *github.CheckSuiteEvent {
+	return &github.CheckSuiteEvent{
+		Action:       new("requested"),
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("renamed-fork"), DefaultBranch: new("main")},
+		CheckSuite: &github.CheckSuite{
+			HeadSHA: new("head"), BeforeSHA: new("before"), HeadBranch: new("feature"),
+			PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/foo/.github")}}}},
+		},
 	}
 }
