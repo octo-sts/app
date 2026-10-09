@@ -1295,7 +1295,7 @@ func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
 }
 
 // TestCheckSuiteNonNotFoundDirScanError verifies that a non-404 error from the
-// policy-directory scan still fails the delivery (so it is redelivered) rather
+// policy-directory scan still fails the delivery (a 5xx, not swallowed as a 200) rather
 // than being swallowed like a missing directory.
 func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
