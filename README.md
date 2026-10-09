@@ -233,7 +233,10 @@ This control is only as strong as write access to the policy repository.
 - **Protect the default branch of the policy repository.** Make the
   `Trust Policy Validation` check a **required** status check. The check validates
   this file on every pull request. It only reports. It blocks nothing until you make
-  it required.
+  it required. When a push changes no trust policy, the check still reports success
+  with the title `No trust policy changes.`, so the required check is present on
+  every pull request head. Outside the policy repository, this no-change result only
+  appears in repositories that have trust policies under `.github/chainguard`.
 
 - **Add a CODEOWNERS entry** for the file.
 

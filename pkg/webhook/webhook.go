@@ -42,6 +42,18 @@ const (
 	// zeroHash is a special SHA value indicating a non-existent commit,
 	// i.e. when a branch is newly created or destroyed.
 	zeroHash = "0000000000000000000000000000000000000000"
+
+	// checkRunName is the name of the check run the validator posts. Repositories
+	// make it a required status check, so it must stay stable.
+	checkRunName = "Trust Policy Validation"
+
+	// noPolicyChangesTitle is the check run title when an event changed no
+	// trust policy.
+	noPolicyChangesTitle = "No trust policy changes."
+
+	// policiesRemovedTitle is the check run title when an event only removed
+	// trust policies.
+	policiesRemovedTitle = "Trust policies removed."
 )
 
 type PolicyAction string
@@ -645,7 +657,7 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 	}
 
 	opts := github.CreateCheckRunOptions{
-		Name:        "Trust Policy Validation",
+		Name:        checkRunName,
 		HeadSHA:     sha,
 		ExternalID:  new(sha),
 		Status:      new("completed"),
@@ -1055,7 +1067,7 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 
-	files, err := e.prPolicyFiles(ctx, client, owner, repo, pr.GetNumber(), sha, owner, repo, repo)
+	changes, err := e.prPolicyChanges(ctx, client, owner, repo, pr.GetNumber(), sha, owner, repo, repo)
 	if err != nil {
 		if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
 			return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
@@ -1066,8 +1078,11 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		}
 		return nil, err
 	}
+	files := pathsToValidate(changes)
 	if len(files) == 0 {
-		return nil, nil
+		// Every change left is a deletion, so a non-empty list means this PR
+		// only removes policies.
+		return e.postNoPolicyChangesCheckRun(ctx, client, owner, repo, sha, len(changes) > 0)
 	}
 
 	cr, _, err := e.handleSHA(ctx, client, owner, repo, sha, files)
@@ -1112,6 +1127,10 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	}
 
 	var files []policyFile
+	// deletedPolicy records that the event removed a policy. Deletions are not
+	// validated, but they prove the repository carried policies, which matters
+	// when the last one goes and the head has no policy directory left.
+	deletedPolicy := false
 	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
 		// New non-default branch: skip if there are no associated PRs.
 		// A feature branch points at a commit already present in the
@@ -1161,7 +1180,9 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			}
 			return nil, err
 		}
-		for _, path := range pathsToValidate(changes) {
+		toValidate := pathsToValidate(changes)
+		deletedPolicy = len(changes) > len(toValidate)
+		for _, path := range toValidate {
 			files = append(files, policyFile{path: path, repo: repo})
 		}
 	}
@@ -1181,7 +1202,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if strings.EqualFold(prOwner, owner) && strings.EqualFold(prRepo, e.policyRepo()) {
 			classification = prRepo
 		}
-		prFiles, err := e.prPolicyFiles(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, owner, repo, classification)
+		prChanges, err := e.prPolicyChanges(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, owner, repo, classification)
 		if err != nil {
 			if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
 				return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
@@ -1200,16 +1221,136 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			}
 			return nil, err
 		}
+		prFiles := pathsToValidate(prChanges)
+		deletedPolicy = deletedPolicy || len(prChanges) > len(prFiles)
 		for _, path := range prFiles {
 			files = append(files, policyFile{path: path, repo: classification})
 		}
 	}
 	if len(files) == 0 {
-		return nil, nil
+		if cs.GetCheckSuite().GetBeforeSHA() == zeroHash && !deletedPolicy {
+			// The full directory scan above already found no policies at sha,
+			// so this repository has nothing a required check could guard.
+			return nil, nil
+		}
+		return e.postNoPolicyChangesCheckRun(ctx, client, owner, repo, sha, deletedPolicy)
 	}
 
 	cr, _, err := e.handleSHAForPolicyFiles(ctx, client, owner, repo, sha, files)
 	return cr, err
+}
+
+// postNoPolicyChangesCheckRun posts a successful check run on sha when an event
+// changed no trust policy, so that a required "Trust Policy Validation" status
+// check is present on every pull request head and not only on heads whose diff
+// touched a policy (octo-sts/app#1745).
+//
+// Callers must only reach this after change detection completed: a skipped or
+// failed detection (rate limit, PR head mismatch, listing error) is not "no
+// changes" and must never be reported as success.
+//
+// deletedPolicy reports that the event removed at least one policy and changed
+// no other. Removing a policy is a valid change: there is nothing left to
+// parse, and the exchange path fails closed for a policy that no longer
+// exists. So it concludes success too, under its own title, and skips the
+// probe below, because the deletion already proves the repository carried
+// policies even when it removed the last one along with the directory.
+//
+// It posts nothing when:
+//   - the repository holds no trust policies at sha, since a required check
+//     cannot matter there and posting would add a write to every push in every
+//     installed repository. The organization policy repository is exempt from
+//     this probe, because it is where the README recommends making the check
+//     required, and it saves the extra read there.
+//   - this app already posted a check run of the same name on sha. GitHub
+//     shows only the latest same-named run per app and commit, so posting
+//     "no changes" after a real verdict (for example a failure from a check
+//     suite whose compare touched a policy) would mask it. This also collapses
+//     the check_suite and pull_request events for one push into a single run.
+func (e *Validator) postNoPolicyChangesCheckRun(ctx context.Context, client *github.Client, owner, repo, sha string, deletedPolicy bool) (*github.CheckRun, error) {
+	log := clog.FromContext(ctx)
+
+	if sha == "" || sha == zeroHash {
+		return nil, nil
+	}
+
+	title, summary := noPolicyChangesTitle, "No trust policy files changed, so there was nothing to validate."
+	if deletedPolicy {
+		title, summary = policiesRemovedTitle, "This change only removes trust policies, so there was nothing to validate."
+	}
+
+	if !deletedPolicy && !strings.EqualFold(repo, e.policyRepo()) {
+		has, err := e.hasPolicies(ctx, client, owner, repo, sha)
+		if err != nil {
+			if isProvenWebhookRateLimit(err) {
+				log.Warnf("rate-limited probing for policies; skipping CheckRun: %v", err)
+				return nil, nil
+			}
+			return nil, err
+		}
+		if !has {
+			return nil, nil
+		}
+	}
+
+	listOpts := &github.ListCheckRunsOptions{
+		CheckName:   new(checkRunName),
+		Filter:      new("latest"),
+		ListOptions: github.ListOptions{PerPage: 1},
+	}
+	if appID := e.Transport.AppID(); appID != 0 {
+		listOpts.AppID = new(appID)
+	}
+	existing, _, err := client.Checks.ListCheckRunsForRef(ctx, owner, repo, sha, listOpts)
+	if err != nil {
+		if isProvenWebhookRateLimit(err) {
+			log.Warnf("rate-limited listing existing check runs; skipping CheckRun: %v", err)
+			return nil, nil
+		}
+		return nil, err
+	}
+	if existing.GetTotal() > 0 {
+		log.Infof("%s already reported on %s; not posting a no-change check run", checkRunName, sha)
+		return nil, nil
+	}
+
+	now := &github.Timestamp{Time: time.Now()}
+	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
+		Name:        checkRunName,
+		HeadSHA:     sha,
+		ExternalID:  new(sha),
+		Status:      new("completed"),
+		Conclusion:  new("success"),
+		StartedAt:   now,
+		CompletedAt: now,
+		Output: &github.CheckRunOutput{
+			Title:   new(title),
+			Summary: new(summary),
+		},
+	})
+	if err != nil {
+		log.Errorf("error creating CheckRun: %v", err)
+		return nil, err
+	}
+	return cr, nil
+}
+
+// hasPolicies reports whether the policy directory at sha holds at least one
+// file octo-sts validates. A 404 means the directory does not exist.
+func (e *Validator) hasPolicies(ctx context.Context, client *github.Client, owner, repo, sha string) (bool, error) {
+	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, fmt.Errorf("listing %s at %s: %w", policyDir, sha, err)
+	}
+	for _, f := range dir {
+		if f.GetType() == "file" && isValidatedPath(repo, f.GetPath(), e.policyRepo()) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 type fauxCheckSuite struct {
