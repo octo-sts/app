@@ -252,38 +252,6 @@ func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, f
 // allowlist. Both live here, so one listing covers every validated path.
 const policyDir = ".github/chainguard"
 
-// policySnapshot lists every trust policy visible at ref, mapped to its blob
-// SHA so that two snapshots can be compared by content.
-//
-// A ref that cannot be resolved is an error rather than an empty snapshot: the
-// GitHub contents API answers 404 both for "this ref has no policy directory"
-// and for "this ref no longer exists", and conflating the two would report a
-// repository's entire policy set as deleted.
-func (e *Validator) policySnapshot(ctx context.Context, client *github.Client, owner, repo, ref string) (map[string]string, error) {
-	// Resolve the ref first so the 404 below can only mean a missing directory.
-	if _, _, err := client.Repositories.GetCommit(ctx, owner, repo, ref, &github.ListOptions{PerPage: 1}); err != nil {
-		return nil, fmt.Errorf("resolving %s: %w", ref, err)
-	}
-
-	out := make(map[string]string)
-	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: ref})
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			// The ref resolved, so this is genuinely a repository with no
-			// policy directory: an empty snapshot, not an unknown one.
-			return out, nil
-		}
-		return nil, fmt.Errorf("listing %s at %s: %w", policyDir, ref, err)
-	}
-	for _, f := range dir {
-		if f.GetType() != "file" || !isValidatedPath(repo, f.GetPath(), e.policyRepo()) {
-			continue
-		}
-		out[f.GetPath()] = f.GetSHA()
-	}
-	return out, nil
-}
-
 // policyChangesFromSnapshot derives policy changes by comparing the policies
 // live at before with those live at after. It also returns the snapshot taken
 // at after, which stays usable when only before fails to resolve.
@@ -299,7 +267,12 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 	// whenever the push itself was real. before is the one GitHub is free to
 	// garbage collect after a rewind, so take after first: that way a failure
 	// to resolve before still leaves the caller a live listing to fall back on.
-	afterSnap, err := e.policySnapshot(ctx, client, owner, repo, after)
+	//
+	// policyTreeSnapshot resolves the commit before walking its tree, so an
+	// unreachable ref is an error rather than an empty snapshot that would
+	// report every live policy as deleted. It also rejects truncated trees, so
+	// a large policy directory fails loudly instead of listing partially.
+	afterSnap, err := e.policyTreeSnapshot(ctx, client, owner, repo, after)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -307,7 +280,7 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 	// A push that creates the ref has no prior state to compare against.
 	beforeSnap := map[string]string{}
 	if before != "" && before != zeroHash {
-		if beforeSnap, err = e.policySnapshot(ctx, client, owner, repo, before); err != nil {
+		if beforeSnap, err = e.policyTreeSnapshot(ctx, client, owner, repo, before); err != nil {
 			return nil, afterSnap, err
 		}
 	}
@@ -1131,21 +1104,27 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			log.Infof("skipping new non-default branch with no PRs")
 			return nil, nil
 		}
-		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
+		// The Contents API caps a directory listing at 1,000 entries without
+		// saying so; the tree walk refuses truncated responses instead. A
+		// missing policy directory yields an empty snapshot, not an error.
+		snapshot, err := e.policyTreeSnapshot(ctx, client, owner, repo, sha)
 		if err != nil {
 			if isProvenWebhookRateLimit(err) {
 				log.Warnf("rate-limited discovering policies for check suite; skipping CheckRun: %v", err)
 				return nil, nil
 			}
-			if resp == nil || resp.StatusCode != http.StatusNotFound {
-				return nil, err
-			}
-			log.Infof("no policy directory at %s, skipping validation", sha)
+			return nil, err
 		}
-		for _, file := range dirContents {
-			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
-				files = append(files, policyFile{path: file.GetPath(), repo: repo})
-			}
+		if len(snapshot) == 0 {
+			log.Infof("no policies at %s, skipping validation", sha)
+		}
+		paths := make([]string, 0, len(snapshot))
+		for path := range snapshot {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			files = append(files, policyFile{path: path, repo: repo})
 		}
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})

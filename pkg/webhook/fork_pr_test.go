@@ -10,6 +10,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -57,8 +58,11 @@ func TestForkCheckSuiteUsesBasePRAndForkContent(t *testing.T) {
 				switch r.URL.Path {
 				case "/app/installations/1111/access_tokens":
 					json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
-				case "/api/v3/repos/foo/renamed-fork/contents/.github/chainguard":
-					json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+				case "/api/v3/repos/foo/renamed-fork/git/commits/deadbeef":
+					json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new("root")}})
+				case "/api/v3/repos/foo/renamed-fork/git/trees/root":
+					// No .github directory: the directory scan finds no policies.
+					fmt.Fprint(w, `{"tree":[],"truncated":false}`)
 				case "/api/v3/repos/foo/renamed-fork/contents/.github/chainguard/trusted-token-issuers.yaml":
 					contentReads++
 					raw := "mode: audit\nissuers:\n  - https://token.actions.githubusercontent.com\n"
@@ -312,8 +316,11 @@ func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
 				switch r.URL.Path {
 				case "/app/installations/1111/access_tokens":
 					json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
-				case event + "/contents/.github/chainguard":
-					json.NewEncoder(w).Encode([]*github.RepositoryContent{})
+				case event + "/git/commits/deadbeef":
+					json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new("root")}})
+				case event + "/git/trees/root":
+					// No .github directory: the directory scan finds no policies.
+					fmt.Fprint(w, `{"tree":[],"truncated":false}`)
 				case event + "/contents/" + policyPath:
 					json.NewEncoder(w).Encode(content(orgOnlyPolicy))
 				case event + "/contents/" + allowlistPath:
