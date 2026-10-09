@@ -158,8 +158,8 @@ const (
 	msgIssuerRateLimited   = "organization trusted-issuer lookup rate limited"
 )
 
-// isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. Stricter than
-// IsGitHubRateLimited: a bare *ErrorResponse 403 is a permanent permission,
+// isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. A bare
+// *ErrorResponse 403 is NOT one: it is a permanent permission,
 // SAML/IP-allowlist or suspension failure, and calling it a rate limit would deny every
 // exchange in the org indefinitely. See isProvenRateLimit for the shared definition.
 func isOrgIssuerRateLimit(err error) bool {

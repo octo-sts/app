@@ -624,7 +624,7 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which GitHub treats as a
 	// failed delivery and redelivers — amplifying load on the rate-limited API.
-	if octosts.IsGitHubRateLimited(err) {
+	if isProvenWebhookRateLimit(err) {
 		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, readRepo, sha)
 		// Files validated before the limit was hit still have real verdicts;
 		// the rest are simply absent from the map and stay unknown. The limit
@@ -714,12 +714,20 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 			resp, _, _, err := client.Repositories.GetContents(ctx, owner, readRepo, f, &github.RepositoryContentGetOptions{Ref: sha})
 			if err != nil {
 				log.Infof("failed to get content for: %v", err)
-				if octosts.IsGitHubRateLimited(err) {
+				if isProvenWebhookRateLimit(err) {
 					log.Warnf("rate-limited, aborting remaining policy validations")
 					// Deliberately not recorded as a verdict: being rate-limited
 					// says nothing about whether this policy is valid, and an
 					// audit consumer must not read it as a policy failure.
 					return results, fmt.Errorf("%s: %w", f, err)
+				}
+				// A 403 without rate-limit markers is a permission failure, such
+				// as the App lacking contents access. It is a real verdict for
+				// this file, not a transient limit.
+				var errResp *github.ErrorResponse
+				if errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == http.StatusForbidden {
+					fail(f, &policyReadDeniedError{path: f, err: err})
+					continue
 				}
 				fail(f, fmt.Errorf("%s: %w", f, err))
 				continue

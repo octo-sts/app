@@ -30,6 +30,21 @@ func isProvenWebhookRateLimit(err error) bool {
 			(response.Response.Header.Get("X-RateLimit-Remaining") == "0" || response.Response.Header.Get("Retry-After") != ""))
 }
 
+// policyReadDeniedError is the per-file verdict for a policy content read that
+// GitHub refused with a 403 that is not a proven rate limit. Its message names
+// the likely cause without echoing the request URL. The GitHub error stays in
+// the chain for errors.As.
+type policyReadDeniedError struct {
+	path string
+	err  error
+}
+
+func (e *policyReadDeniedError) Error() string {
+	return e.path + ": cannot read policy: permission denied (403); check the GitHub App's contents permission"
+}
+
+func (e *policyReadDeniedError) Unwrap() error { return e.err }
+
 const (
 	prFilesPerPage = 100
 	maxPRFiles     = 3000

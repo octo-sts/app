@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"github.com/cloudevents/sdk-go/v2/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+	"github.com/hashicorp/go-multierror"
 	"github.com/octo-sts/app/pkg/octosts"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -2092,9 +2094,152 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestIsGitHubRateLimited(t *testing.T) {
-	resp := func(code int) *github.Response {
-		return &github.Response{Response: &http.Response{StatusCode: code}}
+// TestWebhookPushPolicyRead403 pins how a 403 on a policy content read is
+// classified. Only a proven rate limit aborts validation without a check run. A
+// bare 403 is a permission failure: every file is still read, and the check run
+// fails with a per-file message naming the cause.
+func TestWebhookPushPolicyRead403(t *testing.T) {
+	files := []string{
+		".github/chainguard/a.sts.yaml",
+		".github/chainguard/b.sts.yaml",
+		".github/chainguard/c.sts.yaml",
+	}
+	for _, tc := range []struct {
+		name         string
+		status       int
+		headers      map[string]string
+		wantCheckRun bool
+	}{
+		{name: "bare 403 is a permission failure", status: http.StatusForbidden, wantCheckRun: true},
+		{name: "403 with exhausted remaining is a rate limit", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Limit": "5000"}},
+		{name: "403 with Retry-After is a rate limit", status: http.StatusForbidden, headers: map[string]string{"Retry-After": "60"}},
+		{name: "429 is a rate limit", status: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var contentHits atomic.Int32
+			var mu sync.Mutex
+			var checkRuns []github.CreateCheckRunOptions
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+				var opts github.CreateCheckRunOptions
+				if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+					t.Errorf("decoding check run: %v", err)
+				}
+				mu.Lock()
+				checkRuns = append(checkRuns, opts)
+				mu.Unlock()
+				json.NewEncoder(w).Encode(github.CheckRun{ID: new(int64(1))}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("/api/v3/repos/foo/bar/contents/", func(w http.ResponseWriter, _ *http.Request) {
+				contentHits.Add(1)
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]string{"message": "Resource not accessible by integration"}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				defer f.Close()
+				io.Copy(w, f) //nolint:errcheck // test server
+			})
+			gh := httptest.NewServer(mux)
+			defer gh.Close()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+
+			secret := []byte("hunter2")
+			v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+			srv := httptest.NewServer(v)
+			defer srv.Close()
+
+			body, err := json.Marshal(github.PushEvent{
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo: &github.PushEventRepository{
+					Owner: &github.User{Login: new("foo")},
+					Name:  new("bar"),
+				},
+				Before:  new("1234"),
+				After:   new("5678"),
+				Commits: []*github.HeadCommit{{Added: files}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				out, _ := httputil.DumpResponse(resp, true)
+				t.Fatalf("expected 200, got\n%s", string(out))
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tc.wantCheckRun {
+				if len(checkRuns) != 0 {
+					t.Errorf("created %d check runs for a rate limit, want 0", len(checkRuns))
+				}
+				if got := contentHits.Load(); got > 1 {
+					t.Errorf("got %d content fetches, want validation to abort after the first", got)
+				}
+				return
+			}
+
+			if got := contentHits.Load(); got != int32(len(files)) {
+				t.Errorf("got %d content fetches, want %d: a permission 403 must not abort validation", got, len(files))
+			}
+			if len(checkRuns) != 1 {
+				t.Fatalf("created %d check runs, want 1", len(checkRuns))
+			}
+			cr := checkRuns[0]
+			if got := cr.GetConclusion(); got != "failure" {
+				t.Errorf("conclusion = %q, want failure", got)
+			}
+			if got := cr.GetOutput().GetTitle(); got != "Invalid trust policy." {
+				t.Errorf("title = %q, want %q", got, "Invalid trust policy.")
+			}
+			summary := cr.GetOutput().GetSummary()
+			for _, f := range files {
+				want := f + ": cannot read policy: permission denied (403); check the GitHub App's contents permission"
+				if !strings.Contains(summary, want) {
+					t.Errorf("summary missing %q:\n%s", want, summary)
+				}
+			}
+			if strings.Contains(summary, gh.URL) || strings.Contains(summary, "/api/v3/") {
+				t.Errorf("summary leaks the request URL:\n%s", summary)
+			}
+		})
+	}
+}
+
+func TestIsProvenWebhookRateLimit(t *testing.T) {
+	errResp := func(code int, headers map[string]string) error {
+		h := http.Header{}
+		for k, v := range headers {
+			h.Set(k, v)
+		}
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code, Header: h}}
 	}
 	for _, tc := range []struct {
 		name string
@@ -2109,16 +2254,28 @@ func TestIsGitHubRateLimited(t *testing.T) {
 		err:  &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}},
 		want: true,
 	}, {
-		name: "bare ErrorResponse 403",
-		err:  &github.ErrorResponse{Response: resp(http.StatusForbidden).Response},
+		name: "bare ErrorResponse 403 is a permission failure",
+		err:  errResp(http.StatusForbidden, nil),
+		want: false,
+	}, {
+		name: "403 with exhausted remaining",
+		err:  errResp(http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}),
+		want: true,
+	}, {
+		name: "403 with Retry-After",
+		err:  errResp(http.StatusForbidden, map[string]string{"Retry-After": "60"}),
 		want: true,
 	}, {
 		name: "bare ErrorResponse 429",
-		err:  &github.ErrorResponse{Response: resp(http.StatusTooManyRequests).Response},
+		err:  errResp(http.StatusTooManyRequests, nil),
+		want: true,
+	}, {
+		name: "rate limit inside a multierror",
+		err:  multierror.Append(errors.New("other"), fmt.Errorf("a.sts.yaml: %w", errResp(http.StatusTooManyRequests, nil))),
 		want: true,
 	}, {
 		name: "ErrorResponse 404 is not a rate limit",
-		err:  &github.ErrorResponse{Response: resp(http.StatusNotFound).Response},
+		err:  errResp(http.StatusNotFound, nil),
 		want: false,
 	}, {
 		name: "nil error",
@@ -2126,8 +2283,8 @@ func TestIsGitHubRateLimited(t *testing.T) {
 		want: false,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := octosts.IsGitHubRateLimited(tc.err); got != tc.want {
-				t.Errorf("IsGitHubRateLimited() = %v, want %v", got, tc.want)
+			if got := isProvenWebhookRateLimit(tc.err); got != tc.want {
+				t.Errorf("isProvenWebhookRateLimit() = %v, want %v", got, tc.want)
 			}
 		})
 	}
