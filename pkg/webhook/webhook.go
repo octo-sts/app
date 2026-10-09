@@ -165,7 +165,7 @@ func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEv
 	byPath := make(map[string]PolicyAction)
 
 	apply := func(paths []string, action PolicyAction) {
-		for _, p := range filterValidatedFiles(repo, paths, e.policyRepo()) {
+		for _, p := range filterValidatedFiles(repo, paths, e.policyRepo(), e.policyDir()) {
 			switch prev, seen := byPath[p]; {
 			case !seen:
 				byPath[p] = action
@@ -209,7 +209,7 @@ func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, f
 	var changes []PolicyChange //nolint:prealloc // most files in a push aren't policies
 
 	add := func(path string, action PolicyAction) {
-		if !isValidatedPath(repo, path, e.policyRepo()) {
+		if !isValidatedPath(repo, path, e.policyRepo(), e.policyDir()) {
 			return
 		}
 		changes = append(changes, PolicyChange{
@@ -247,10 +247,6 @@ func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, f
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
 	return changes
 }
-
-// policyDir is the directory holding trust policies and the org trusted-issuer
-// allowlist. Both live here, so one listing covers every validated path.
-const policyDir = ".github/chainguard"
 
 // policyChangesFromSnapshot derives policy changes by comparing the policies
 // live at before with those live at after. It also returns the snapshot taken
@@ -351,6 +347,11 @@ type Validator struct {
 	// Defaults to ".github" when empty.
 	OrgPolicyRepo string
 
+	// PolicyDir is the directory, relative to the repository root, holding
+	// trust policies and the org trusted-issuer allowlist. Defaults to
+	// octosts.DefaultPolicyDir when empty.
+	PolicyDir string
+
 	// Emitter publishes trust policy audit events. Nil disables auditing.
 	Emitter *PolicyEmitter
 
@@ -368,6 +369,13 @@ func (e *Validator) policyRepo() string {
 		return e.OrgPolicyRepo
 	}
 	return ".github"
+}
+
+func (e *Validator) policyDir() string {
+	if e.PolicyDir != "" {
+		return e.PolicyDir
+	}
+	return octosts.DefaultPolicyDir
 }
 
 // prActionsThatChangeFiles is the set of pull_request actions that can alter
@@ -592,9 +600,9 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 		for _, file := range files {
 			paths = append(paths, file.path)
 		}
-		results, err = validatePoliciesForRepo(ctx, client, owner, readRepo, files[0].repo, sha, paths, e.policyRepo())
+		results, err = validatePoliciesForRepo(ctx, client, owner, readRepo, files[0].repo, sha, paths, e.policyRepo(), e.policyDir())
 	} else {
-		results, err = validatePolicyFiles(ctx, client, owner, readRepo, sha, files, e.policyRepo())
+		results, err = validatePolicyFiles(ctx, client, owner, readRepo, sha, files, e.policyRepo(), e.policyDir())
 	}
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which marks the delivery
@@ -649,15 +657,15 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 // for the check run. A file present in the map with a nil value parsed
 // cleanly; a file absent from the map was never read,
 // because a rate limit aborted the pass before reaching it.
-func validatePoliciesForRepo(ctx context.Context, client *github.Client, owner, readRepo, policyRepo, sha string, files []string, orgPolicyRepo string) (map[string]error, error) {
+func validatePoliciesForRepo(ctx context.Context, client *github.Client, owner, readRepo, policyRepo, sha string, files []string, orgPolicyRepo, policyDir string) (map[string]error, error) {
 	policyFiles := make([]policyFile, 0, len(files))
 	for _, path := range files {
 		policyFiles = append(policyFiles, policyFile{path: path, repo: policyRepo})
 	}
-	return validatePolicyFiles(ctx, client, owner, readRepo, sha, policyFiles, orgPolicyRepo)
+	return validatePolicyFiles(ctx, client, owner, readRepo, sha, policyFiles, orgPolicyRepo, policyDir)
 }
 
-func validatePolicyFiles(ctx context.Context, client *github.Client, owner, readRepo, sha string, files []policyFile, orgPolicyRepo string) (map[string]error, error) {
+func validatePolicyFiles(ctx context.Context, client *github.Client, owner, readRepo, sha string, files []policyFile, orgPolicyRepo, policyDir string) (map[string]error, error) {
 	var merr error
 	results := make(map[string]error, len(files))
 
@@ -729,7 +737,7 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 		}
 
 		switch {
-		case strings.EqualFold(file.repo, orgPolicyRepo) && f == octosts.OrgTrustedIssuersPath:
+		case strings.EqualFold(file.repo, orgPolicyRepo) && f == octosts.OrgTrustedIssuersPath(policyDir):
 			// Parse AND compile: only compiling catches uncompilable patterns,
 			// invalid issuer URLs, and an empty allowlist. The exchange path calls
 			// this same function, so the two verdicts cannot diverge.
@@ -1219,21 +1227,24 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 // isValidatedPath reports whether octo-sts validates the given file. Trust
 // policies are validated in every repository; the organization trusted-issuer
 // allowlist only in the organization's org policy repository (orgPolicyRepo).
+// Both must sit directly in policyDir.
 //
 // The repository comparison folds case because GitHub repository names are
 // case-insensitive and the exchange path resolves the repo name through the API.
-func isValidatedPath(repo, path, orgPolicyRepo string) bool {
-	if ok, err := filepath.Match(".github/chainguard/*.sts.yaml", path); err == nil && ok {
+func isValidatedPath(repo, path, orgPolicyRepo, policyDir string) bool {
+	// Match "<policyDir>/*.sts.yaml" by prefix rather than with a glob, so that
+	// policyDir is taken literally whatever characters it contains.
+	if name, ok := strings.CutPrefix(path, policyDir+"/"); ok && !strings.Contains(name, "/") && strings.HasSuffix(name, ".sts.yaml") {
 		return true
 	}
-	return strings.EqualFold(repo, orgPolicyRepo) && path == octosts.OrgTrustedIssuersPath
+	return strings.EqualFold(repo, orgPolicyRepo) && path == octosts.OrgTrustedIssuersPath(policyDir)
 }
 
 // filterValidatedFiles returns the subset of files octo-sts validates.
-func filterValidatedFiles(repo string, files []string, orgPolicyRepo string) []string {
+func filterValidatedFiles(repo string, files []string, orgPolicyRepo, policyDir string) []string {
 	var filtered []string
 	for _, f := range files {
-		if isValidatedPath(repo, f, orgPolicyRepo) {
+		if isValidatedPath(repo, f, orgPolicyRepo, policyDir) {
 			filtered = append(filtered, f)
 		}
 	}

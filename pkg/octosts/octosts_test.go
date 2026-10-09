@@ -1403,7 +1403,7 @@ func TestConcurrentCallersShareOneFlightButAuthorizeSeparately(t *testing.T) {
 	var reads atomic.Int32
 	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, r *http.Request) {
 		// The helper routes the org allowlist path here too; no allowlist applies.
-		if strings.HasSuffix(r.URL.Path, OrgTrustedIssuersPath) {
+		if strings.HasSuffix(r.URL.Path, OrgTrustedIssuersPath(DefaultPolicyDir)) {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
 			return

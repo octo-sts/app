@@ -143,6 +143,7 @@ func main() {
 		WebhookSecret: webhookSecrets,
 		Organizations: orgs,
 		OrgPolicyRepo: webhookConfig.OrgPolicyRepo,
+		PolicyDir:     webhookConfig.PolicyDir,
 		Emitter:       emitter,
 	})
 	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {

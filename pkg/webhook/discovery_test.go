@@ -479,7 +479,7 @@ func TestNewRefPushAtPayloadLimit(t *testing.T) {
 				}
 				entries := make([]*github.TreeEntry, len(tc.entries))
 				for i, entry := range tc.entries {
-					name := strings.TrimPrefix(entry.GetPath(), policyDir+"/")
+					name := strings.TrimPrefix(entry.GetPath(), ".github/chainguard/")
 					entries[i] = &github.TreeEntry{Path: &name, Type: entry.Type, SHA: entry.SHA}
 				}
 				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: entries})
