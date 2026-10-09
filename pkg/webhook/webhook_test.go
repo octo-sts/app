@@ -4094,3 +4094,330 @@ func TestForcedPushDegradedBothRefsUnresolvable(t *testing.T) {
 		t.Error("expected the marker to explain why detection degraded")
 	}
 }
+
+// noChangeGitHub fakes the GitHub API for events whose diff touches no trust
+// policy. hasPolicyDir controls whether .github/chainguard exists at the head,
+// existingRuns is the number of same-named check runs already on the head, and
+// probeStatus, when set, is the status the policy directory probe answers.
+type noChangeGitHub struct {
+	repo         string
+	hasPolicyDir bool
+	existingRuns int
+	probeStatus  int
+	// prHead, when set, is the head the PR API reports instead of "head".
+	prHead string
+	// discoveryStatus, when set, is the status the compare and PR file
+	// listing endpoints answer, simulating a failed change detection.
+	discoveryStatus int
+	// deletesPolicy makes the compare and PR diffs remove a policy instead of
+	// touching only a README.
+	deletesPolicy bool
+
+	mu      sync.Mutex
+	created []*github.CreateCheckRunOptions
+	probes  int
+	lists   int
+}
+
+func (g *noChangeGitHub) diff() []*github.CommitFile {
+	if g.deletesPolicy {
+		return []*github.CommitFile{{Filename: new(".github/chainguard/test.sts.yaml"), Status: new("removed")}}
+	}
+	return []*github.CommitFile{{Filename: new("README.md"), Status: new("modified")}}
+}
+
+func (g *noChangeGitHub) server(t *testing.T) *httptest.Server {
+	t.Helper()
+	prefix := "/api/v3/repos/foo/" + g.repo
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		switch {
+		case r.URL.Path == "/app/installations/1111/access_tokens":
+			json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
+		case r.URL.Path == prefix+"/compare/before...head":
+			if g.discoveryStatus != 0 {
+				w.WriteHeader(g.discoveryStatus)
+				return
+			}
+			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: g.diff()})
+		case r.URL.Path == prefix+"/pulls/7":
+			head := "head"
+			if g.prHead != "" {
+				head = g.prHead
+			}
+			json.NewEncoder(w).Encode(&github.PullRequest{
+				Head: &github.PullRequestBranch{SHA: new(head)}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
+			})
+		case r.URL.Path == prefix+"/pulls/7/files":
+			if g.discoveryStatus != 0 {
+				w.WriteHeader(g.discoveryStatus)
+				return
+			}
+			json.NewEncoder(w).Encode(g.diff())
+		case r.URL.Path == prefix+"/contents/.github/chainguard":
+			g.probes++
+			if r.URL.Query().Get("ref") != "head" {
+				t.Errorf("policy probe ref = %q, want head", r.URL.Query().Get("ref"))
+			}
+			switch {
+			case g.probeStatus != 0:
+				w.WriteHeader(g.probeStatus)
+			case !g.hasPolicyDir:
+				http.NotFound(w, r)
+			default:
+				json.NewEncoder(w).Encode([]*github.RepositoryContent{
+					{Type: new("file"), Path: new(".github/chainguard/test.sts.yaml")},
+				})
+			}
+		case r.Method == http.MethodGet && r.URL.Path == prefix+"/commits/head/check-runs":
+			g.lists++
+			q := r.URL.Query()
+			if q.Get("check_name") != checkRunName || q.Get("app_id") != "1234" || q.Get("filter") != "latest" {
+				t.Errorf("check run listing query = %v", q)
+			}
+			json.NewEncoder(w).Encode(&github.ListCheckRunsResults{Total: new(g.existingRuns)})
+		case r.Method == http.MethodPost && r.URL.Path == prefix+"/check-runs":
+			opt := new(github.CreateCheckRunOptions)
+			if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			g.created = append(g.created, opt)
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected request %s %s", r.Method, r.URL)
+			http.NotFound(w, r)
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// sendNoChangeEvent delivers a signed event for repo foo/<repo> whose head is
+// "head" and asserts the webhook answers 200.
+func sendNoChangeEvent(t *testing.T, gh *httptest.Server, eventType, repo string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+	secret := []byte("hunter2")
+	srv := httptest.NewServer(&Validator{Transport: tr, WebhookSecret: [][]byte{secret}})
+	t.Cleanup(srv.Close)
+
+	ghRepo := &github.Repository{
+		Owner:         &github.User{Login: new("foo")},
+		Name:          new(repo),
+		FullName:      new("foo/" + repo),
+		DefaultBranch: new("main"),
+	}
+	var event any
+	switch eventType {
+	case "check_suite":
+		event = github.CheckSuiteEvent{
+			Action:       new("requested"),
+			Installation: &github.Installation{ID: new(int64(1111))},
+			Repo:         ghRepo,
+			Sender:       &github.User{Login: new("test-user")},
+			CheckSuite: &github.CheckSuite{
+				ID:           new(int64(1)),
+				HeadSHA:      new("head"),
+				HeadBranch:   new("feature"),
+				BeforeSHA:    new("before"),
+				PullRequests: []*github.PullRequest{{Number: new(7)}},
+			},
+		}
+	case "pull_request":
+		event = github.PullRequestEvent{
+			Action:       new("synchronize"),
+			Number:       new(7),
+			Installation: &github.Installation{ID: new(int64(1111))},
+			Repo:         ghRepo,
+			Sender:       &github.User{Login: new("test-user")},
+			PullRequest:  &github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}},
+		}
+	default:
+		t.Fatalf("unsupported event type %q", eventType)
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", eventType)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+}
+
+// A later push or PR update that touches no policy must still leave a
+// Trust Policy Validation run on the head commit, or a required status check
+// never appears and the PR cannot merge (octo-sts/app#1745).
+func TestNoPolicyChangesPostsSuccessCheckRun(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar", hasPolicyDir: true}
+			sendNoChangeEvent(t, g.server(t), eventType, "bar")
+
+			if len(g.created) != 1 {
+				t.Fatalf("expected 1 check run, got %d", len(g.created))
+			}
+			cr := g.created[0]
+			if cr.Name != checkRunName || cr.HeadSHA != "head" || cr.GetStatus() != "completed" || cr.GetConclusion() != "success" {
+				t.Fatalf("check run = name %q sha %q status %q conclusion %q", cr.Name, cr.HeadSHA, cr.GetStatus(), cr.GetConclusion())
+			}
+			if got := cr.GetOutput().GetTitle(); got != noPolicyChangesTitle {
+				t.Fatalf("title = %q, want %q", got, noPolicyChangesTitle)
+			}
+			if g.probes != 1 || g.lists != 1 {
+				t.Fatalf("probes = %d, lists = %d, want 1 and 1", g.probes, g.lists)
+			}
+		})
+	}
+}
+
+// A repository without trust policies cannot need the check, so it gets no
+// run: otherwise every push to every installed repository would cost a write.
+func TestNoPolicyChangesWithoutPolicyDirPostsNothing(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar"}
+			sendNoChangeEvent(t, g.server(t), eventType, "bar")
+
+			if len(g.created) != 0 {
+				t.Fatalf("expected no check run, got %d", len(g.created))
+			}
+			if g.probes != 1 || g.lists != 0 {
+				t.Fatalf("probes = %d, lists = %d, want 1 and 0", g.probes, g.lists)
+			}
+		})
+	}
+}
+
+// The org policy repository is where the README asks for the required check,
+// so it always gets the run and skips the directory probe.
+func TestNoPolicyChangesOrgPolicyRepoSkipsProbe(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: ".github"}
+			sendNoChangeEvent(t, g.server(t), eventType, ".github")
+
+			if len(g.created) != 1 || g.created[0].GetConclusion() != "success" {
+				t.Fatalf("expected 1 success check run, got %d", len(g.created))
+			}
+			if g.probes != 0 {
+				t.Fatalf("policy directory probed %d times, want 0", g.probes)
+			}
+		})
+	}
+}
+
+// GitHub shows only the latest same-named run per app and commit. A no-change
+// success posted after a real verdict on the same commit would mask it.
+func TestNoPolicyChangesDoesNotOverwriteExistingRun(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar", hasPolicyDir: true, existingRuns: 1}
+			sendNoChangeEvent(t, g.server(t), eventType, "bar")
+
+			if len(g.created) != 0 {
+				t.Fatalf("expected no check run over an existing one, got %d", len(g.created))
+			}
+		})
+	}
+}
+
+// A rate-limited probe leaves it unknown whether the repository has policies;
+// that must not turn into a success run or a 5xx redelivery.
+func TestNoPolicyChangesRateLimitedProbePostsNothing(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar", hasPolicyDir: true, probeStatus: http.StatusTooManyRequests}
+			sendNoChangeEvent(t, g.server(t), eventType, "bar")
+
+			if len(g.created) != 0 {
+				t.Fatalf("expected no check run, got %d", len(g.created))
+			}
+			if g.lists != 0 {
+				t.Fatalf("check runs listed %d times after a rate-limited probe, want 0", g.lists)
+			}
+		})
+	}
+}
+
+// Skipped change detection is not "no changes". A rate limit or a PR head that
+// moved under the event must keep posting nothing, even in a repository with
+// policies where a completed no-change event would post success.
+func TestNoPolicyChangesSkippedDetectionPostsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		g    func() *noChangeGitHub
+	}{
+		{"rate-limited discovery", func() *noChangeGitHub {
+			return &noChangeGitHub{repo: "bar", hasPolicyDir: true, discoveryStatus: http.StatusTooManyRequests}
+		}},
+		{"PR head mismatch", func() *noChangeGitHub {
+			return &noChangeGitHub{repo: "bar", hasPolicyDir: true, prHead: "newer-head"}
+		}},
+		{"org policy repo rate-limited discovery", func() *noChangeGitHub {
+			return &noChangeGitHub{repo: ".github", discoveryStatus: http.StatusTooManyRequests}
+		}},
+	} {
+		for _, eventType := range []string{"check_suite", "pull_request"} {
+			t.Run(tc.name+"/"+eventType, func(t *testing.T) {
+				g := tc.g()
+				sendNoChangeEvent(t, g.server(t), eventType, g.repo)
+
+				if len(g.created) != 0 {
+					t.Fatalf("expected no check run, got %d", len(g.created))
+				}
+				if g.probes != 0 || g.lists != 0 {
+					t.Fatalf("probes = %d, lists = %d after skipped detection, want 0 and 0", g.probes, g.lists)
+				}
+			})
+		}
+	}
+}
+
+// Removing a repository's last policy also removes .github/chainguard, so a
+// directory probe would call the repository policy-free and post nothing,
+// leaving the PR without its required check. The deletion itself proves the
+// repository carried policies, and removing a policy is a valid change.
+func TestDeletingLastPolicyPostsSuccessCheckRun(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar", deletesPolicy: true}
+			sendNoChangeEvent(t, g.server(t), eventType, "bar")
+
+			if len(g.created) != 1 {
+				t.Fatalf("expected 1 check run, got %d", len(g.created))
+			}
+			cr := g.created[0]
+			if cr.Name != checkRunName || cr.HeadSHA != "head" || cr.GetConclusion() != "success" {
+				t.Fatalf("check run = name %q sha %q conclusion %q", cr.Name, cr.HeadSHA, cr.GetConclusion())
+			}
+			if got := cr.GetOutput().GetTitle(); got != policiesRemovedTitle {
+				t.Fatalf("title = %q, want %q", got, policiesRemovedTitle)
+			}
+			if g.probes != 0 {
+				t.Fatalf("policy directory probed %d times, want 0", g.probes)
+			}
+		})
+	}
+}
