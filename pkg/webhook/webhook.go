@@ -404,6 +404,19 @@ func (e *Validator) policyRepo() string {
 // don't skip drafts, so draft PRs are already validated on opened/synchronize.
 var prActionsThatChangeFiles = sets.New("opened", "synchronize", "reopened")
 
+// checkSuiteActionsToValidate and checkRunActionsToValidate are the check
+// event actions with which GitHub asks an app to run or re-run its checks.
+// Every other action, in particular created and completed, describes a check
+// run that some app has just posted. The validator posts one itself after each
+// validation, and GitHub attributes the resulting check_run events to the user
+// who triggered the suite rather than to the app, so without this filter every
+// posted check run would start another validation and the two would feed each
+// other until the installation's rate limit is exhausted.
+var (
+	checkSuiteActionsToValidate = sets.New("requested", "rerequested")
+	checkRunActionsToValidate   = sets.New("rerequested")
+)
+
 // installationClientCacheSize matches the app's other LRUs (e.g. ghinstall,
 // octosts); entries are tiny and least-recently-used installations evict first.
 const installationClientCacheSize = 200
@@ -448,10 +461,20 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
+		if !checkSuiteActionsToValidate.Has(event.GetAction()) {
+			log.Infof("skipping check_suite action %q: only requested and rerequested start a validation", event.GetAction())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		cr, err = e.handleCheckSuite(ctx, event)
 	case *github.CheckRunEvent:
 		if isBotSender(event.GetSender()) {
 			log.Infof("skipping bot-triggered check_run from %s", event.GetSender().GetLogin())
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if !checkRunActionsToValidate.Has(event.GetAction()) {
+			log.Infof("skipping check_run action %q: only rerequested starts a validation", event.GetAction())
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
