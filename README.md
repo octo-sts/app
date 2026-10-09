@@ -23,7 +23,9 @@ configured.
 
 ### The Trust Policy
 
-Trust policies are checked into `.github/chainguard/{name}.sts.yaml`, and
+Trust policies are checked into `.github/chainguard/{name}.sts.yaml` (the
+directory is configurable for self-hosted deployments; see
+[`OCTOSTS_POLICY_DIR`](#custom-policy-directory-octosts_policy_dir)), and
 consist of a few key parts:
 
 1. The claim matching criteria for federation,
@@ -474,6 +476,31 @@ Note that `GITHUB_BASE_URL` does not affect OIDC discovery, which targets the
 issuer named by the presented token. A GHES deployment whose issuer is not
 reachable from the public internet should name it in `OCTOSTS_ALLOWED_ISSUERS`,
 described below.
+
+### Custom policy directory (`OCTOSTS_POLICY_DIR`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_POLICY_DIR` | `.github/chainguard` | Directory, relative to the repository root, that holds trust policies and the org trusted-issuer allowlist. |
+
+A self-hosted deployment can read policies from a different directory, for
+example:
+
+```sh
+OCTOSTS_POLICY_DIR=.github/octo-sts
+```
+
+Trust policies are then read from `.github/octo-sts/{name}.sts.yaml` and the
+org allowlist from `<ORG_POLICY_REPO>/.github/octo-sts/trusted-token-issuers.yaml`.
+
+The value must be a relative, slash-separated path without a leading or
+trailing slash and without `.` or `..` segments. The process refuses to start
+otherwise.
+
+> **Note: two-binary config skew.** As with `ORG_POLICY_REPO`, the exchange
+> service and the webhook validator each read `OCTOSTS_POLICY_DIR` from their
+> own deployment config. Set it on both, or the webhook validates a different
+> directory than the exchange reads.
 
 ### Restricting issuers (`OCTOSTS_ALLOWED_ISSUERS`)
 

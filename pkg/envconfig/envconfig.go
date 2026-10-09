@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kelseyhightower/envconfig"
@@ -68,6 +69,10 @@ type EnvConfigApp struct {
 	// instance serves. Defaults to ".github". Must not be empty; setting
 	// ORG_POLICY_REPO="" is rejected at startup.
 	OrgPolicyRepo string `envconfig:"ORG_POLICY_REPO" required:"false" default:".github"`
+	// PolicyDir is the directory, relative to the repository root, that holds
+	// trust policies and the org trusted-issuer allowlist. Defaults to
+	// ".github/chainguard". The app and the webhook must agree on it.
+	PolicyDir string `envconfig:"OCTOSTS_POLICY_DIR" required:"false" default:".github/chainguard"`
 }
 
 type EnvConfigWebhook struct {
@@ -79,6 +84,10 @@ type EnvConfigWebhook struct {
 	// trust policies and the org trusted-issuer allowlist. Defaults to ".github".
 	// Must not be empty; setting ORG_POLICY_REPO="" is rejected at startup.
 	OrgPolicyRepo string `envconfig:"ORG_POLICY_REPO" required:"false" default:".github"`
+	// PolicyDir is the directory, relative to the repository root, that holds
+	// trust policies and the org trusted-issuer allowlist. Defaults to
+	// ".github/chainguard". The app and the webhook must agree on it.
+	PolicyDir string `envconfig:"OCTOSTS_POLICY_DIR" required:"false" default:".github/chainguard"`
 }
 
 func AppConfig() (*EnvConfigApp, error) {
@@ -91,6 +100,9 @@ func AppConfig() (*EnvConfigApp, error) {
 
 	if cfg.OrgPolicyRepo == "" {
 		return nil, errors.New("ORG_POLICY_REPO must not be empty")
+	}
+	if err := validatePolicyDir(cfg.PolicyDir); err != nil {
+		return nil, err
 	}
 
 	return cfg, err
@@ -107,8 +119,31 @@ func WebhookConfig() (*EnvConfigWebhook, error) {
 	if cfg.OrgPolicyRepo == "" {
 		return nil, errors.New("ORG_POLICY_REPO must not be empty")
 	}
+	if err := validatePolicyDir(cfg.PolicyDir); err != nil {
+		return nil, err
+	}
 
 	return cfg, err
+}
+
+// validatePolicyDir rejects an OCTOSTS_POLICY_DIR that does not name a
+// directory below the repository root in the form GitHub reports paths: a
+// relative, slash-separated path with no empty, "." or ".." segments. Paths
+// GitHub returns are compared against it literally, so any other spelling of
+// the same directory would silently match no policies.
+func validatePolicyDir(dir string) error {
+	if dir == "" {
+		return errors.New("OCTOSTS_POLICY_DIR must not be empty")
+	}
+	if strings.Contains(dir, `\`) {
+		return fmt.Errorf("OCTOSTS_POLICY_DIR %q must use forward slashes", dir)
+	}
+	for segment := range strings.SplitSeq(dir, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return fmt.Errorf("OCTOSTS_POLICY_DIR %q must be a relative path without empty, \".\" or \"..\" segments", dir)
+		}
+	}
+	return nil
 }
 
 func BaseConfig() (*EnvConfig, error) {
