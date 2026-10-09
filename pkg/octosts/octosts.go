@@ -864,40 +864,8 @@ func isRateLimit(err error) bool {
 	return ok && st.Code() == codes.ResourceExhausted
 }
 
-// IsGitHubRateLimited reports whether err looks like a GitHub rate-limit
-// response, primary or secondary.
-//
-// The typed errors must be checked first: go-github returns *RateLimitError for
-// a 403 carrying X-RateLimit-Remaining: 0 and *AbuseRateLimitError for a
-// secondary limit, and NEITHER unwraps to *ErrorResponse. A status-code-only
-// check therefore misses every genuine rate limit from real GitHub — which is
-// the bug this function exists to fix.
-//
-// This is deliberately LENIENT: a bare 403 with no rate-limit marker also
-// counts. That is correct for both current callers, where a false positive
-// costs a retry or a redelivery rather than granting access. Anything that
-// gates access needs a stricter test.
-func IsGitHubRateLimited(err error) bool {
-	if err == nil {
-		return false
-	}
-	var rateLimitErr *github.RateLimitError
-	var abuseRateLimitErr *github.AbuseRateLimitError
-	if errors.As(err, &rateLimitErr) || errors.As(err, &abuseRateLimitErr) {
-		return true
-	}
-	var errResp *github.ErrorResponse
-	if errors.As(err, &errResp) && errResp.Response != nil {
-		switch errResp.Response.StatusCode {
-		case http.StatusForbidden, http.StatusTooManyRequests:
-			return true
-		}
-	}
-	return false
-}
-
-// isProvenRateLimit reports whether err is PROVEN to be a rate limit, unlike the
-// lenient IsGitHubRateLimited. go-github types a *RateLimitError for a 403/429
+// isProvenRateLimit reports whether err is PROVEN to be a rate limit, not
+// merely a 403. go-github types a *RateLimitError for a 403/429
 // carrying X-RateLimit-Remaining: 0, and *AbuseRateLimitError for a secondary
 // limit, but only when the response documentation_url ends with a known
 // rate-limit anchor (github.go CheckResponse). GitHub also answers a secondary

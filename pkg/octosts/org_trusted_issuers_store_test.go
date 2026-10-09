@@ -209,19 +209,6 @@ func TestIsOrgIssuerRateLimit(t *testing.T) {
 	}
 }
 
-// TestOrgIssuerRateLimitDivergesFromWebhook pins the deliberate divergence: the
-// webhook's helper treats any 403 as rate limiting, which is right there (it
-// only suppresses a CheckRun) and wrong here (it would deny federation).
-func TestOrgIssuerRateLimitDivergesFromWebhook(t *testing.T) {
-	bare403 := &github.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}}
-	if isOrgIssuerRateLimit(bare403) {
-		t.Error("isOrgIssuerRateLimit must NOT treat a bare 403 as a rate limit")
-	}
-	if !IsGitHubRateLimited(bare403) {
-		t.Error("IsGitHubRateLimited is expected to treat a bare 403 as a rate limit; if this changed, revisit the divergence comment")
-	}
-}
-
 func TestClassifyMintError(t *testing.T) {
 	mk := func(code int, headers map[string]string) error {
 		h := http.Header{}
