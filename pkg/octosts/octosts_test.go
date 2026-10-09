@@ -1137,6 +1137,665 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	}
 }
 
+// A caller can miss the cache, be descheduled until an earlier flight finishes,
+// then become the leader of a new flight. It must use the result just cached by
+// that earlier flight rather than fetching a stale 404 and overwriting a 200.
+func TestPolicyReadRechecksCachesAfterJoiningFlight(t *testing.T) {
+	const policy = "fresh policy"
+	for _, tc := range []struct {
+		name string
+		seed func(cacheTrustPolicyKey)
+		want codes.Code
+	}{
+		{"successful policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, policy) }, codes.OK},
+		{"missing policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, negativeCacheConst) }, codes.NotFound},
+		{"forbidden policy read", func(k cacheTrustPolicyKey) { forbiddenPolicies.Add(k, struct{}{}) }, codes.PermissionDenied},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := freshTPKey(t, "late-joiner-"+tc.name)
+			gh, counter := newFakeGitHubNotFoundCounter()
+			atr := newAppsTransport(t, gh)
+			tc.seed(key)
+
+			got, err := (&sts{}).fetchTrustPolicyRawAfterCacheMiss(t.Context(), atr, 1234, key)
+			if status.Code(err) != tc.want {
+				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = (%q, %v), want cached %v", got, err, tc.want)
+			}
+			if tc.want == codes.OK && got != policy {
+				t.Fatalf("fetchTrustPolicyRawAfterCacheMiss() = %q, want cached policy %q", got, policy)
+			}
+			if calls := counter.Load(); calls != 0 {
+				t.Errorf("late joiner made %d GitHub contents requests, want 0", calls)
+			}
+		})
+	}
+}
+
+func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation.AppsTransport {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("test-installation-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", read)
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	return newAppsTransport(t, &fakeGitHub{mux: mux})
+}
+
+func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
+	key := freshTPKey(t, "concurrent-policy-read")
+
+	firstStarted := make(chan struct{})
+	releaseSuccess := make(chan struct{})
+	release404 := make(chan struct{})
+	closeSuccess := sync.OnceFunc(func() { close(releaseSuccess) })
+	close404 := sync.OnceFunc(func() { close(release404) })
+	defer closeSuccess()
+	defer close404()
+	var contentReads atomic.Int32
+	const policy = "issuer: https://example.com\nsubject: example\n"
+
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if contentReads.Add(1) == 1 {
+			close(firstStarted)
+			<-releaseSuccess
+			_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+				Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+				Type:     new("file"),
+				Encoding: new("base64"),
+			})
+			return
+		}
+		// Before single-flight, a concurrent response from an earlier snapshot
+		// could arrive after the 200 and replace it with a five-minute 404.
+		<-release404
+		writeGitHubNotFound(w)
+	})
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		raw string
+		err error
+	}
+	first := make(chan result, 1)
+	second := make(chan result, 1)
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		first <- result{raw, err}
+	}()
+	select {
+	case <-firstStarted:
+	case <-ctx.Done():
+		t.Fatal("first GitHub contents read did not start")
+	}
+	secondCtx := newFlightJoinObserver(ctx)
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(secondCtx, atr, 1234, key)
+		second <- result{raw, err}
+	}()
+	select {
+	case <-secondCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
+	closeSuccess()
+	gotFirst := <-first
+	close404()
+	gotSecond := <-second
+	if gotFirst.err != nil || gotFirst.raw != policy || gotSecond.err != nil || gotSecond.raw != policy {
+		t.Fatalf("concurrent reads = (%q, %v), (%q, %v); want shared policy", gotFirst.raw, gotFirst.err, gotSecond.raw, gotSecond.err)
+	}
+	if reads := contentReads.Load(); reads != 1 {
+		t.Errorf("GitHub contents read %d times for the same miss, want 1", reads)
+	}
+	if cached, ok := trustPolicies.Get(key); !ok || cached != policy {
+		t.Errorf("cache = (%q, %v), want successful policy (not a late 404)", cached, ok)
+	}
+}
+
+// The flight key must carry the whole policy key. Two identities in the same
+// repository that miss the cache together must each read their own policy;
+// sharing one flight would hand one caller the other identity's policy.
+func TestConcurrentPolicyReadsForDifferentIdentitiesDoNotShareFlight(t *testing.T) {
+	keyA := freshTPKey(t, "identity-a")
+	keyB := freshTPKey(t, "identity-b")
+	started := make(chan struct{}, 2)
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	policyFor := func(identity string) string {
+		return "issuer: https://example.com\nsubject: " + identity + "\n"
+	}
+	read := func(w http.ResponseWriter, r *http.Request) {
+		identity := strings.TrimSuffix(r.PathValue("identity"), ".sts.yaml")
+		started <- struct{}{}
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policyFor(identity)))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	type result struct {
+		raw string
+		err error
+	}
+	results := make(map[string]chan result)
+	atr := newPolicyReadTransport(t, read)
+	for _, key := range []cacheTrustPolicyKey{keyA, keyB} {
+		ch := make(chan result, 1)
+		results[key.identity] = ch
+		go func() {
+			raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+			ch <- result{raw, err}
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-ctx.Done():
+			t.Fatal("both identities must start their own GitHub read; one joined the other's flight")
+		}
+	}
+	closeRelease()
+	for identity, ch := range results {
+		got := <-ch
+		if got.err != nil || got.raw != policyFor(identity) {
+			t.Errorf("read for %s = (%q, %v), want its own policy", identity, got.raw, got.err)
+		}
+	}
+}
+
+// Sharing a rate-limit result must still let each exchange rotate to a
+// healthy installation. The next read is single-flighted too, so concurrent
+// rotations do not amplify GitHub requests for the same policy.
+func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
+	key := freshTPKey(t, "shared-rate-limit")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var limitedReads, healthyReads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		limitedReads.Add(1)
+		signalStarted()
+		<-release
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		healthyReads.Add(1)
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: healthy}, AppCount: 2}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		results <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("rate-limited policy read did not start")
+	}
+	waiterCtx := newFlightJoinObserver(ctx)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		results <- err
+	}()
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
+	close(release)
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatalf("policy read did not recover after rate-limit rotation: %v", err)
+		}
+	}
+	if got := limitedReads.Load(); got != 1 {
+		t.Errorf("rate-limited installation read %d times, want 1", got)
+	}
+	if got := healthyReads.Load(); got != 1 {
+		t.Errorf("healthy installation read %d times, want 1", got)
+	}
+}
+
+// The flight shares the policy read, never the authorization decision: each
+// caller's token is checked against the shared policy after the flight, so a
+// refactor that moved the authorize gate inside the flight would fail here.
+func TestConcurrentCallersShareOneFlightButAuthorizeSeparately(t *testing.T) {
+	key := freshTPKey(t, "authorize-gate")
+	orgIssuers.Remove(key.owner)
+	t.Cleanup(func() { orgIssuers.Remove(key.owner) })
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	const allowed = "repo:org/repo:ref:refs/heads/main"
+	const policy = "issuer: https://example.com\nsubject: " + allowed + "\n"
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, r *http.Request) {
+		// The helper routes the org allowlist path here too; no allowlist applies.
+		if strings.HasSuffix(r.URL.Path, OrgTrustedIssuersPath) {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"Not Found"}`))
+			return
+		}
+		reads.Add(1)
+		signalStarted()
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
+	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool}), domain: "octo-sts.dev"}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	authorizeAs := func(sub string) func(*OrgTrustPolicy) error {
+		tok := &oidc.IDToken{Issuer: "https://example.com", Subject: sub, Audience: []string{"octo-sts.dev"}}
+		return func(otp *OrgTrustPolicy) error {
+			_, err := otp.CheckToken(tok, s.domain)
+			return err
+		}
+	}
+	lookup := func(ctx context.Context, sub string) error {
+		_, _, _, _, err := s.lookupInstallAndTrustPolicy(ctx, "org/repo", key.identity, sub, "https://example.com", authorizeAs(sub))
+		return err
+	}
+
+	matching := make(chan error, 1)
+	go func() { matching <- lookup(ctx, allowed) }()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("the first caller's policy read did not start")
+	}
+	waiterCtx := newFlightJoinObserver(ctx)
+	mismatched := make(chan error, 1)
+	go func() { mismatched <- lookup(waiterCtx, "repo:attacker/other:ref:refs/heads/main") }()
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("the second caller never joined the flight")
+	}
+	closeRelease()
+
+	if err := <-matching; err != nil {
+		t.Errorf("matching caller: %v, want success", err)
+	}
+	if err := <-mismatched; status.Code(err) != codes.PermissionDenied {
+		t.Errorf("mismatched caller: %v, want PermissionDenied from its own authorize gate", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("policy read %d times, want 1 shared flight", got)
+	}
+}
+
+// flightJoinObserver reports when a policy-read caller is parked on the
+// flight. The waiter's first call to Done is the select after DoChan has
+// registered it, so the leader can be held until the join is certain.
+type flightJoinObserver struct {
+	context.Context
+	once   sync.Once
+	joined chan struct{}
+}
+
+func newFlightJoinObserver(ctx context.Context) *flightJoinObserver {
+	return &flightJoinObserver{Context: ctx, joined: make(chan struct{})}
+}
+
+func (o *flightJoinObserver) Done() <-chan struct{} {
+	o.once.Do(func() { close(o.joined) })
+	return o.Context.Done()
+}
+
+func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) {
+	key := freshTPKey(t, "foreign-rate-limit")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	signalStarted := sync.OnceFunc(func() { close(started) })
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	var limitedReads, healthyReads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		limitedReads.Add(1)
+		signalStarted()
+		<-release
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		healthyReads.Add(1)
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	// Rotation only ever hands out the limited installation, so the waiter
+	// can recover only by re-reading on the healthy one it already holds.
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: limited}, AppCount: 2}
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		leaderDone <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("rate-limited policy read did not start")
+	}
+
+	waiterCtx := newFlightJoinObserver(ctx)
+	waiterDone := make(chan error, 1)
+	go func() {
+		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		waiterDone <- err
+	}()
+	select {
+	case <-waiterCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("waiter never joined the flight")
+	}
+	closeRelease()
+
+	if err := <-waiterDone; err != nil {
+		t.Fatalf("waiter on a healthy installation = %v, want success", err)
+	}
+	<-leaderDone
+	if got := healthyReads.Load(); got != 1 {
+		t.Errorf("healthy installation read %d times, want 1", got)
+	}
+	if got := limitedReads.Load(); got < 1 || got > 2 {
+		t.Errorf("limited installation read %d times, want 1 (leader) or 2 (leader plus its rotation)", got)
+	}
+}
+
+func TestPolicyReadLeaderKeepsItsOwnRateLimit(t *testing.T) {
+	key := freshTPKey(t, "own-rate-limit")
+	var reads atomic.Int32
+	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+	})
+	_, err := (&sts{}).fetchTrustPolicyRaw(t.Context(), limited, 100, key)
+	if got := status.Code(err); got != codes.ResourceExhausted {
+		t.Fatalf("code = %v, want ResourceExhausted; err = %v", got, err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub read %d times, want 1: a leader must not re-read on its own rate limit", got)
+	}
+}
+
+func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
+	key := freshTPKey(t, "policy-after-cancel")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	closeRelease := sync.OnceFunc(func() { close(release) })
+	defer closeRelease()
+	var reads atomic.Int32
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if reads.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	s := &sts{}
+	leaderCtx, cancelLeader := context.WithCancel(t.Context())
+	defer cancelLeader()
+	waiterCtx, cancelWaiter := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelWaiter()
+	leaderResult := make(chan error, 1)
+	waiterResult := make(chan error, 1)
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(leaderCtx, atr, 1234, key)
+		leaderResult <- err
+	}()
+	select {
+	case <-started:
+	case <-waiterCtx.Done():
+		t.Fatal("shared read did not start")
+	}
+	go func() {
+		raw, err := s.fetchTrustPolicyRaw(waiterCtx, atr, 1234, key)
+		if err == nil && raw != policy {
+			err = fmt.Errorf("shared read returned %q, want %q", raw, policy)
+		}
+		waiterResult <- err
+	}()
+	cancelLeader()
+	if err := <-leaderResult; status.Code(err) != codes.Canceled {
+		t.Errorf("canceled caller got %v, want Canceled", err)
+	}
+	closeRelease()
+	if err := <-waiterResult; err != nil {
+		t.Fatalf("waiter lost the shared read: %v", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub contents read %d times, want 1", got)
+	}
+}
+
+func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
+	key := freshTPKey(t, "policy-read-timeout")
+	orig := policyReadTimeout
+	policyReadTimeout = time.Second
+	t.Cleanup(func() { policyReadTimeout = orig })
+
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(_ http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		<-r.Context().Done()
+	})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+
+	_, err := (&sts{}).fetchTrustPolicyRaw(ctx, atr, 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable (the caller never gave up); err = %v", got, err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("caller context expired; the shared timeout was not what ended the read")
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("GitHub contents read %d times, want 1", got)
+	}
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("a timed-out read must not populate the policy cache")
+	}
+	if _, ok := forbiddenPolicies.Get(key); ok {
+		t.Error("a timed-out read must not populate the forbidden cooldown")
+	}
+}
+
+func TestPolicyReadTimeoutRevokesMintedToken(t *testing.T) {
+	key := freshTPKey(t, "policy-read-timeout-revocation")
+	orig := policyReadTimeout
+	policyReadTimeout = time.Second
+	t.Cleanup(func() { policyReadTimeout = orig })
+
+	var mintCalls, contentsCalls, revokeCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mintCalls.Add(1)
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("timeout-test-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/api/v3/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(_ http.ResponseWriter, r *http.Request) {
+		contentsCalls.Add(1)
+		<-r.Context().Done()
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.Header.Get("Authorization") != "Bearer timeout-test-token" {
+			t.Errorf("unexpected revocation request: %s %s", r.Method, r.Header.Get("Authorization"))
+		}
+		revokeCalls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	signer := ghinstallation.NewRSASigner(jwt.SigningMethodRS256, sharedAppKey())
+	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, 1234, ghinstallation.WithSigner(signer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atr.BaseURL = srv.URL
+
+	_, err = (&sts{baseURL: srv.URL}).fetchTrustPolicyRaw(t.Context(), atr, 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("timed-out read = %v, want Unavailable", err)
+	}
+	if got := mintCalls.Load(); got != 1 {
+		t.Errorf("token mint requests = %d, want 1", got)
+	}
+	if got := contentsCalls.Load(); got != 1 {
+		t.Errorf("contents requests = %d, want 1", got)
+	}
+	if got := revokeCalls.Load(); got != 1 {
+		t.Errorf("token revocations = %d, want 1 even after the read deadline", got)
+	}
+}
+
+func TestPolicyReadFailedMintDoesNotMintForRevocation(t *testing.T) {
+	key := freshTPKey(t, "failed-mint")
+	var mintCalls, contentsCalls atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mintCalls.Add(1)
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		_, _ = w.Write([]byte(`{"message":"invalid installation"}`))
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+		contentsCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	atr := newAppsTransport(t, &fakeGitHub{mux: mux})
+	if _, err := (&sts{}).fetchTrustPolicyRaw(t.Context(), atr, 1234, key); err == nil {
+		t.Fatal("expected failed token mint to fail the policy read")
+	}
+	if got := mintCalls.Load(); got != 1 {
+		t.Errorf("token mint requests = %d, want 1 (no second mint solely for cleanup)", got)
+	}
+	if got := contentsCalls.Load(); got != 0 {
+		t.Errorf("contents requests = %d, want 0 without a token", got)
+	}
+}
+
+// Single-flight only protects concurrent cache writers. A first (possibly
+// transient) 404 is still shared and cached for five minutes, preserving
+// #1334's quota tradeoff; recovering a newly visible policy is separate.
+func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
+	key := freshTPKey(t, "first-404")
+	started := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	var reads atomic.Int32
+	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+		if reads.Add(1) == 1 {
+			close(started)
+			<-release
+			writeGitHubNotFound(w)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte("new policy"))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	s := &sts{}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	results := make(chan error, 2)
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+		results <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("first policy read did not start")
+	}
+	secondCtx := newFlightJoinObserver(ctx)
+	go func() {
+		_, err := s.fetchTrustPolicyRaw(secondCtx, atr, 1234, key)
+		results <- err
+	}()
+	select {
+	case <-secondCtx.joined:
+	case <-ctx.Done():
+		t.Fatal("second policy read never joined the flight")
+	}
+	close(release)
+	for range 2 {
+		err := <-results
+		if got := status.Code(err); got != codes.NotFound {
+			t.Fatalf("policy read = %v, want NotFound", err)
+		}
+	}
+	// Even though the next GitHub response would be 200, the first 404 is
+	// cached; this PR must not add a GET for each concurrent caller.
+	if _, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key); status.Code(err) != codes.NotFound {
+		t.Fatalf("cached policy read = %v, want NotFound", err)
+	}
+	if got := reads.Load(); got != 1 {
+		t.Errorf("contents requests = %d, want 1 (no retry of genuine missing policies)", got)
+	}
+}
+
 func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "cached-missing"}
 	trustPolicies.Add(key, negativeCacheConst)

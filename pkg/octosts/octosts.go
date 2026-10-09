@@ -48,9 +48,13 @@ import (
 )
 
 const (
-	retryDelay         = 10 * time.Millisecond
-	maxRetry           = 3
-	negativeCacheConst = ""
+	retryDelay = 10 * time.Millisecond
+	maxRetry   = 3
+	// maxInheritedRateLimitRejoins bounds how many times a policy-read waiter
+	// re-reads on its own installation after inheriting another
+	// installation's rate limit from a shared flight.
+	maxInheritedRateLimitRejoins = 3
+	negativeCacheConst           = ""
 )
 
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
@@ -73,6 +77,20 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
 var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
+
+// policyReadFlight collapses concurrent cache misses for the same policy key
+// into one GitHub read. The caches above are package-level, so the flight is
+// too: a per-server group would let two servers in one process race on them.
+var policyReadFlight singleflight.Group
+
+// policyReadTimeout bounds a shared read. The read outlives a caller that
+// stops waiting, but must not keep an installation token or a GitHub request
+// alive indefinitely. It is a var so tests can shorten it.
+var policyReadTimeout = 30 * time.Second
+
+// A shared read can hit policyReadTimeout after minting its short-lived token.
+// Give revocation its own small budget instead of using the expired read context.
+const policyReadRevokeTimeout = 2 * time.Second
 
 // forbiddenPolicyTTL is deliberately short so a permission fix (an installation
 // regaining contents:read, an IP allowlist edit) is picked up within a minute.
@@ -957,13 +975,24 @@ func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTr
 // fetchTrustPolicyRaw returns the raw YAML for a trust policy, serving
 // from the LRU cache when possible and falling back to the GitHub API.
 func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	if raw, found, err := cachedTrustPolicyRaw(ctx, tpKey); found {
+		return raw, err
+	}
+	return s.fetchTrustPolicyRawAfterCacheMiss(ctx, base, install, tpKey)
+}
+
+// cachedTrustPolicyRaw checks the three caches that can terminate a policy
+// read: a cached policy, a cached 404, and the 403 cooldown. The same check
+// runs inside the flight: a caller can miss here and be descheduled until
+// after an earlier flight has filled a cache entry.
+func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (string, bool, error) {
 	if cached, ok := trustPolicies.Get(tpKey); ok {
 		if cached == negativeCacheConst {
 			clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-			return "", status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+			return "", true, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
 		}
 		clog.InfoContextf(ctx, "found trust policy in cache for %s", tpKey)
-		return cached, nil
+		return cached, true, nil
 	}
 
 	// A recent permission 403 short-circuits the mint/read/revoke cycle for the
@@ -972,9 +1001,81 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
 	if _, ok := forbiddenPolicies.Get(tpKey); ok {
 		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
-		return "", status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
+		return "", true, status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
 	}
+	return "", false, nil
+}
 
+// policyReadResult is a flight's outcome together with the installation that
+// produced it, so a waiter can tell an inherited rate limit from its own.
+type policyReadResult struct {
+	raw     string
+	install int64
+}
+
+// fetchTrustPolicyRawAfterCacheMiss joins the flight for tpKey. Only the
+// leader reads GitHub and writes to the shared caches; each waiter can still
+// leave when its own request context is canceled. The flight is keyed exactly
+// like the caches, so no two concurrent readers can write the same entry.
+//
+// A rate limit belongs to the installation that hit it. A waiter that picked
+// a different installation does not report it as its own, because
+// lookupTrustPolicyWithRetry would count it against the waiter's rotation
+// budget and could exhaust it without ever reading the waiter's healthy
+// installation. The waiter re-reads on its own installation instead, a
+// bounded number of times so a stream of flights led from a limited
+// installation cannot hold it indefinitely.
+func (s *sts) fetchTrustPolicyRawAfterCacheMiss(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	key := fmt.Sprintf("%q/%q/%q", tpKey.owner, tpKey.repo, tpKey.identity)
+	for rejoins := 0; ; rejoins++ {
+		ch := policyReadFlight.DoChan(key, func() (any, error) {
+			raw, err := s.leadPolicyRead(ctx, base, install, tpKey)
+			return policyReadResult{raw: raw, install: install}, err
+		})
+		select {
+		case <-ctx.Done():
+			return "", status.FromContextError(ctx.Err()).Err()
+		case res := <-ch:
+			if res.Err == nil {
+				return res.Val.(policyReadResult).raw, nil
+			}
+			leader, ok := res.Val.(policyReadResult)
+			if ok && isRateLimit(res.Err) && leader.install != install && rejoins < maxInheritedRateLimitRejoins {
+				clog.InfoContextf(ctx, "policy read for %q inherited a rate limit from installation %d, re-reading with installation %d", tpKey.identity, leader.install, install)
+				continue
+			}
+			return "", res.Err
+		}
+	}
+}
+
+// leadPolicyRead is the body of a policy-read flight: it re-checks the
+// caches, then reads GitHub on the flight's own deadline.
+func (s *sts) leadPolicyRead(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
+	if raw, found, err := cachedTrustPolicyRaw(ctx, tpKey); found {
+		return raw, err
+	}
+	// WithoutCancel keeps the leader's request values (logger, app and
+	// installation) but detaches its cancellation, so the only deadline
+	// the read can see is policyReadTimeout.
+	workCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policyReadTimeout)
+	defer cancel()
+	raw, err := s.fetchTrustPolicyRawUncached(workCtx, base, install, tpKey)
+	if status.Code(err) == codes.DeadlineExceeded {
+		// The shared read hit policyReadTimeout. No waiter gave up, so
+		// report a transient GitHub failure the caller may retry, not a
+		// deadline the caller never set. Nothing is cached.
+		clog.WarnContextf(ctx, "trust policy read for %q timed out after %v", tpKey.identity, policyReadTimeout)
+		return "", status.Errorf(codes.Unavailable, "trust policy read for %q timed out", tpKey.identity)
+	}
+	return raw, err
+}
+
+// fetchTrustPolicyRawUncached mints a contents:read token, reads the policy
+// from GitHub, and fills the caches. It runs only as a flight leader on the
+// flight's own context, so a context error here is policyReadTimeout, never a
+// waiter giving up.
+func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
 	atr := ghtransport.ForInstallation(base, install)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
 		Repositories: []string{tpKey.repo},
@@ -982,13 +1083,16 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 			Contents: new("read"),
 		},
 	}
+	var mintedToken string
 	defer func() {
-		tok, err := atr.Token(ctx)
-		if err != nil {
-			clog.WarnContextf(ctx, "failed to get token for revocation: %v", err)
+		// No token was minted if client creation or token acquisition failed.
+		// In particular, do not mint a new token solely to revoke it.
+		if mintedToken == "" {
 			return
 		}
-		if err := Revoke(ctx, tok, s.baseURL); err != nil {
+		revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), policyReadRevokeTimeout)
+		defer cancel()
+		if err := Revoke(revokeCtx, mintedToken, s.baseURL); err != nil {
 			clog.WarnContextf(ctx, "failed to revoke token: %v", err)
 		}
 	}()
@@ -1006,11 +1110,18 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	// it), a permission-denied 403 (no app can resolve it), and a 404 (the
 	// genuine "no policy" answer that seeds the negative cache).
 	op := func() (string, error) {
-		file, _, _, err := client.Repositories.GetContents(ctx,
-			tpKey.owner, tpKey.repo,
-			fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
-			&github.RepositoryContentGetOptions{},
-		)
+		// GetContents would mint through this same transport. Acquire explicitly
+		// so revocation knows which token to use even if the read times out.
+		tok, err := atr.Token(ctx)
+		var file *github.RepositoryContent
+		if err == nil {
+			mintedToken = tok
+			file, _, _, err = client.Repositories.GetContents(ctx,
+				tpKey.owner, tpKey.repo,
+				fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
+				&github.RepositoryContentGetOptions{},
+			)
+		}
 		if err == nil {
 			if file == nil {
 				// GetContents returns a nil file when the path is a directory;
@@ -1035,7 +1146,7 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		}
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
 
-		// The caller gave up; propagate rather than retry or mask.
+		// The read's own deadline passed; propagate rather than retry or mask.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", backoff.Permanent(status.FromContextError(err).Err())
 		}
@@ -1088,9 +1199,9 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 		if errors.As(err, &pe) {
 			err = pe.Unwrap()
 		}
-		// A cancellation during a backoff sleep surfaces here as a raw context
-		// error, not a gRPC status; report it as the caller giving up rather
-		// than as a GitHub transient.
+		// A deadline during a backoff sleep surfaces here as a raw context
+		// error, not a gRPC status; report it as a context error rather than
+		// as a GitHub transient. The flight maps it to Unavailable.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "", status.FromContextError(err).Err()
 		}
@@ -1109,8 +1220,8 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 
 // isTransient reports whether err is a retriable, non-rate-limit failure from a
 // trust policy fetch: a 5xx GitHub response, or a transport / token-creation
-// error with no HTTP response at all. Context cancellation and deadline are the
-// caller giving up, so they are deliberately excluded.
+// error with no HTTP response at all. Context cancellation and deadline end the
+// read outright, so they are deliberately excluded.
 func isTransient(err error) bool {
 	if err == nil {
 		return false
