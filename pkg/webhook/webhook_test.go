@@ -69,7 +69,7 @@ func TestValidatePolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := slogtest.Context(t)
-	if _, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/test.sts.yaml"}, ".github", octosts.DefaultPolicyDir); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -106,7 +106,7 @@ func prefetchGitHub(t *testing.T) *github.Client {
 func TestValidatePolicyCompileFailure(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	_, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github")
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/badapp.sts.yaml"}, ".github", octosts.DefaultPolicyDir)
 	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
 		t.Fatalf("validatePolicies = %v, want compile error about app/app_pattern", err)
 	}
@@ -115,7 +115,7 @@ func TestValidatePolicyCompileFailure(t *testing.T) {
 func TestValidateOrgPolicyCompiles(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	if _, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github"); err != nil {
+	if _, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/org.sts.yaml"}, ".github", octosts.DefaultPolicyDir); err != nil {
 		t.Fatalf("validatePolicies = %v, want nil (org policy with repositories compiles)", err)
 	}
 }
@@ -123,7 +123,7 @@ func TestValidateOrgPolicyCompiles(t *testing.T) {
 func TestValidateOrgPolicyCompileFailure(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)
-	_, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github")
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", ".github", ".github", "deadbeef", []string{".github/chainguard/badorg.sts.yaml"}, ".github", octosts.DefaultPolicyDir)
 	if err == nil || !strings.Contains(err.Error(), "only one of app or app_pattern") {
 		t.Fatalf("validatePolicies = %v, want org-arm compile error about app/app_pattern", err)
 	}
@@ -349,7 +349,7 @@ func TestFilterValidatedFiles(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := filterValidatedFiles("some-service", tc.input, ".github")
+			got := filterValidatedFiles("some-service", tc.input, ".github", octosts.DefaultPolicyDir)
 			if !slices.Equal(tc.want, got) {
 				t.Errorf("filterValidatedFiles(%v) = %v, want %v", tc.input, got, tc.want)
 			}
@@ -2438,8 +2438,36 @@ func TestIsValidatedPath(t *testing.T) {
 		{name: "non-policy yaml inside the policy directory of .github", repo: ".github", path: ".github/chainguard/config.yaml", want: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isValidatedPath(tc.repo, tc.path, ".github"); got != tc.want {
+			if got := isValidatedPath(tc.repo, tc.path, ".github", octosts.DefaultPolicyDir); got != tc.want {
 				t.Errorf("isValidatedPath(%q, %q) = %v, want %v", tc.repo, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsValidatedPathCustomPolicyDir pins that a custom PolicyDir replaces the
+// default rather than adding to it, and is matched literally.
+func TestIsValidatedPathCustomPolicyDir(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		repo string
+		dir  string
+		path string
+		want bool
+	}{
+		{name: "trust policy in custom dir", repo: "some-service", dir: ".github/octo-sts", path: ".github/octo-sts/foo.sts.yaml", want: true},
+		{name: "allowlist in custom dir", repo: ".github", dir: ".github/octo-sts", path: ".github/octo-sts/trusted-token-issuers.yaml", want: true},
+		{name: "allowlist in custom dir outside .github", repo: "some-service", dir: ".github/octo-sts", path: ".github/octo-sts/trusted-token-issuers.yaml", want: false},
+		{name: "default dir ignored", repo: "some-service", dir: ".github/octo-sts", path: ".github/chainguard/foo.sts.yaml", want: false},
+		{name: "default allowlist ignored", repo: ".github", dir: ".github/octo-sts", path: ".github/chainguard/trusted-token-issuers.yaml", want: false},
+		{name: "nested deeper", repo: "some-service", dir: ".github/octo-sts", path: ".github/octo-sts/sub/foo.sts.yaml", want: false},
+		{name: "sibling with shared prefix", repo: "some-service", dir: ".github/octo-sts", path: ".github/octo-sts-old/foo.sts.yaml", want: false},
+		{name: "single segment", repo: "some-service", dir: "octo-sts", path: "octo-sts/foo.sts.yaml", want: true},
+		{name: "glob characters are literal", repo: "some-service", dir: "policies[1]", path: "policies1/foo.sts.yaml", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isValidatedPath(tc.repo, tc.path, ".github", tc.dir); got != tc.want {
+				t.Errorf("isValidatedPath(%q, %q, dir=%q) = %v, want %v", tc.repo, tc.path, tc.dir, got, tc.want)
 			}
 		})
 	}
@@ -2456,13 +2484,13 @@ func TestDirScanBranchFiltersPaths(t *testing.T) {
 		".github/chainguard/README.md",
 	}
 
-	got := filterValidatedFiles("some-service", all, ".github")
+	got := filterValidatedFiles("some-service", all, ".github", octosts.DefaultPolicyDir)
 	want := []string{".github/chainguard/foo.sts.yaml"}
 	if !slices.Equal(got, want) {
 		t.Errorf("filterValidatedFiles(some-service) = %v, want %v — the allowlist must not be validated outside .github", got, want)
 	}
 
-	got = filterValidatedFiles(".github", all, ".github")
+	got = filterValidatedFiles(".github", all, ".github", octosts.DefaultPolicyDir)
 	want = []string{".github/chainguard/foo.sts.yaml", ".github/chainguard/trusted-token-issuers.yaml"}
 	if !slices.Equal(got, want) {
 		t.Errorf("filterValidatedFiles(.github) = %v, want %v", got, want)
@@ -3061,7 +3089,7 @@ func TestValidatePoliciesPerFileVerdicts(t *testing.T) {
 	results, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{
 		".github/chainguard/test.sts.yaml",
 		".github/chainguard/missing.sts.yaml",
-	}, ".github")
+	}, ".github", octosts.DefaultPolicyDir)
 	if err == nil {
 		t.Fatal("expected an aggregate error for the unreadable policy")
 	}
@@ -3355,7 +3383,7 @@ func TestPolicyName(t *testing.T) {
 	}{
 		{".github/chainguard/foo.sts.yaml", "foo"},
 		{".github/chainguard/foo.bar.sts.yaml", "foo.bar"},
-		{octosts.OrgTrustedIssuersPath, OrgTrustedIssuersPolicyName},
+		{octosts.OrgTrustedIssuersPath(octosts.DefaultPolicyDir), OrgTrustedIssuersPolicyName},
 		// A literal ".sts.yaml" matches the glob octo-sts validates but has no
 		// stem to name it by, so the filename stands in.
 		{".github/chainguard/.sts.yaml", ".sts.yaml"},
@@ -3378,7 +3406,7 @@ func TestPolicyName(t *testing.T) {
 // directory trees.
 type policyTreeFixture struct {
 	owner, repo string
-	// trees maps a ref to the paths under policyDir, each "path" or
+	// trees maps a ref to the paths under the policy directory, each "path" or
 	// "path:sha" so a test can hold a path steady while its content moves. A
 	// ref absent from trees resolves but has no .github directory.
 	trees map[string][]string
@@ -3441,7 +3469,7 @@ func (f *policyTreeFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if !hasSHA {
 				blob = "blob-" + name
 			}
-			rel := strings.TrimPrefix(name, policyDir+"/")
+			rel := strings.TrimPrefix(name, octosts.DefaultPolicyDir+"/")
 			// A non-recursive tree lists a subdirectory as one tree entry.
 			if sub, _, isNested := strings.Cut(rel, "/"); isNested {
 				if !nested[sub] {
@@ -3481,7 +3509,7 @@ func policyTreeServer(t *testing.T, f *policyTreeFixture) *github.Client {
 func manyPolicies(n int) []string {
 	paths := make([]string, n)
 	for i := range paths {
-		paths[i] = fmt.Sprintf("%s/p%04d.sts.yaml", policyDir, i)
+		paths[i] = fmt.Sprintf("%s/p%04d.sts.yaml", octosts.DefaultPolicyDir, i)
 	}
 	return paths
 }
@@ -3684,7 +3712,7 @@ func TestValidatePoliciesCompilesTrustPolicies(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			results, err := validatePoliciesForRepo(slogtest.Context(t), gh, "foo", tt.repo, tt.repo, "deadbeef", []string{path}, ".github")
+			results, err := validatePoliciesForRepo(slogtest.Context(t), gh, "foo", tt.repo, tt.repo, "deadbeef", []string{path}, ".github", octosts.DefaultPolicyDir)
 			if verr, ok := results[path]; !ok || (verr != nil) != (tt.wantErr != "") {
 				t.Errorf("results[%q] = (%v, present=%t), want (err=%t, present=true)", path, verr, ok, tt.wantErr != "")
 			}

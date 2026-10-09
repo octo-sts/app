@@ -362,6 +362,22 @@ func TestAppConfig(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "OCTOSTS_POLICY_DIR explicitly empty rejected",
+			envVars: map[string]string{
+				"STS_DOMAIN":         "octo-sts-test.local",
+				"OCTOSTS_POLICY_DIR": "",
+			},
+			wantErr: true,
+		},
+		{
+			name: "OCTOSTS_POLICY_DIR custom value accepted",
+			envVars: map[string]string{
+				"STS_DOMAIN":         "octo-sts-test.local",
+				"OCTOSTS_POLICY_DIR": ".github/octo-sts",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -408,6 +424,22 @@ func TestWebhookConfig(t *testing.T) {
 			envVars: map[string]string{},
 			wantErr: true,
 		},
+		{
+			name: "OCTOSTS_POLICY_DIR with parent segment rejected",
+			envVars: map[string]string{
+				"GITHUB_WEBHOOK_SECRET": "octo-sts-test.local",
+				"OCTOSTS_POLICY_DIR":    "../policies",
+			},
+			wantErr: true,
+		},
+		{
+			name: "OCTOSTS_POLICY_DIR custom value accepted",
+			envVars: map[string]string{
+				"GITHUB_WEBHOOK_SECRET": "octo-sts-test.local",
+				"OCTOSTS_POLICY_DIR":    ".github/octo-sts",
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -424,6 +456,48 @@ func TestWebhookConfig(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 				assert.NotNil(t, cfg)
+			}
+		})
+	}
+}
+
+func TestPolicyDirDefault(t *testing.T) {
+	t.Setenv("STS_DOMAIN", "octo-sts-test.local")
+	t.Setenv("GITHUB_WEBHOOK_SECRET", "octo-sts-test.local")
+
+	app, err := AppConfig()
+	assert.NoError(t, err)
+	assert.Equal(t, ".github/chainguard", app.PolicyDir)
+
+	webhook, err := WebhookConfig()
+	assert.NoError(t, err)
+	assert.Equal(t, ".github/chainguard", webhook.PolicyDir)
+}
+
+func TestValidatePolicyDir(t *testing.T) {
+	for _, tc := range []struct {
+		dir     string
+		wantErr bool
+	}{
+		{dir: ".github/chainguard"},
+		{dir: ".github/octo-sts"},
+		{dir: "octo-sts"},
+		{dir: "infra/github/octo-sts"},
+		{dir: "", wantErr: true},
+		{dir: ".", wantErr: true},
+		{dir: "/.github/octo-sts", wantErr: true},
+		{dir: ".github/octo-sts/", wantErr: true},
+		{dir: ".github//octo-sts", wantErr: true},
+		{dir: "./.github/octo-sts", wantErr: true},
+		{dir: ".github/../octo-sts", wantErr: true},
+		{dir: `.github\octo-sts`, wantErr: true},
+	} {
+		t.Run(tc.dir, func(t *testing.T) {
+			err := validatePolicyDir(tc.dir)
+			if tc.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
 			}
 		})
 	}
