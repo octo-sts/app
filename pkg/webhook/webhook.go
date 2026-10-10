@@ -252,38 +252,6 @@ func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, f
 // allowlist. Both live here, so one listing covers every validated path.
 const policyDir = ".github/chainguard"
 
-// policySnapshot lists every trust policy visible at ref, mapped to its blob
-// SHA so that two snapshots can be compared by content.
-//
-// A ref that cannot be resolved is an error rather than an empty snapshot: the
-// GitHub contents API answers 404 both for "this ref has no policy directory"
-// and for "this ref no longer exists", and conflating the two would report a
-// repository's entire policy set as deleted.
-func (e *Validator) policySnapshot(ctx context.Context, client *github.Client, owner, repo, ref string) (map[string]string, error) {
-	// Resolve the ref first so the 404 below can only mean a missing directory.
-	if _, _, err := client.Repositories.GetCommit(ctx, owner, repo, ref, &github.ListOptions{PerPage: 1}); err != nil {
-		return nil, fmt.Errorf("resolving %s: %w", ref, err)
-	}
-
-	out := make(map[string]string)
-	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: ref})
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			// The ref resolved, so this is genuinely a repository with no
-			// policy directory: an empty snapshot, not an unknown one.
-			return out, nil
-		}
-		return nil, fmt.Errorf("listing %s at %s: %w", policyDir, ref, err)
-	}
-	for _, f := range dir {
-		if f.GetType() != "file" || !isValidatedPath(repo, f.GetPath(), e.policyRepo()) {
-			continue
-		}
-		out[f.GetPath()] = f.GetSHA()
-	}
-	return out, nil
-}
-
 // policyChangesFromSnapshot derives policy changes by comparing the policies
 // live at before with those live at after. It also returns the snapshot taken
 // at after, which stays usable when only before fails to resolve.
@@ -299,7 +267,12 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 	// whenever the push itself was real. before is the one GitHub is free to
 	// garbage collect after a rewind, so take after first: that way a failure
 	// to resolve before still leaves the caller a live listing to fall back on.
-	afterSnap, err := e.policySnapshot(ctx, client, owner, repo, after)
+	//
+	// policyTreeSnapshot resolves the commit before walking its tree, so an
+	// unreachable ref is an error rather than an empty snapshot that would
+	// report every live policy as deleted. It also rejects truncated trees, so
+	// a large policy directory fails loudly instead of listing partially.
+	afterSnap, err := e.policyTreeSnapshot(ctx, client, owner, repo, after)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -307,7 +280,7 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 	// A push that creates the ref has no prior state to compare against.
 	beforeSnap := map[string]string{}
 	if before != "" && before != zeroHash {
-		if beforeSnap, err = e.policySnapshot(ctx, client, owner, repo, before); err != nil {
+		if beforeSnap, err = e.policyTreeSnapshot(ctx, client, owner, repo, before); err != nil {
 			return nil, afterSnap, err
 		}
 	}
@@ -563,8 +536,10 @@ func (e *Validator) clientForInstallation(installationID int64) (*github.Client,
 // The two fields are deliberately separate from handleSHA's returned error,
 // because "something went wrong" and "what should the HTTP response be" are
 // different questions: a rate limit has to be reported on the events while
-// still answering 200, since a 5xx would have GitHub redeliver the push and
-// amplify load on the API that just rate-limited us.
+// still answering 200: a 5xx would only mark the delivery failed in GitHub's
+// delivery log. GitHub does not retry it, so the event would be dropped unless
+// someone redelivers it, and a manual redelivery would hit the API that just
+// rate-limited us.
 type validationOutcome struct {
 	// verdicts holds one entry per file that was read: nil for a policy that
 	// parsed cleanly, otherwise its own error. A file absent from the map was
@@ -622,9 +597,10 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 		results, err = validatePolicyFiles(ctx, client, owner, readRepo, sha, files, e.policyRepo())
 	}
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
-	// Returning an error would surface as a 5xx, which GitHub treats as a
-	// failed delivery and redelivers — amplifying load on the rate-limited API.
-	if octosts.IsGitHubRateLimited(err) {
+	// Returning an error would surface as a 5xx, which marks the delivery
+	// failed in GitHub's delivery log. GitHub does not retry it automatically,
+	// so the event would be dropped unless redelivered manually.
+	if isProvenWebhookRateLimit(err) {
 		log.Warnf("rate-limited validating policies for %s/%s@%s; skipping CheckRun", owner, readRepo, sha)
 		// Files validated before the limit was hit still have real verdicts;
 		// the rest are simply absent from the map and stay unknown. The limit
@@ -714,12 +690,20 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 			resp, _, _, err := client.Repositories.GetContents(ctx, owner, readRepo, f, &github.RepositoryContentGetOptions{Ref: sha})
 			if err != nil {
 				log.Infof("failed to get content for: %v", err)
-				if octosts.IsGitHubRateLimited(err) {
+				if isProvenWebhookRateLimit(err) {
 					log.Warnf("rate-limited, aborting remaining policy validations")
 					// Deliberately not recorded as a verdict: being rate-limited
 					// says nothing about whether this policy is valid, and an
 					// audit consumer must not read it as a policy failure.
 					return results, fmt.Errorf("%s: %w", f, err)
+				}
+				// A 403 without rate-limit markers is a permission failure, such
+				// as the App lacking contents access. It is a real verdict for
+				// this file, not a transient limit.
+				var errResp *github.ErrorResponse
+				if errors.As(err, &errResp) && errResp.Response != nil && errResp.Response.StatusCode == http.StatusForbidden {
+					fail(f, &policyReadDeniedError{path: f, err: err})
+					continue
 				}
 				fail(f, fmt.Errorf("%s: %w", f, err))
 				continue
@@ -1047,8 +1031,11 @@ func (e *Validator) handlePullRequest(ctx context.Context, pr *github.PullReques
 		return nil, err
 	}
 
-	files, err := e.policyFilesFromPR(ctx, client, owner, repo, pr.GetNumber(), sha, repo)
+	files, err := e.prPolicyFiles(ctx, client, owner, repo, pr.GetNumber(), sha, owner, repo, repo)
 	if err != nil {
+		if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
+			return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
+		}
 		if errors.Is(err, errPRHeadMismatch) || isProvenWebhookRateLimit(err) {
 			log.Warnf("skipping PR file validation: %v", err)
 			return nil, nil
@@ -1117,21 +1104,27 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			log.Infof("skipping new non-default branch with no PRs")
 			return nil, nil
 		}
-		_, dirContents, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
+		// The Contents API caps a directory listing at 1,000 entries without
+		// saying so; the tree walk refuses truncated responses instead. A
+		// missing policy directory yields an empty snapshot, not an error.
+		snapshot, err := e.policyTreeSnapshot(ctx, client, owner, repo, sha)
 		if err != nil {
 			if isProvenWebhookRateLimit(err) {
 				log.Warnf("rate-limited discovering policies for check suite; skipping CheckRun: %v", err)
 				return nil, nil
 			}
-			if resp == nil || resp.StatusCode != http.StatusNotFound {
-				return nil, err
-			}
-			log.Infof("no policy directory at %s, skipping validation", sha)
+			return nil, err
 		}
-		for _, file := range dirContents {
-			if file.GetType() == "file" && isValidatedPath(repo, file.GetPath(), e.policyRepo()) {
-				files = append(files, policyFile{path: file.GetPath(), repo: repo})
-			}
+		if len(snapshot) == 0 {
+			log.Infof("no policies at %s, skipping validation", sha)
+		}
+		paths := make([]string, 0, len(snapshot))
+		for path := range snapshot {
+			paths = append(paths, path)
+		}
+		sort.Strings(paths)
+		for _, path := range paths {
+			files = append(files, policyFile{path: path, repo: repo})
 		}
 	} else {
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
@@ -1170,8 +1163,11 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		if strings.EqualFold(prOwner, owner) && strings.EqualFold(prRepo, e.policyRepo()) {
 			classification = prRepo
 		}
-		prFiles, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, classification)
+		prFiles, err := e.prPolicyFiles(ctx, client, prOwner, prRepo, pr.GetNumber(), sha, owner, repo, classification)
 		if err != nil {
+			if tooLarge, ok := errors.AsType[*prTooLargeError](err); ok {
+				return e.reportPRTooLarge(ctx, client, owner, repo, sha, tooLarge)
+			}
 			if errors.Is(err, errPRHeadMismatch) {
 				log.Warnf("PR %s/%s#%d head differs from check suite commit; skipping CheckRun: %v", prOwner, prRepo, pr.GetNumber(), err)
 				return nil, nil

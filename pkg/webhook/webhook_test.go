@@ -13,6 +13,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -37,6 +38,7 @@ import (
 	"github.com/cloudevents/sdk-go/v2/protocol"
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-github/v88/github"
+	"github.com/hashicorp/go-multierror"
 	"github.com/octo-sts/app/pkg/octosts"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -1008,13 +1010,10 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 		defer f.Close()
 		io.Copy(w, f)
 	})
-	// The zeroHash path does GetContents for the directory listing even
-	// when PRs are present, so we need to serve that response.
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// Return an empty directory — the PR files handler provides the STS file.
-		json.NewEncoder(w).Encode([]*github.RepositoryContent{})
-	})
+	// The zeroHash path walks the policy tree even when PRs are present, so
+	// serve an empty policy directory; the PR files handler provides the STS
+	// file.
+	(&policyTreeFixture{owner: "foo", repo: "bar", trees: map[string][]string{"deadbeef": {}}}).register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -1099,7 +1098,6 @@ func TestCheckSuiteNewBranchWithPRsProcessed(t *testing.T) {
 func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
-	dirScanHit := false
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
@@ -1109,18 +1107,9 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 		}
 		got = append(got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		dirScanHit = true
-		// Return a directory listing with one STS file.
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{
-				Type: new("file"),
-				Name: new("test.sts.yaml"),
-				Path: new(".github/chainguard/test.sts.yaml"),
-			},
-		})
-	})
+	// A policy directory with one STS file.
+	trees := &policyTreeFixture{owner: "foo", repo: "bar", trees: map[string][]string{"deadbeef": {".github/chainguard/test.sts.yaml"}}}
+	trees.register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -1189,7 +1178,7 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 		out, _ := httputil.DumpResponse(resp, true)
 		t.Fatalf("expected 200, got\n%s", string(out))
 	}
-	if !dirScanHit {
+	if trees.calls.Load() == 0 {
 		t.Fatal("Directory scan API was not called but should have been for default branch initial commit")
 	}
 	if len(got) != 1 {
@@ -1202,7 +1191,7 @@ func TestCheckSuiteDefaultBranchProcessed(t *testing.T) {
 
 // TestCheckSuiteNoPolicyDirSkipped exercises the zeroHash / initial-commit
 // branch of handleCheckSuite when the repository has no .github/chainguard
-// directory: the directory scan 404s, which must be treated as "no policies"
+// directory: the tree walk finds no directory, which must be treated as "no policies"
 // (logged, no check run) rather than failing the delivery with a 500.
 func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
@@ -1216,9 +1205,8 @@ func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
 		}
 		got = append(got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, `{"message": "Not Found"}`, http.StatusNotFound)
-	})
+	// deadbeef resolves but its root tree has no .github directory.
+	(&policyTreeFixture{owner: "foo", repo: "bar"}).register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join("testdata", r.URL.Path)
 		f, err := os.Open(path)
@@ -1293,7 +1281,7 @@ func TestCheckSuiteNoPolicyDirSkipped(t *testing.T) {
 }
 
 // TestCheckSuiteNonNotFoundDirScanError verifies that a non-404 error from the
-// policy-directory scan still fails the delivery (so it is redelivered) rather
+// policy-directory scan still fails the delivery (a 5xx, not swallowed as a 200) rather
 // than being swallowed like a missing directory.
 func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
@@ -1307,7 +1295,7 @@ func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
 		}
 		got = append(got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/git/", func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"message": "Internal Server Error"}`, http.StatusInternalServerError)
 	})
 	// Catch-all serves the installation token mint (and anything else) from
@@ -1391,7 +1379,6 @@ func TestCheckSuiteNonNotFoundDirScanError(t *testing.T) {
 func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
-	dirScanHit := false
 	var fetchedMu sync.Mutex
 	var fetched []string
 
@@ -1404,25 +1391,12 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 		}
 		got = append(got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		dirScanHit = true
-		// A real policy directory can hold non-policy files too.
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{
-				Type: new("file"),
-				Name: new("test.sts.yaml"),
-				Path: new(".github/chainguard/test.sts.yaml"),
-			},
-			{
-				Type: new("file"),
-				Name: new("README.md"),
-				Path: new(".github/chainguard/README.md"),
-			},
-		}); err != nil {
-			t.Error(err)
-		}
-	})
+	// A real policy directory can hold non-policy files too.
+	trees := &policyTreeFixture{owner: "foo", repo: "bar", trees: map[string][]string{"deadbeef": {
+		".github/chainguard/test.sts.yaml",
+		".github/chainguard/README.md",
+	}}}
+	trees.register(mux)
 	// Record every individual content fetch under the policy directory.
 	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard/", func(w http.ResponseWriter, r *http.Request) {
 		fetchedMu.Lock()
@@ -1505,7 +1479,7 @@ func TestCheckSuiteDefaultBranchSkipsNonPolicyFiles(t *testing.T) {
 		out, _ := httputil.DumpResponse(resp, true)
 		t.Fatalf("expected 200, got\n%s", string(out))
 	}
-	if !dirScanHit {
+	if trees.calls.Load() == 0 {
 		t.Fatal("directory scan API was not called but should have been for default branch initial commit")
 	}
 
@@ -1552,6 +1526,11 @@ func TestCheckSuiteExistingBranchUsesCompare(t *testing.T) {
 	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
 		dirScanHit = true
 		t.Error("Directory scan should not be called for existing branch")
+		http.Error(w, "should not be called", http.StatusInternalServerError)
+	})
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/git/", func(w http.ResponseWriter, r *http.Request) {
+		dirScanHit = true
+		t.Error("Policy tree walk should not be called for existing branch")
 		http.Error(w, "should not be called", http.StatusInternalServerError)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -1760,14 +1739,7 @@ func TestWebhookRerequestedValidates(t *testing.T) {
 				}
 				got = append(got, opt)
 			})
-			mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, _ *http.Request) {
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode([]*github.RepositoryContent{{
-					Type: new("file"),
-					Name: new("test.sts.yaml"),
-					Path: new(".github/chainguard/test.sts.yaml"),
-				}})
-			})
+			(&policyTreeFixture{owner: "foo", repo: "bar", trees: map[string][]string{"deadbeef": {".github/chainguard/test.sts.yaml"}}}).register(mux)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				f, err := os.Open(filepath.Join("testdata", r.URL.Path))
 				if err != nil {
@@ -2092,9 +2064,152 @@ func TestWebhookPushAbortOnRateLimit(t *testing.T) {
 	}
 }
 
-func TestIsGitHubRateLimited(t *testing.T) {
-	resp := func(code int) *github.Response {
-		return &github.Response{Response: &http.Response{StatusCode: code}}
+// TestWebhookPushPolicyRead403 pins how a 403 on a policy content read is
+// classified. Only a proven rate limit aborts validation without a check run. A
+// bare 403 is a permission failure: every file is still read, and the check run
+// fails with a per-file message naming the cause.
+func TestWebhookPushPolicyRead403(t *testing.T) {
+	files := []string{
+		".github/chainguard/a.sts.yaml",
+		".github/chainguard/b.sts.yaml",
+		".github/chainguard/c.sts.yaml",
+	}
+	for _, tc := range []struct {
+		name         string
+		status       int
+		headers      map[string]string
+		wantCheckRun bool
+	}{
+		{name: "bare 403 is a permission failure", status: http.StatusForbidden, wantCheckRun: true},
+		{name: "403 with exhausted remaining is a rate limit", status: http.StatusForbidden, headers: map[string]string{"X-RateLimit-Remaining": "0", "X-RateLimit-Limit": "5000"}},
+		{name: "403 with Retry-After is a rate limit", status: http.StatusForbidden, headers: map[string]string{"Retry-After": "60"}},
+		{name: "429 is a rate limit", status: http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var contentHits atomic.Int32
+			var mu sync.Mutex
+			var checkRuns []github.CreateCheckRunOptions
+
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+				var opts github.CreateCheckRunOptions
+				if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+					t.Errorf("decoding check run: %v", err)
+				}
+				mu.Lock()
+				checkRuns = append(checkRuns, opts)
+				mu.Unlock()
+				json.NewEncoder(w).Encode(github.CheckRun{ID: new(int64(1))}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("/api/v3/repos/foo/bar/contents/", func(w http.ResponseWriter, _ *http.Request) {
+				contentHits.Add(1)
+				for k, v := range tc.headers {
+					w.Header().Set(k, v)
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				json.NewEncoder(w).Encode(map[string]string{"message": "Resource not accessible by integration"}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				defer f.Close()
+				io.Copy(w, f) //nolint:errcheck // test server
+			})
+			gh := httptest.NewServer(mux)
+			defer gh.Close()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+
+			secret := []byte("hunter2")
+			v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+			srv := httptest.NewServer(v)
+			defer srv.Close()
+
+			body, err := json.Marshal(github.PushEvent{
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo: &github.PushEventRepository{
+					Owner: &github.User{Login: new("foo")},
+					Name:  new("bar"),
+				},
+				Before:  new("1234"),
+				After:   new("5678"),
+				Commits: []*github.HeadCommit{{Added: files}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				out, _ := httputil.DumpResponse(resp, true)
+				t.Fatalf("expected 200, got\n%s", string(out))
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+			if !tc.wantCheckRun {
+				if len(checkRuns) != 0 {
+					t.Errorf("created %d check runs for a rate limit, want 0", len(checkRuns))
+				}
+				if got := contentHits.Load(); got > 1 {
+					t.Errorf("got %d content fetches, want validation to abort after the first", got)
+				}
+				return
+			}
+
+			if got := contentHits.Load(); got != int32(len(files)) {
+				t.Errorf("got %d content fetches, want %d: a permission 403 must not abort validation", got, len(files))
+			}
+			if len(checkRuns) != 1 {
+				t.Fatalf("created %d check runs, want 1", len(checkRuns))
+			}
+			cr := checkRuns[0]
+			if got := cr.GetConclusion(); got != "failure" {
+				t.Errorf("conclusion = %q, want failure", got)
+			}
+			if got := cr.GetOutput().GetTitle(); got != "Invalid trust policy." {
+				t.Errorf("title = %q, want %q", got, "Invalid trust policy.")
+			}
+			summary := cr.GetOutput().GetSummary()
+			for _, f := range files {
+				want := f + ": cannot read policy: permission denied (403); check the GitHub App's contents permission"
+				if !strings.Contains(summary, want) {
+					t.Errorf("summary missing %q:\n%s", want, summary)
+				}
+			}
+			if strings.Contains(summary, gh.URL) || strings.Contains(summary, "/api/v3/") {
+				t.Errorf("summary leaks the request URL:\n%s", summary)
+			}
+		})
+	}
+}
+
+func TestIsProvenWebhookRateLimit(t *testing.T) {
+	errResp := func(code int, headers map[string]string) error {
+		h := http.Header{}
+		for k, v := range headers {
+			h.Set(k, v)
+		}
+		return &github.ErrorResponse{Response: &http.Response{StatusCode: code, Header: h}}
 	}
 	for _, tc := range []struct {
 		name string
@@ -2109,16 +2224,28 @@ func TestIsGitHubRateLimited(t *testing.T) {
 		err:  &github.AbuseRateLimitError{Response: &http.Response{StatusCode: http.StatusForbidden}},
 		want: true,
 	}, {
-		name: "bare ErrorResponse 403",
-		err:  &github.ErrorResponse{Response: resp(http.StatusForbidden).Response},
+		name: "bare ErrorResponse 403 is a permission failure",
+		err:  errResp(http.StatusForbidden, nil),
+		want: false,
+	}, {
+		name: "403 with exhausted remaining",
+		err:  errResp(http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}),
+		want: true,
+	}, {
+		name: "403 with Retry-After",
+		err:  errResp(http.StatusForbidden, map[string]string{"Retry-After": "60"}),
 		want: true,
 	}, {
 		name: "bare ErrorResponse 429",
-		err:  &github.ErrorResponse{Response: resp(http.StatusTooManyRequests).Response},
+		err:  errResp(http.StatusTooManyRequests, nil),
+		want: true,
+	}, {
+		name: "rate limit inside a multierror",
+		err:  multierror.Append(errors.New("other"), fmt.Errorf("a.sts.yaml: %w", errResp(http.StatusTooManyRequests, nil))),
 		want: true,
 	}, {
 		name: "ErrorResponse 404 is not a rate limit",
-		err:  &github.ErrorResponse{Response: resp(http.StatusNotFound).Response},
+		err:  errResp(http.StatusNotFound, nil),
 		want: false,
 	}, {
 		name: "nil error",
@@ -2126,8 +2253,8 @@ func TestIsGitHubRateLimited(t *testing.T) {
 		want: false,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := octosts.IsGitHubRateLimited(tc.err); got != tc.want {
-				t.Errorf("IsGitHubRateLimited() = %v, want %v", got, tc.want)
+			if got := isProvenWebhookRateLimit(tc.err); got != tc.want {
+				t.Errorf("isProvenWebhookRateLimit() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -2361,15 +2488,14 @@ func TestCheckSuiteDirScanSkipsNonPolicyFiles(t *testing.T) {
 		}
 		got = append(got, opt)
 	})
-	// The directory listing carries entries that are NOT trust policies.
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/.github/chainguard", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: new("file"), Name: new("test.sts.yaml"), Path: new(".github/chainguard/test.sts.yaml")},
-			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: new(".github/chainguard/trusted-token-issuers.yaml")},
-			{Type: new("file"), Name: new("README.md"), Path: new(".github/chainguard/README.md")},
-		})
-	})
+	// The policy directory carries entries that are NOT trust policies,
+	// including a nested directory whose policies are out of scope.
+	(&policyTreeFixture{owner: "foo", repo: "bar", trees: map[string][]string{"deadbeef": {
+		".github/chainguard/test.sts.yaml",
+		".github/chainguard/trusted-token-issuers.yaml",
+		".github/chainguard/README.md",
+		".github/chainguard/nested/other.sts.yaml",
+	}}}).register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if after, ok := strings.CutPrefix(r.URL.Path, "/api/v3/repos/foo/bar/contents/"); ok {
 			fetched = append(fetched, after)
@@ -2513,14 +2639,7 @@ func runAllowlistCheckSuite(t *testing.T, allowlist string) ([]*github.CreateChe
 		}
 		got = append(got, opt)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/.github/chainguard", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode([]*github.RepositoryContent{
-			{Type: new("file"), Name: new("trusted-token-issuers.yaml"), Path: github.Ptr(allowlistPath)},
-		}); err != nil {
-			t.Error(err)
-		}
-	})
+	(&policyTreeFixture{owner: "foo", repo: ".github", trees: map[string][]string{"deadbeef": {allowlistPath}}}).register(mux)
 	mux.HandleFunc("GET /api/v3/repos/foo/.github/contents/"+allowlistPath, func(w http.ResponseWriter, _ *http.Request) {
 		fetched = append(fetched, allowlistPath)
 		w.Header().Set("Content-Type", "application/json")
@@ -3254,41 +3373,100 @@ func TestPolicyName(t *testing.T) {
 	}
 }
 
-// policyTreeServer serves the two calls policySnapshot makes — a commit lookup
-// to prove the ref resolves, then a listing of the policy directory — from an
-// in-memory view of each ref. A ref absent from trees resolves but has no
-// policy directory; a ref listed in unresolvable 404s the commit lookup, which
-// is how a rewound-away SHA behaves once GitHub has collected it.
-func policyTreeServer(t *testing.T, trees map[string][]string, unresolvable ...string) *github.Client {
-	t.Helper()
+// policyTreeFixture serves the Git Data API calls policyTreeSnapshot makes for
+// one repository: a commit lookup, then the root, .github, and policy
+// directory trees.
+type policyTreeFixture struct {
+	owner, repo string
+	// trees maps a ref to the paths under policyDir, each "path" or
+	// "path:sha" so a test can hold a path steady while its content moves. A
+	// ref absent from trees resolves but has no .github directory.
+	trees map[string][]string
+	// unresolvable refs 404 the commit lookup, which is how a rewound-away
+	// SHA behaves once GitHub has collected it.
+	unresolvable []string
+	// truncated refs answer the policy directory tree with truncated=true.
+	truncated []string
+	// rateLimited makes every tree read answer as an exhausted quota.
+	rateLimited bool
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
-		if slices.Contains(unresolvable, r.PathValue("ref")) {
+	calls atomic.Int64
+}
+
+func (f *policyTreeFixture) register(mux *http.ServeMux) {
+	mux.Handle("GET /api/v3/repos/"+f.owner+"/"+f.repo+"/git/", f)
+}
+
+func (f *policyTreeFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.calls.Add(1)
+	rest, _ := strings.CutPrefix(r.URL.Path, "/api/v3/repos/"+f.owner+"/"+f.repo+"/git/")
+	w.Header().Set("Content-Type", "application/json")
+	if ref, ok := strings.CutPrefix(rest, "commits/"); ok {
+		if slices.Contains(f.unresolvable, ref) {
 			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
 			return
 		}
-		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
-	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		paths, ok := trees[r.URL.Query().Get("ref")]
-		if !ok {
-			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
-			return
+		json.NewEncoder(w).Encode(&github.Commit{SHA: new(ref), Tree: &github.Tree{SHA: new("root-" + ref)}}) //nolint:errcheck // test server
+		return
+	}
+	sha, ok := strings.CutPrefix(rest, "trees/")
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	if f.rateLimited {
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.WriteHeader(http.StatusForbidden)
+		fmt.Fprint(w, `{"message":"API rate limit exceeded"}`)
+		return
+	}
+	level, ref, _ := strings.Cut(sha, "-")
+	paths, hasPolicyDir := f.trees[ref]
+	tree := &github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{}}
+	dir := func(name, sha string) *github.TreeEntry {
+		return &github.TreeEntry{Path: new(name), Type: new("tree"), Mode: new("040000"), SHA: new(sha)}
+	}
+	switch level {
+	case "root":
+		if hasPolicyDir {
+			tree.Entries = append(tree.Entries, dir(".github", "github-"+ref))
 		}
-		entries := make([]map[string]string, 0, len(paths))
+	case "github":
+		tree.Entries = append(tree.Entries, dir("chainguard", "policy-"+ref))
+	case "policy":
+		tree.Truncated = new(slices.Contains(f.truncated, ref))
+		nested := map[string]bool{}
 		for _, p := range paths {
-			// "path:sha" so a test can hold a path steady while its content moves.
-			name, sha, _ := strings.Cut(p, ":")
-			entries = append(entries, map[string]string{
-				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
-			})
+			name, blob, hasSHA := strings.Cut(p, ":")
+			if !hasSHA {
+				blob = "blob-" + name
+			}
+			rel := strings.TrimPrefix(name, policyDir+"/")
+			// A non-recursive tree lists a subdirectory as one tree entry.
+			if sub, _, isNested := strings.Cut(rel, "/"); isNested {
+				if !nested[sub] {
+					nested[sub] = true
+					tree.Entries = append(tree.Entries, dir(sub, "subtree-"+sub))
+				}
+				continue
+			}
+			tree.Entries = append(tree.Entries, &github.TreeEntry{Path: new(rel), Type: new("blob"), Mode: new("100644"), SHA: new(blob)})
 		}
-		if err := json.NewEncoder(w).Encode(entries); err != nil {
-			t.Error(err)
-		}
-	})
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	// github.Tree omits an empty entry list, which completePolicyTree rightly
+	// rejects as incomplete; GitHub itself sends "tree": [].
+	json.NewEncoder(w).Encode(map[string]any{"sha": sha, "tree": tree.Entries, "truncated": tree.GetTruncated()}) //nolint:errcheck // test server
+}
 
+// policyTreeServer returns a client for a server holding only f.
+func policyTreeServer(t *testing.T, f *policyTreeFixture) *github.Client {
+	t.Helper()
+
+	mux := http.NewServeMux()
+	f.register(mux)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	c, err := github.NewClient(github.WithEnterpriseURLs(srv.URL, srv.URL))
@@ -3296,6 +3474,16 @@ func policyTreeServer(t *testing.T, trees map[string][]string, unresolvable ...s
 		t.Fatal(err)
 	}
 	return c
+}
+
+// manyPolicies returns n distinct policy paths, enough to exceed the Contents
+// API's 1,000-entry directory listing cap when n > 1000.
+func manyPolicies(n int) []string {
+	paths := make([]string, n)
+	for i := range paths {
+		paths[i] = fmt.Sprintf("%s/p%04d.sts.yaml", policyDir, i)
+	}
+	return paths
 }
 
 func TestPolicyChangesFromSnapshot(t *testing.T) {
@@ -3311,6 +3499,7 @@ func TestPolicyChangesFromSnapshot(t *testing.T) {
 		before, after []string
 		beforeRef     string
 		unresolvable  []string
+		truncated     []string
 		want          []PolicyChange
 		wantErr       bool
 	}{{
@@ -3351,13 +3540,33 @@ func TestPolicyChangesFromSnapshot(t *testing.T) {
 		after:        []string{kept + ":sha1"},
 		unresolvable: []string{"before"},
 		wantErr:      true,
+	}, {
+		// A resolvable ref with no policy directory holds no policies; that is
+		// an empty snapshot, not an error.
+		name:      "a before with no policy directory has no prior policies",
+		beforeRef: "before",
+		after:     []string{added + ":sha1"},
+		want:      []PolicyChange{{Path: added, Policy: "added", Action: PolicyCreated}},
+	}, {
+		// GitHub reports a truncated tree rather than silently capping it the
+		// way the Contents API caps a listing. A partial snapshot would
+		// misreport the missing policies as deleted, so it must be an error.
+		name:      "a truncated policy tree is an error, not a partial snapshot",
+		beforeRef: "before",
+		before:    []string{kept + ":sha1"},
+		after:     []string{kept + ":sha1"},
+		truncated: []string{"before"},
+		wantErr:   true,
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			trees := map[string][]string{"after": tc.after}
 			if tc.before != nil {
 				trees["before"] = tc.before
 			}
-			client := policyTreeServer(t, trees, tc.unresolvable...)
+			client := policyTreeServer(t, &policyTreeFixture{
+				owner: "foo", repo: "bar", trees: trees,
+				unresolvable: tc.unresolvable, truncated: tc.truncated,
+			})
 
 			v := &Validator{}
 			got, _, err := v.policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", tc.beforeRef, "after")
@@ -3374,6 +3583,30 @@ func TestPolicyChangesFromSnapshot(t *testing.T) {
 				t.Errorf("unexpected changes (-want +got):\n%s", diff)
 			}
 		})
+	}
+}
+
+// TestPolicyChangesFromSnapshotPastListingCap pins #1722: the Contents API
+// lists at most 1,000 entries per directory, so a forced push over a larger
+// policy directory used to audit only the first 1,000 policies.
+func TestPolicyChangesFromSnapshotPastListingCap(t *testing.T) {
+	const n = 1500
+	client := policyTreeServer(t, &policyTreeFixture{
+		owner: "foo", repo: "bar",
+		trees: map[string][]string{"before": {}, "after": manyPolicies(n)},
+	})
+
+	got, live, err := (&Validator{}).policyChangesFromSnapshot(slogtest.Context(t), client, "foo", "bar", "before", "after")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != n || len(live) != n {
+		t.Fatalf("got %d changes and %d live policies, want %d of each", len(got), len(live), n)
+	}
+	for _, c := range got {
+		if c.Action != PolicyCreated {
+			t.Fatalf("got %+v, want every policy created", c)
+		}
 	}
 }
 
@@ -3469,38 +3702,25 @@ func TestValidatePoliciesCompilesTrustPolicies(t *testing.T) {
 
 // forcedPushServer stands up the GitHub endpoints a forced push to the default
 // branch exercises: the token mint and policy file reads come from testdata,
-// while the policy directory listing is driven per-ref by trees.
+// while the policy directory tree is driven per-ref by trees.
 func forcedPushServer(t *testing.T, trees map[string][]string, unresolvable ...string) *httptest.Server {
+	t.Helper()
+	return forcedPushServerFor(t, &policyTreeFixture{owner: "foo", repo: "bar", trees: trees, unresolvable: unresolvable}, nil)
+}
+
+// forcedPushServerFor is forcedPushServer over an explicit tree fixture,
+// counting check runs into checkRuns when it is non-nil.
+func forcedPushServerFor(t *testing.T, f *policyTreeFixture, checkRuns *atomic.Int64) *httptest.Server {
 	t.Helper()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+		if checkRuns != nil {
+			checkRuns.Add(1)
+		}
 		w.WriteHeader(http.StatusOK)
 	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
-		if slices.Contains(unresolvable, r.PathValue("ref")) {
-			http.Error(w, `{"message":"No commit found for SHA"}`, http.StatusNotFound)
-			return
-		}
-		fmt.Fprint(w, `{"sha":"`+r.PathValue("ref")+`"}`)
-	})
-	mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/"+policyDir, func(w http.ResponseWriter, r *http.Request) {
-		paths, ok := trees[r.URL.Query().Get("ref")]
-		if !ok {
-			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
-			return
-		}
-		entries := make([]map[string]string, 0, len(paths))
-		for _, p := range paths {
-			name, sha, _ := strings.Cut(p, ":")
-			entries = append(entries, map[string]string{
-				"type": "file", "path": name, "name": filepath.Base(name), "sha": sha,
-			})
-		}
-		if err := json.NewEncoder(w).Encode(entries); err != nil {
-			t.Error(err)
-		}
-	})
+	f.register(mux)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
 		if err != nil {
@@ -3935,5 +4155,132 @@ func TestForcedPushDegradedBothRefsUnresolvable(t *testing.T) {
 	}
 	if pe.DetectionError == "" {
 		t.Error("expected the marker to explain why detection degraded")
+	}
+}
+
+// TestForcedPushTruncatedTreeDegrades pins how a truncated policy tree surfaces
+// on a forced push: detection degrades with a published reason, and no policy
+// is reported present or validated from a partial listing.
+func TestForcedPushTruncatedTreeDegrades(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		f    *policyTreeFixture
+	}{{
+		name: "truncated tree",
+		f: &policyTreeFixture{
+			owner: "foo", repo: "bar",
+			trees:     map[string][]string{"before": {}, "after": {".github/chainguard/test.sts.yaml:sha1"}},
+			truncated: []string{"after"},
+		},
+	}, {
+		name: "rate-limited tree",
+		f: &policyTreeFixture{
+			owner: "foo", repo: "bar",
+			trees:       map[string][]string{"before": {}, "after": {".github/chainguard/test.sts.yaml:sha1"}},
+			rateLimited: true,
+		},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			var checkRuns atomic.Int64
+			gh := forcedPushServerFor(t, tc.f, &checkRuns)
+			ce := &fakeCEClient{}
+			v, secret, emitter := forcedPushValidator(t, gh, ce)
+			sendForcedPush(t, v, secret)
+
+			events := drainEvents(t, emitter, ce)
+			if len(events) != 1 {
+				t.Fatalf("expected only the detection marker, got %d events", len(events))
+			}
+			var pe PolicyEvent
+			if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
+				t.Fatal(err)
+			}
+			if pe.Change != nil || pe.Detection != DetectionDegraded || pe.DetectionError == "" {
+				t.Errorf("got change=%+v detection=%q error=%q, want a degraded marker with a reason", pe.Change, pe.Detection, pe.DetectionError)
+			}
+			if got := checkRuns.Load(); got != 0 {
+				t.Errorf("posted %d check runs from an incomplete listing, want 0", got)
+			}
+		})
+	}
+}
+
+// TestCheckSuiteDirScanUsesPolicyTree pins #1722 for the zeroHash directory
+// scan: it must see every policy past the Contents API's 1,000-entry listing
+// cap, fail rather than validate a truncated listing, treat a missing policy
+// directory as no policies, and skip without a check run when rate-limited.
+func TestCheckSuiteDirScanUsesPolicyTree(t *testing.T) {
+	const policy = "issuer: https://token.actions.githubusercontent.com\nsubject: s\n"
+	for _, tc := range []struct {
+		name        string
+		f           *policyTreeFixture
+		wantErr     bool
+		wantChecks  int
+		wantFetched int
+	}{{
+		name:        "more than 1000 policies are all validated",
+		f:           &policyTreeFixture{trees: map[string][]string{"deadbeef": manyPolicies(1500)}},
+		wantChecks:  1,
+		wantFetched: 1500,
+	}, {
+		name:    "truncated tree fails without a check run",
+		f:       &policyTreeFixture{trees: map[string][]string{"deadbeef": manyPolicies(1500)}, truncated: []string{"deadbeef"}},
+		wantErr: true,
+	}, {
+		name: "missing policy directory is no policies",
+		f:    &policyTreeFixture{},
+	}, {
+		name: "rate-limited tree skips without a check run",
+		f:    &policyTreeFixture{trees: map[string][]string{"deadbeef": manyPolicies(3)}, rateLimited: true},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.f.owner, tc.f.repo = "foo", "bar"
+			var (
+				mu         sync.Mutex
+				fetched    = map[string]bool{}
+				checks     int
+				conclusion string
+			)
+			mux := http.NewServeMux()
+			tc.f.register(mux)
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/contents/{path...}", func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				fetched[r.PathValue("path")] = true
+				mu.Unlock()
+				json.NewEncoder(w).Encode(&github.RepositoryContent{ //nolint:errcheck // test server
+					Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(policy))),
+				})
+			})
+			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+				var opt github.CreateCheckRunOptions
+				if err := json.NewDecoder(r.Body).Decode(&opt); err != nil {
+					t.Error(err)
+				}
+				mu.Lock()
+				checks++
+				conclusion = opt.GetConclusion()
+				mu.Unlock()
+				json.NewEncoder(w).Encode(&github.CheckRun{}) //nolint:errcheck // test server
+			})
+			v := &Validator{Transport: forkCheckSuiteClient(t, mux)}
+			_, err := v.handleCheckSuite(slogtest.Context(t), &github.CheckSuiteEvent{
+				Action:       new("requested"),
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), DefaultBranch: new("main")},
+				CheckSuite:   &github.CheckSuite{HeadSHA: new("deadbeef"), BeforeSHA: new(zeroHash), HeadBranch: new("main")},
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handleCheckSuite err=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if checks != tc.wantChecks {
+				t.Fatalf("posted %d check runs, want %d", checks, tc.wantChecks)
+			}
+			if tc.wantChecks > 0 && conclusion != "success" {
+				t.Errorf("conclusion = %q, want success", conclusion)
+			}
+			if len(fetched) != tc.wantFetched {
+				t.Errorf("fetched %d distinct policies, want %d", len(fetched), tc.wantFetched)
+			}
+		})
 	}
 }
