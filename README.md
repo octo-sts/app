@@ -317,6 +317,32 @@ back to round-robin (non-sticky) routing which may break check-run updates.
 | `OCTOSTS_STICKY_STORE_FIRESTORE_COLLECTION` | `sticky-routes` | Firestore collection name |
 | `OCTOSTS_STICKY_STORE_FIRESTORE_TTL` | `1h` | TTL for inactive mappings |
 
+**DynamoDB backend** (recommended for AWS deployments):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_STICKY_STORE` | (empty) | Set to `dynamodb` to enable |
+| `OCTOSTS_STICKY_STORE_DYNAMODB_TABLE` | (required) | DynamoDB table name |
+| `OCTOSTS_STICKY_STORE_DYNAMODB_TTL` | `1h` | TTL for inactive mappings |
+
+AWS credentials and region are resolved from the standard SDK chain
+(`AWS_REGION`, `AWS_PROFILE`, instance/task roles, etc.). The table must be
+provisioned ahead of time with a string partition key named `id`, and the
+service needs `dynamodb:GetItem`, `dynamodb:PutItem`, and `dynamodb:UpdateItem`
+on it.
+
+> **TTL must be enabled on the `expire_at` attribute.** OctoSTS writes a Unix
+> epoch timestamp to `expire_at` and relies on DynamoDB's native TTL to delete
+> stale items. It does not verify the table's TTL configuration. If TTL is not
+> enabled, nothing fails, but inactive mappings are never evicted and pin
+> `(scope, identity)` pairs to an installation forever. Enable it with:
+>
+> ```shell
+> aws dynamodb update-time-to-live \
+>   --table-name "$OCTOSTS_STICKY_STORE_DYNAMODB_TABLE" \
+>   --time-to-live-specification "Enabled=true, AttributeName=expire_at"
+> ```
+
 Active mappings have their TTL refreshed on every use, so they never expire.
 Only mappings unused for the TTL duration are automatically cleaned up.
 
