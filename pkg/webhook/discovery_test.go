@@ -60,11 +60,11 @@ func TestPolicyFilesFromPRPaginatesAndChecksSnapshot(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
+	files, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || files[0] != ".github/chainguard/policy.sts.yaml" {
+	if len(files) != 1 || files[0].Path != ".github/chainguard/policy.sts.yaml" {
 		t.Fatalf("files = %v", files)
 	}
 	if gets != 2 {
@@ -91,7 +91,7 @@ func TestPolicyFilesFromPRRejectsChangingSnapshot(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
+	_, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 	if err == nil || !strings.Contains(err.Error(), "changed during file listing") {
 		t.Fatalf("error = %v", err)
 	}
@@ -110,7 +110,7 @@ func TestPolicyFilesFromPRRejectsPersistentHeadMismatch(t *testing.T) {
 			Head: &github.PullRequestBranch{SHA: new("previous-head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1),
 		})
 	}))
-	_, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
+	_, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
 	if !errors.Is(err, errPRHeadMismatch) || gets != 2 {
 		t.Fatalf("error = %v, snapshot reads = %d, want head-mismatch sentinel after one retry", err, gets)
 	}
@@ -137,7 +137,7 @@ func TestPolicyFilesFromPRRetriesLaggingHead(t *testing.T) {
 			http.NotFound(w, r)
 		}
 	}))
-	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
+	files, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "event-head", "r")
 	if err != nil || len(files) != 1 || gets != 3 || lists != 1 {
 		t.Fatalf("files=%v err=%v snapshot reads=%d lists=%d, want one policy after one retry", files, err, gets, lists)
 	}
@@ -169,7 +169,7 @@ func TestPolicyFilesFromPRRetriesStaleFileCount(t *testing.T) {
 					http.NotFound(w, r)
 				}
 			}))
-			files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
+			files, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 			if err != nil || len(files) != 1 || gets != 4 || lists != 2 {
 				t.Fatalf("files=%v err=%v snapshot reads=%d lists=%d, want one policy after one retry", files, err, gets, lists)
 			}
@@ -570,7 +570,7 @@ func TestPolicyFilesFromPRRefusesTooManyFiles(t *testing.T) {
 			Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1),
 		})
 	}))
-	files, err := (&Validator{}).policyFilesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
+	files, err := (&Validator{}).policyChangesFromPR(context.Background(), client, "o", "r", 7, "head", "r")
 	if !errors.Is(err, errTooManyPRFiles) || files != nil {
 		t.Fatalf("files=%v err=%v, want errTooManyPRFiles", files, err)
 	}
@@ -817,5 +817,77 @@ func largeForkCheckSuiteEvent() *github.CheckSuiteEvent {
 			HeadSHA: new("head"), BeforeSHA: new("before"), HeadBranch: new("feature"),
 			PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/foo/.github")}}}},
 		},
+	}
+}
+
+// TestLargePullRequestWithoutPoliciesFollowsNoChangeScoping covers a PR past
+// GitHub's list-files cap whose policy directory scan finds no policies. That
+// is the same as a diff with no policy changes: an ordinary repository gets no
+// check run, and the org policy repository gets the no-change success.
+func TestLargePullRequestWithoutPoliciesFollowsNoChangeScoping(t *testing.T) {
+	for _, tc := range []struct {
+		repo       string
+		wantChecks int
+	}{
+		{repo: "bar", wantChecks: 0},
+		{repo: ".github", wantChecks: 1},
+	} {
+		t.Run(tc.repo, func(t *testing.T) {
+			base := "/api/v3/repos/foo/" + tc.repo
+			var checks []github.CreateCheckRunOptions
+			mux := http.NewServeMux()
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				if serveLargePRPolicyTree(w, r, base, http.StatusOK, false, "README.md") {
+					return
+				}
+				switch {
+				case r.URL.Path == "/app/installations/1111/access_tokens":
+					json.NewEncoder(w).Encode(map[string]any{"token": "test", "expires_at": "2099-01-01T00:00:00Z"})
+				case r.URL.Path == base+"/pulls/7":
+					json.NewEncoder(w).Encode(&github.PullRequest{
+						Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(maxPRFiles + 1),
+					})
+				case r.URL.Path == base+"/contents/.github/chainguard":
+					json.NewEncoder(w).Encode([]*github.RepositoryContent{{Type: new("file"), Path: new(".github/chainguard/README.md")}})
+				case r.Method == http.MethodGet && r.URL.Path == base+"/commits/head/check-runs":
+					json.NewEncoder(w).Encode(&github.ListCheckRunsResults{Total: new(0)})
+				case r.Method == http.MethodPost && r.URL.Path == base+"/check-runs":
+					var options github.CreateCheckRunOptions
+					if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+						t.Error(err)
+					}
+					checks = append(checks, options)
+					json.NewEncoder(w).Encode(&github.CheckRun{})
+				default:
+					t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+					http.NotFound(w, r)
+				}
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			transport.BaseURL = gh.URL
+			v := &Validator{Transport: transport}
+			event := &github.PullRequestEvent{
+				Action:       new("synchronize"),
+				Number:       new(7),
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new(tc.repo), FullName: new("foo/" + tc.repo)},
+				PullRequest:  &github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}},
+			}
+			if _, err := v.handlePullRequest(context.Background(), event); err != nil {
+				t.Fatal(err)
+			}
+			if len(checks) != tc.wantChecks {
+				t.Fatalf("checks = %d, want %d", len(checks), tc.wantChecks)
+			}
+			if tc.wantChecks == 1 && (checks[0].GetConclusion() != "success" || checks[0].Output.GetTitle() != noPolicyChangesTitle) {
+				t.Fatalf("check conclusion=%q title=%q, want success %q", checks[0].GetConclusion(), checks[0].Output.GetTitle(), noPolicyChangesTitle)
+			}
+		})
 	}
 }
