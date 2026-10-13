@@ -1338,6 +1338,7 @@ const contentsListingCap = 1000
 // it, so it counts as having policies: posting the no-change run is truthful
 // either way, while wrongly skipping it would leave a required check missing.
 func (e *Validator) hasPolicies(ctx context.Context, client *github.Client, owner, repo, sha string) (bool, error) {
+	policyDir := e.policyDir()
 	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
 	if err != nil {
 		if resp != nil && resp.StatusCode == http.StatusNotFound {
@@ -1349,7 +1350,7 @@ func (e *Validator) hasPolicies(ctx context.Context, client *github.Client, owne
 		return true, nil
 	}
 	for _, f := range dir {
-		if f.GetType() == "file" && isValidatedPath(repo, f.GetPath(), e.policyRepo()) {
+		if f.GetType() == "file" && isValidatedPath(repo, f.GetPath(), e.policyRepo(), policyDir) {
 			return true, nil
 		}
 	}

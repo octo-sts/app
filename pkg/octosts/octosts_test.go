@@ -1187,6 +1187,54 @@ func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation
 	return newAppsTransport(t, &fakeGitHub{mux: mux})
 }
 
+// TestFetchTrustPolicyRawUncachedReadsCustomPolicyDir pins that the exchange
+// reads <identity>.sts.yaml from a multi-segment custom policy directory, and
+// not from the default .github/chainguard.
+func TestFetchTrustPolicyRawUncachedReadsCustomPolicyDir(t *testing.T) {
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	key := freshTPKey(t, "custom-policy-dir")
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("test-installation-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("policy read hit the default directory: %s", r.URL.Path)
+		writeGitHubNotFound(w)
+	})
+	var reads atomic.Int32
+	mux.HandleFunc("/repos/{org}/{repo}/contents/infra/github/octo-sts/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		reads.Add(1)
+		if got, want := r.PathValue("identity"), key.identity+".sts.yaml"; got != want {
+			t.Errorf("policy read file = %q, want %q", got, want)
+		}
+		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
+			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
+			Type:     new("file"),
+			Encoding: new("base64"),
+		})
+	})
+	atr := newAppsTransport(t, &fakeGitHub{mux: mux})
+
+	s := &sts{policyDir: "infra/github/octo-sts"}
+	raw, err := s.fetchTrustPolicyRawUncached(t.Context(), atr, 1234, key)
+	if err != nil {
+		t.Fatalf("fetchTrustPolicyRawUncached: %v", err)
+	}
+	if raw != policy {
+		t.Fatalf("fetchTrustPolicyRawUncached = %q, want %q", raw, policy)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Fatalf("custom directory read %d times, want 1", n)
+	}
+}
+
 func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	key := freshTPKey(t, "concurrent-policy-read")
 
