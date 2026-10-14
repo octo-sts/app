@@ -109,7 +109,7 @@ func TestGetHitRefreshesTTL(t *testing.T) {
 	if got := aws.ToString(refreshed.UpdateExpression); got != "SET expire_at = :new" {
 		t.Errorf("UpdateExpression = %q", got)
 	}
-	if got := aws.ToString(refreshed.ConditionExpression); got != "expire_at < :new" {
+	if got := aws.ToString(refreshed.ConditionExpression); got != "attribute_exists(id) AND expire_at < :new" {
 		t.Errorf("ConditionExpression = %q", got)
 	}
 	n, ok := refreshed.ExpressionAttributeValues[":new"].(*types.AttributeValueMemberN)
