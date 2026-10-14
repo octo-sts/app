@@ -86,7 +86,7 @@ func (s *Store) Get(ctx context.Context, key string) (int64, bool, error) {
 		TableName:           aws.String(s.table),
 		Key:                 itemKey(key),
 		UpdateExpression:    aws.String("SET expire_at = :new"),
-		ConditionExpression: aws.String("expire_at < :new"),
+		ConditionExpression: aws.String("attribute_exists(id) AND expire_at < :new"),
 		ExpressionAttributeValues: map[string]types.AttributeValue{
 			":new": &types.AttributeValueMemberN{Value: strconv.FormatInt(newExpire, 10)},
 		},
