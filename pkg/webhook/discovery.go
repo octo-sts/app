@@ -78,11 +78,11 @@ func (e *prTooLargeError) Error() string {
 
 func (e *prTooLargeError) Is(target error) bool { return target == errTooManyPRFiles }
 
-// policyFilesFromPR lists a complete, stable PR diff before selecting policies.
-// owner/repo is where the PR lives; classifyRepo is the repository name used to
-// decide which listed paths are policies, so selection matches how the files
-// will be parsed.
-func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead, classifyRepo string) ([]string, error) {
+// policyChangesFromPR lists a complete, stable PR diff before selecting
+// policies, deletions included. owner/repo is where the PR lives; classifyRepo
+// is the repository name used to decide which listed paths are policies, so
+// selection matches how the files will be parsed.
+func (e *Validator) policyChangesFromPR(ctx context.Context, client *github.Client, owner, repo string, number int, expectedHead, classifyRepo string) ([]PolicyChange, error) {
 	snapshot := func() (head, base string, count int, err error) {
 		pr, resp, err := client.PullRequests.Get(ctx, owner, repo, number)
 		if err != nil {
@@ -157,7 +157,7 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 					}
 					return nil, fmt.Errorf("pull request %d file list has %d entries, expected %d", number, len(seen), finalCount)
 				}
-				return pathsToValidate(e.policyChangesFromCompare(ctx, classifyRepo, files)), nil
+				return e.policyChangesFromCompare(ctx, classifyRepo, files), nil
 			}
 			if resp.NextPage != page+1 {
 				return nil, fmt.Errorf("pull request %d file pages jump from %d to %d", number, page, resp.NextPage)
@@ -171,20 +171,23 @@ func (e *Validator) policyFilesFromPR(ctx context.Context, client *github.Client
 	return nil, fmt.Errorf("pull request %d file listing stayed incomplete after retry", number)
 }
 
-// prPolicyFiles returns the policy paths to validate for a PR at sha. The PR
-// is listed in prOwner/prRepo; content is read from readOwner/readRepo and
-// classified as classifyRepo, matching how the files will be parsed.
+// prPolicyChanges returns the policy changes a PR makes at sha, deletions
+// included. The PR is listed in prOwner/prRepo; content is read from
+// readOwner/readRepo and classified as classifyRepo, matching how the files
+// will be parsed.
 //
 // When the diff is too large for GitHub to list, every policy in the read
-// repository's policy directory at sha is validated instead. A rate limit
-// during that scan is returned as is. Any other scan failure returns a
+// repository's policy directory at sha is returned as PolicyPresent instead,
+// so all of them are validated. That scan cannot see deletions, which is safe:
+// it validates everything live at sha rather than only what changed. A rate
+// limit during that scan is returned as is. Any other scan failure returns a
 // *prTooLargeError with scanErr set, so the caller can fail the check run
 // rather than skip it.
-func (e *Validator) prPolicyFiles(ctx context.Context, client *github.Client, prOwner, prRepo string, number int, sha, readOwner, readRepo, classifyRepo string) ([]string, error) {
-	files, err := e.policyFilesFromPR(ctx, client, prOwner, prRepo, number, sha, classifyRepo)
+func (e *Validator) prPolicyChanges(ctx context.Context, client *github.Client, prOwner, prRepo string, number int, sha, readOwner, readRepo, classifyRepo string) ([]PolicyChange, error) {
+	changes, err := e.policyChangesFromPR(ctx, client, prOwner, prRepo, number, sha, classifyRepo)
 	tooLarge, ok := errors.AsType[*prTooLargeError](err)
 	if !ok {
-		return files, err
+		return changes, err
 	}
 	clog.FromContext(ctx).Warnf("%v; validating every policy in %s/%s@%s instead", tooLarge, readOwner, readRepo, sha)
 	snapshot, err := e.policyTreeSnapshotAs(ctx, client, readOwner, readRepo, classifyRepo, sha)
@@ -194,12 +197,7 @@ func (e *Validator) prPolicyFiles(ctx context.Context, client *github.Client, pr
 		}
 		return nil, &prTooLargeError{number: tooLarge.number, count: tooLarge.count, scanErr: err}
 	}
-	files = make([]string, 0, len(snapshot))
-	for path := range snapshot {
-		files = append(files, path)
-	}
-	sort.Strings(files)
-	return files, nil
+	return policiesPresent(snapshot), nil
 }
 
 // reportPRTooLarge posts a failed check run for a PR that could be validated
@@ -213,7 +211,7 @@ func (e *Validator) reportPRTooLarge(ctx context.Context, client *github.Client,
 		"Split this pull request into smaller ones so each changes at most %d files.",
 		tooLarge.number, tooLarge.count, maxPRFiles, tooLarge.scanErr, maxPRFiles)
 	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, repo, github.CreateCheckRunOptions{
-		Name:        "Trust Policy Validation",
+		Name:        checkRunName,
 		HeadSHA:     sha,
 		ExternalID:  new(sha),
 		Status:      new("completed"),
