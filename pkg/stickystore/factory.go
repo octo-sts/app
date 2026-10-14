@@ -45,6 +45,9 @@ func newDynamodb(ctx context.Context, cfg *envconfig.EnvConfig) (Store, io.Close
 	if err != nil {
 		return nil, nil, fmt.Errorf("stickystore: loading AWS config for dynamodb: %w", err)
 	}
+	if awsCfg.Region == "" {
+		return nil, nil, fmt.Errorf("stickystore: no AWS region resolved for dynamodb (set AWS_REGION)")
+	}
 	client := godynamodb.NewFromConfig(awsCfg)
 
 	return dynamodb.New(client, cfg.StickyStoreDynamodbTable, cfg.StickyStoreDynamodbTTL), io.NopCloser(nil), nil
