@@ -212,6 +212,83 @@ func TestPolicyTreeSnapshotFileNamedGithubHasNoPolicies(t *testing.T) {
 	}
 }
 
+// TestPolicyTreeSnapshotAndHasPoliciesMultiSegmentPolicyDir pins that a
+// custom PolicyDir with several path segments is walked one tree per segment
+// and probed at its full path, and that neither looks in the default
+// .github/chainguard.
+func TestPolicyTreeSnapshotAndHasPoliciesMultiSegmentPolicyDir(t *testing.T) {
+	const dir = "infra/github/octo-sts"
+	v := &Validator{PolicyDir: dir}
+	tree := func(entries ...*github.TreeEntry) map[string]any {
+		return map[string]any{"sha": "x", "tree": entries, "truncated": false}
+	}
+	entry := func(path, typ, sha string) *github.TreeEntry {
+		return &github.TreeEntry{Path: new(path), Type: new(typ), SHA: new(sha)}
+	}
+	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body any
+		switch r.URL.Path {
+		case "/api/v3/repos/o/r/git/commits/head":
+			body = &github.Commit{Tree: &github.Tree{SHA: new("root")}}
+		case "/api/v3/repos/o/r/git/trees/root":
+			// A .github directory is present but must never be opened.
+			body = tree(entry(".github", "tree", "github"), entry("infra", "tree", "infra"), entry("README.md", "blob", "readme"))
+		case "/api/v3/repos/o/r/git/trees/infra":
+			body = tree(entry("github", "tree", "infra-github"), entry("terraform", "tree", "terraform"))
+		case "/api/v3/repos/o/r/git/trees/infra-github":
+			body = tree(entry("octo-sts", "tree", "policies"), entry("octo-sts-old", "tree", "old"))
+		case "/api/v3/repos/o/r/git/trees/policies":
+			body = tree(
+				entry("foo.sts.yaml", "blob", "sha-foo"),
+				entry("bar.sts.yaml", "blob", "sha-bar"),
+				entry("README.md", "blob", "sha-readme"),
+				entry("nested", "tree", "nested"),
+				// Only the org policy repository validates the allowlist.
+				entry("trusted-token-issuers.yaml", "blob", "sha-allowlist"),
+			)
+		case "/api/v3/repos/o/r/contents/" + dir:
+			if r.URL.Query().Get("ref") != "head" {
+				t.Errorf("policy probe ref = %q, want head", r.URL.Query().Get("ref"))
+			}
+			body = []*github.RepositoryContent{
+				{Type: new("file"), Path: new(dir + "/README.md")},
+				{Type: new("dir"), Path: new(dir + "/nested")},
+				{Type: new("file"), Path: new(dir + "/foo.sts.yaml")},
+			}
+		default:
+			t.Errorf("unexpected request %s", r.URL)
+			http.NotFound(w, r)
+			return
+		}
+		json.NewEncoder(w).Encode(body)
+	}))
+
+	files, err := v.policyTreeSnapshot(context.Background(), client, "o", "r", "head")
+	if err != nil {
+		t.Fatalf("policyTreeSnapshot: %v", err)
+	}
+	want := map[string]string{
+		dir + "/foo.sts.yaml": "sha-foo",
+		dir + "/bar.sts.yaml": "sha-bar",
+	}
+	if len(files) != len(want) {
+		t.Fatalf("policyTreeSnapshot = %v, want %v", files, want)
+	}
+	for path, sha := range want {
+		if files[path] != sha {
+			t.Errorf("policyTreeSnapshot[%q] = %q, want %q", path, files[path], sha)
+		}
+	}
+
+	has, err := v.hasPolicies(context.Background(), client, "o", "r", "head")
+	if err != nil {
+		t.Fatalf("hasPolicies: %v", err)
+	}
+	if !has {
+		t.Fatal("hasPolicies = false, want true for a policy under the custom directory")
+	}
+}
+
 func TestCompleteCompareChangesAtFileCap(t *testing.T) {
 	for _, count := range []int{compareFileCap - 1, compareFileCap} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
@@ -479,7 +556,7 @@ func TestNewRefPushAtPayloadLimit(t *testing.T) {
 				}
 				entries := make([]*github.TreeEntry, len(tc.entries))
 				for i, entry := range tc.entries {
-					name := strings.TrimPrefix(entry.GetPath(), policyDir+"/")
+					name := strings.TrimPrefix(entry.GetPath(), ".github/chainguard/")
 					entries[i] = &github.TreeEntry{Path: &name, Type: entry.Type, SHA: entry.SHA}
 				}
 				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: entries})

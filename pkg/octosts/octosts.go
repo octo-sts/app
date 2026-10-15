@@ -61,7 +61,7 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, allowedIssuers []string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		router:         router,
 		sticky:         sticky,
@@ -71,6 +71,7 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		metrics:        metrics,
 		baseURL:        baseURL,
 		orgPolicyRepo:  orgPolicyRepo,
+		policyDir:      policyDir,
 		allowedIssuers: allowedIssuers,
 	}
 }
@@ -139,6 +140,10 @@ type sts struct {
 	metrics       bool
 	baseURL       string
 	orgPolicyRepo string
+	// policyDir is the directory, relative to the repository root, holding
+	// trust policies and the org trusted-issuer allowlist. Empty means
+	// DefaultPolicyDir.
+	policyDir string
 
 	// allowedIssuers, when non-empty, confines OIDC discovery to these
 	// issuers. Empty means any issuer the trust policies allow.
@@ -179,6 +184,13 @@ func (s *sts) policyRepo() string {
 		return s.orgPolicyRepo
 	}
 	return ".github"
+}
+
+func (s *sts) policyDirectory() string {
+	if s.policyDir != "" {
+		return s.policyDir
+	}
+	return DefaultPolicyDir
 }
 
 // managerFor returns the installation manager for owner's app pool. The
@@ -1086,7 +1098,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			mintedToken = tok
 			file, _, _, err = client.Repositories.GetContents(ctx,
 				tpKey.owner, tpKey.repo,
-				fmt.Sprintf(".github/chainguard/%s.sts.yaml", tpKey.identity),
+				path.Join(s.policyDirectory(), tpKey.identity+".sts.yaml"),
 				&github.RepositoryContentGetOptions{},
 			)
 		}

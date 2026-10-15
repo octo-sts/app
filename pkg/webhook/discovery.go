@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/chainguard-dev/clog"
@@ -244,7 +245,7 @@ func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Cli
 		return nil, fmt.Errorf("commit %s has no tree SHA", ref)
 	}
 	treeSHA := commit.GetTree().GetSHA()
-	for _, directory := range []string{".github", "chainguard"} {
+	for directory := range strings.SplitSeq(e.policyDir(), "/") {
 		tree, err := completePolicyTree(ctx, client, owner, repo, treeSHA)
 		if err != nil {
 			return nil, fmt.Errorf("tree at %s: %w", ref, err)
@@ -277,8 +278,8 @@ func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Cli
 		}
 		switch entry.GetType() {
 		case "blob":
-			path := policyDir + "/" + entry.GetPath()
-			if isValidatedPath(classifyRepo, path, e.policyRepo()) {
+			path := e.policyDir() + "/" + entry.GetPath()
+			if isValidatedPath(classifyRepo, path, e.policyRepo(), e.policyDir()) {
 				out[path] = entry.GetSHA()
 			}
 		case "tree", "commit":
