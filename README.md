@@ -336,9 +336,11 @@ on it.
 
 > **TTL must be enabled on the `expire_at` attribute.** OctoSTS writes a Unix
 > epoch timestamp to `expire_at` and relies on DynamoDB's native TTL to delete
-> stale items. It does not verify the table's TTL configuration. If TTL is not
-> enabled, nothing fails, but inactive mappings are never evicted and pin
-> `(scope, identity)` pairs to an installation forever. Enable it with:
+> stale items. Reads treat an item whose `expire_at` has passed as a miss,
+> since DynamoDB deletes expired items asynchronously and keeps returning them
+> until then. OctoSTS does not verify the table's TTL configuration. If TTL is
+> not enabled, nothing fails and routing still expires on time, but stale items
+> are never deleted and the table grows without bound. Enable it with:
 >
 > ```shell
 > aws dynamodb update-time-to-live \

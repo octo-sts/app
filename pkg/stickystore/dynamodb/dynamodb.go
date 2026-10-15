@@ -43,12 +43,14 @@ type doc struct {
 // New creates a DynamoDB-backed sticky store. Items are keyed by the "id"
 // string partition key in the given table.
 //
-// Expiry is delegated entirely to DynamoDB's native TTL: each item carries
-// an expire_at attribute holding a Unix epoch timestamp, and the table MUST
-// have TTL enabled on that attribute. This store does not verify the
+// Each item carries an expire_at attribute holding a Unix epoch timestamp,
+// and the table MUST have TTL enabled on that attribute so DynamoDB deletes
+// stale items. That deletion is asynchronous and can lag by days, and reads
+// keep returning expired items until it happens, so Get also treats any
+// item whose expire_at has passed as a miss. This store does not verify the
 // table's TTL configuration and will not error if it is missing; in that
-// case inactive mappings are never deleted and (scope, identity) pairs
-// stay pinned to an installation indefinitely. Enable it with:
+// case routing still expires on time, but stale items are never deleted
+// and the table grows without bound. Enable it with:
 //
 //	aws dynamodb update-time-to-live --table-name <table> \
 //	  --time-to-live-specification "Enabled=true, AttributeName=expire_at"
@@ -61,8 +63,10 @@ func New(client API, table string, ttl time.Duration) *Store {
 }
 
 // Get returns the persisted installation ID for key. Returns ok=false on
-// cache miss. Refreshes the item's expire_at on every hit so active
-// mappings never reach the TTL.
+// cache miss, or when the item's expire_at has passed but DynamoDB's TTL
+// sweep has not yet deleted it. Refreshes expire_at on every hit so active
+// mappings never reach the TTL; expired items are not refreshed, so a
+// stale mapping is dropped rather than revived.
 func (s *Store) Get(ctx context.Context, key string) (int64, bool, error) {
 	out, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
 		TableName:      aws.String(s.table),

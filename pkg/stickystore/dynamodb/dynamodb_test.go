@@ -80,7 +80,7 @@ func TestGetHitRefreshesTTL(t *testing.T) {
 				t.Errorf("GetItem TableName = %q, want sticky", got)
 			}
 			return &dynamodb.GetItemOutput{
-				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now()}),
+				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now().Add(time.Hour)}),
 			}, nil
 		},
 		updateItem: func(in *dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -129,7 +129,7 @@ func TestGetHitToleratesLostRefreshRace(t *testing.T) {
 	s := New(&fakeClient{
 		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 			return &dynamodb.GetItemOutput{
-				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now()}),
+				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now().Add(time.Hour)}),
 			}, nil
 		},
 		updateItem: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -147,7 +147,7 @@ func TestGetHitToleratesRefreshError(t *testing.T) {
 	s := New(&fakeClient{
 		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
 			return &dynamodb.GetItemOutput{
-				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now()}),
+				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now().Add(time.Hour)}),
 			}, nil
 		},
 		updateItem: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
@@ -158,6 +158,32 @@ func TestGetHitToleratesRefreshError(t *testing.T) {
 	id, ok, err := s.Get(context.Background(), "42")
 	if id != 777 || !ok || err != nil {
 		t.Errorf("Get() = (%d, %t, %v), want (777, true, nil) despite refresh error", id, ok, err)
+	}
+}
+
+func TestGetExpiredIsMiss(t *testing.T) {
+	// DynamoDB's TTL sweep is asynchronous and can lag by days, and GetItem
+	// keeps returning expired items until then. Get must treat them as a
+	// miss and must not refresh them, or an idle mapping gets revived.
+	updates := 0
+	s := New(&fakeClient{
+		getItem: func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error) {
+			return &dynamodb.GetItemOutput{
+				Item: marshaledDoc(t, doc{ID: "42", InstallationID: 777, ExpireAt: time.Now().Add(-time.Minute)}),
+			}, nil
+		},
+		updateItem: func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error) {
+			updates++
+			return &dynamodb.UpdateItemOutput{}, nil
+		},
+	}, "sticky", time.Hour)
+
+	id, ok, err := s.Get(context.Background(), "42")
+	if id != 0 || ok || err != nil {
+		t.Errorf("Get() = (%d, %t, %v), want (0, false, nil) for expired item", id, ok, err)
+	}
+	if updates != 0 {
+		t.Errorf("UpdateItem called %d times on an expired item, want 0 (must not revive)", updates)
 	}
 }
 
