@@ -80,6 +80,9 @@ func (s *Store) Get(ctx context.Context, key string) (int64, bool, error) {
 	if err := attributevalue.UnmarshalMap(out.Item, &d); err != nil {
 		return 0, false, err
 	}
+	if !d.ExpireAt.IsZero() && !time.Now().Before(d.ExpireAt) {
+		return 0, false, nil
+	}
 
 	newExpire := time.Now().Add(s.ttl).Unix()
 	if _, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
