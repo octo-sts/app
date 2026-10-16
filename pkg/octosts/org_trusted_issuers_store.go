@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -22,10 +23,21 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 )
 
-// OrgTrustedIssuersPath locates the org allowlist. Exported because pkg/webhook's
-// check run reads it too and both paths must agree. The name avoids the substring
-// "token": gosec's G101 matches identifier names and would flag it as a credential.
-const OrgTrustedIssuersPath = ".github/chainguard/trusted-token-issuers.yaml"
+// DefaultPolicyDir is the directory, relative to the repository root, that
+// holds trust policies and the org trusted-issuer allowlist when
+// OCTOSTS_POLICY_DIR is not set.
+const DefaultPolicyDir = ".github/chainguard"
+
+// orgTrustedIssuersFile is the allowlist's file name within the policy directory.
+const orgTrustedIssuersFile = "trusted-token-issuers.yaml"
+
+// OrgTrustedIssuersPath locates the org allowlist within policyDir. Exported
+// because pkg/webhook's check run reads it too and both paths must agree. The
+// name avoids the substring "token": gosec's G101 matches identifier names and
+// would flag it as a credential.
+func OrgTrustedIssuersPath(policyDir string) string {
+	return path.Join(policyDir, orgTrustedIssuersFile)
+}
 
 // orgIssuerState is the cached knowledge about one org's allowlist. The zero
 // value is orgIssuerUnknown, not "no allowlist", so it can never be a pass.
@@ -278,7 +290,7 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 	}
 
 	file, _, _, err := client.Repositories.GetContents(ctx,
-		owner, s.policyRepo(), OrgTrustedIssuersPath,
+		owner, s.policyRepo(), OrgTrustedIssuersPath(s.policyDirectory()),
 		&github.RepositoryContentGetOptions{},
 	)
 	if err != nil {
