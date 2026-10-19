@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.20.0
-	chainguard.dev/sdk v0.1.368
+	chainguard.dev/sdk v0.1.390
 	cloud.google.com/go/firestore v1.26.0
 	cloud.google.com/go/kms v1.35.0
 	cloud.google.com/go/secretmanager v1.22.0
@@ -25,7 +25,7 @@ require (
 	github.com/chainguard-dev/terraform-infra-common v1.59.3
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.5
+	github.com/go-jose/go-jose/v4 v4.1.6
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/go-cmp v0.7.0
