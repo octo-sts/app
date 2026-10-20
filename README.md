@@ -10,10 +10,37 @@ Personal Access Tokens (aka PATs)._**
 
 The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-pats-you-cant-leak-what-you-dont-have) and the page on [Chainguard Academy](https://edu.chainguard.dev/open-source/octo-sts/overview/).
 
+## Getting started
+
+1. [Install the `octo-sts` App](https://github.com/apps/octo-sts/installations/new)
+   into your organization (or user account) and grant it access to the
+   repositories your workloads need to interact with.
+2. Check a [trust policy](#the-trust-policy) into
+   `.github/chainguard/{name}.sts.yaml` in the repository (or in the
+   organization's `.github` repository for org-level policies).
+3. [Federate a token](#federating-a-token) from your workload. In GitHub
+   Actions, use [`octo-sts/action`](https://github.com/octo-sts/action):
+
+   ```yaml
+   permissions:
+     id-token: write
+
+   steps:
+     - uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+       id: octo-sts
+       with:
+         scope: my-org/my-repo
+         identity: my-policy
+     - run: gh issue list -R my-org/my-repo
+       env:
+         GH_TOKEN: ${{ steps.octo-sts.outputs.token }}
+   ```
+
 ## Setting up workload trust
 
 For the App to produce credentials that work with resources in your organization
-it must be installed into the organization and have access to any repositories
+it must be [installed](https://github.com/apps/octo-sts/installations/new) into
+the organization and have access to any repositories
 that you will want workloads to be able to interact with. Unfortunately due to
 limitations with GitHub Apps, the App must ask for a superset of the permissions
 needed for federation, so the full set of permissions the App requests will be
