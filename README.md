@@ -16,8 +16,8 @@ The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-
    into your organization (or user account) and grant it access to the
    repositories your workloads need to interact with.
 2. Check a [trust policy](#the-trust-policy) into
-   `.github/chainguard/{name}.sts.yaml` in the repository (or in `.github` for
-   org-level policies).
+   `.github/chainguard/{name}.sts.yaml` in the repository (or in the
+   organization's `.github` repository for org-level policies).
 3. [Federate a token](#federating-a-token) from your workload. In GitHub
    Actions, use [`octo-sts/action`](https://github.com/octo-sts/action):
 
