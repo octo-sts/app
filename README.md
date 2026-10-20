@@ -31,7 +31,7 @@ The original [blog post](https://www.chainguard.dev/unchained/the-end-of-github-
        with:
          scope: my-org/my-repo
          identity: my-policy
-     - run: gh issue list
+     - run: gh issue list -R my-org/my-repo
        env:
          GH_TOKEN: ${{ steps.octo-sts.outputs.token }}
    ```
