@@ -676,3 +676,64 @@ func TestTrustPolicyCompileRejectsGroupEscape(t *testing.T) {
 		t.Errorf("Compile() with subject_pattern \"a|b\" = %v, want nil", err)
 	}
 }
+
+func TestOrgTrustPolicyCompileRepositoryIDs(t *testing.T) {
+	base := TrustPolicy{Issuer: "https://example.com", Subject: "subject"}
+	tooMany := make([]int64, maxRepositoryIDs+1)
+	for i := range tooMany {
+		tooMany[i] = int64(i + 1)
+	}
+	tests := []struct {
+		name    string
+		names   []string
+		ids     []int64
+		wantErr string
+	}{{
+		name: "neither",
+	}, {
+		name:  "names only",
+		names: []string{"a", "b"},
+	}, {
+		name: "ids only",
+		ids:  []int64{1, 2},
+	}, {
+		name:    "both",
+		names:   []string{"a"},
+		ids:     []int64{1},
+		wantErr: "only one of repositories or repository_ids",
+	}, {
+		name:    "zero id",
+		ids:     []int64{1, 0},
+		wantErr: "must be positive",
+	}, {
+		name:    "negative id",
+		ids:     []int64{-5},
+		wantErr: "must be positive",
+	}, {
+		name:    "too many ids",
+		ids:     tooMany,
+		wantErr: "at most 500",
+	}, {
+		name: "exactly the limit",
+		ids:  tooMany[:maxRepositoryIDs],
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			otp := &OrgTrustPolicy{TrustPolicy: base, Repositories: tt.names, RepositoryIDs: tt.ids}
+			err := otp.Compile()
+			switch {
+			case tt.wantErr == "" && err != nil:
+				t.Fatalf("Compile() = %v, want nil", err)
+			case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+				t.Fatalf("Compile() = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestOrgTrustPolicyCompileStillChecksTrustPolicy(t *testing.T) {
+	otp := &OrgTrustPolicy{TrustPolicy: TrustPolicy{Subject: "subject"}, RepositoryIDs: []int64{1}}
+	if err := otp.Compile(); err == nil {
+		t.Fatal("Compile() = nil, want the embedded TrustPolicy's missing-issuer error")
+	}
+}

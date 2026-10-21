@@ -349,8 +349,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	// trust policy.
 	atr := ghtransport.ForInstallation(base, e.InstallationID)
 	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories: e.TrustPolicy.Repositories,
-		Permissions:  &e.TrustPolicy.Permissions,
+		Repositories:  e.TrustPolicy.Repositories,
+		RepositoryIDs: e.TrustPolicy.RepositoryIDs,
+		Permissions:   &e.TrustPolicy.Permissions,
 	}
 	// Enrich context so the httpmetrics transport labels the token exchange
 	// rate limit metrics with the specific installation consuming quota.
@@ -781,10 +782,9 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	var tp trustPolicy = &otp.TrustPolicy
 
 	owner, repo := path.Dir(scope), path.Base(scope)
-	if owner == "." {
+	scopedToRepo := owner != "."
+	if !scopedToRepo {
 		owner, repo = repo, s.policyRepo()
-	} else {
-		otp.Repositories = []string{repo}
 	}
 
 	// If the repo is the org policy repo, then parse with an org policy even
@@ -828,6 +828,14 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, pool, readAtr, readID, owner, scope, identity, tpKey, tp)
 	if err != nil {
 		return nil, 0, nil, decision, err
+	}
+
+	// A repo-scoped request limits the token to that repo, unless an org
+	// policy read for it names its own repositories. Applied after parsing so
+	// a policy's repository_ids replace this default instead of colliding
+	// with it in Compile.
+	if scopedToRepo && len(otp.Repositories) == 0 && len(otp.RepositoryIDs) == 0 {
+		otp.Repositories = []string{repo}
 	}
 
 	if err := authorize(otp); err != nil {

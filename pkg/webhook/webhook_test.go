@@ -129,6 +129,38 @@ func TestValidateOrgPolicyCompileFailure(t *testing.T) {
 	}
 }
 
+func TestValidateRepositoryIDs(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	for _, tc := range []struct {
+		name, repo, file, wantErr string
+	}{{
+		name: "org policy with repository_ids",
+		repo: ".github",
+		file: ".github/chainguard/orgids.sts.yaml",
+	}, {
+		name:    "org policy with both repositories and repository_ids",
+		repo:    ".github",
+		file:    ".github/chainguard/orgidsandnames.sts.yaml",
+		wantErr: "only one of repositories or repository_ids",
+	}, {
+		name:    "repo policy with repository_ids",
+		repo:    "bar",
+		file:    ".github/chainguard/repoids.sts.yaml",
+		wantErr: "repository_ids",
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := validatePoliciesForRepo(ctx, gh, "foo", tc.repo, tc.repo, "deadbeef", []string{tc.file}, ".github", octosts.DefaultPolicyDir)
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("validatePolicies = %v, want nil", err)
+			case tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Fatalf("validatePolicies = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestOrgFilter(t *testing.T) {
 	gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "should not be called", http.StatusUnauthorized)
