@@ -28,7 +28,7 @@ repos:
       - id: go-mod-tidy
 
   - repo: https://github.com/golangci/golangci-lint
-    rev: 27774aaf853a4fd21f1dd5e69439459dc1b26e68 # frozen: v2.13.2
+    rev: 25c5369a93aacb8cccea0d46e1569ca4a194564d # frozen: v2.15.0
     hooks:
       - id: golangci-lint-full
 
