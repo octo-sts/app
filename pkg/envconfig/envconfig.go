@@ -90,6 +90,11 @@ type EnvConfigWebhook struct {
 	// trust policies and the org trusted-issuer allowlist. Defaults to
 	// ".github/chainguard". The app and the webhook must agree on it.
 	PolicyDir string `envconfig:"OCTOSTS_POLICY_DIR" required:"false" default:".github/chainguard"`
+	// NoChangeCheckRuns posts a successful check run on events that change no
+	// trust policy in repositories other than the org policy repository, which
+	// always gets one. Off by default because it adds API calls to every pull
+	// request sync in every repository holding policies.
+	NoChangeCheckRuns bool `envconfig:"OCTOSTS_NO_CHANGE_CHECK_RUNS" required:"false" default:"false"`
 }
 
 func AppConfig() (*EnvConfigApp, error) {

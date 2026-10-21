@@ -364,6 +364,14 @@ type Validator struct {
 	// octosts.DefaultPolicyDir when empty.
 	PolicyDir string
 
+	// NoChangeCheckRuns posts a successful check run on events that change no
+	// trust policy in repositories other than the org policy repository, so a
+	// required check is present on every pull request head there too
+	// (octo-sts/app#1745). Off by default: each such run costs up to three API
+	// calls on every pull request sync in every repository holding policies.
+	// The org policy repository gets the run regardless.
+	NoChangeCheckRuns bool
+
 	// Emitter publishes trust policy audit events. Nil disables auditing.
 	Emitter *PolicyEmitter
 
@@ -1247,6 +1255,10 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 // policies even when it removed the last one along with the directory.
 //
 // It posts nothing when:
+//   - NoChangeCheckRuns is off, the default, and repo is not the
+//     organization policy repository. That repository always gets the run:
+//     the README recommends making the check required there, and it skips
+//     the probe below, so a run costs two calls on a rarely changed repo.
 //   - the repository holds no trust policies at sha, since a required check
 //     cannot matter there and posting would add a write to every push in every
 //     installed repository. The organization policy repository is exempt from
@@ -1263,13 +1275,17 @@ func (e *Validator) postNoPolicyChangesCheckRun(ctx context.Context, client *git
 	if sha == "" || sha == zeroHash {
 		return nil, nil
 	}
+	policyRepo := strings.EqualFold(repo, e.policyRepo())
+	if !policyRepo && !e.NoChangeCheckRuns {
+		return nil, nil
+	}
 
 	title, summary := noPolicyChangesTitle, "No trust policy files changed, so there was nothing to validate."
 	if deletedPolicy {
 		title, summary = policiesRemovedTitle, "This change only removes trust policies, so there was nothing to validate."
 	}
 
-	if !deletedPolicy && !strings.EqualFold(repo, e.policyRepo()) {
+	if !deletedPolicy && !policyRepo {
 		has, err := e.hasPolicies(ctx, client, owner, repo, sha)
 		if err != nil {
 			if isProvenWebhookRateLimit(err) {

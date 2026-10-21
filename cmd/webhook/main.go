@@ -139,12 +139,13 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", &webhook.Validator{
-		Transport:     atr,
-		WebhookSecret: webhookSecrets,
-		Organizations: orgs,
-		OrgPolicyRepo: webhookConfig.OrgPolicyRepo,
-		PolicyDir:     webhookConfig.PolicyDir,
-		Emitter:       emitter,
+		Transport:         atr,
+		WebhookSecret:     webhookSecrets,
+		Organizations:     orgs,
+		OrgPolicyRepo:     webhookConfig.OrgPolicyRepo,
+		PolicyDir:         webhookConfig.PolicyDir,
+		NoChangeCheckRuns: webhookConfig.NoChangeCheckRuns,
+		Emitter:           emitter,
 	})
 	mux.HandleFunc("/healthcheck", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
