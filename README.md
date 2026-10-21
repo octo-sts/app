@@ -264,8 +264,11 @@ This control is only as strong as write access to the policy repository.
   this file on every pull request. It only reports. It blocks nothing until you make
   it required. When a push changes no trust policy, the check still reports success
   with the title `No trust policy changes.`, so the required check is present on
-  every pull request head. Outside the policy repository, this no-change result only
-  appears in repositories that have trust policies under `.github/chainguard`.
+  every pull request head. Outside the policy repository, this no-change result is
+  off by default, because it adds API calls to every pull request sync. A
+  self-hosted deployment can turn it on with `OCTOSTS_NO_CHANGE_CHECK_RUNS=true`;
+  it then appears in repositories that have trust policies under
+  `.github/chainguard`.
 
 - **Add a CODEOWNERS entry** for the file.
 

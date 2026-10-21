@@ -4428,6 +4428,13 @@ func (g *noChangeGitHub) server(t *testing.T) *httptest.Server {
 // "head" and asserts the webhook answers 200.
 func sendNoChangeEvent(t *testing.T, gh *httptest.Server, eventType, repo string) {
 	t.Helper()
+	sendNoChangeEventWith(t, gh, eventType, repo, true)
+}
+
+// sendNoChangeEventWith is sendNoChangeEvent with the no-change check run
+// switch set explicitly.
+func sendNoChangeEventWith(t *testing.T, gh *httptest.Server, eventType, repo string, noChangeCheckRuns bool) {
+	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatal(err)
@@ -4435,7 +4442,7 @@ func sendNoChangeEvent(t *testing.T, gh *httptest.Server, eventType, repo string
 	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
 	tr.BaseURL = gh.URL
 	secret := []byte("hunter2")
-	srv := httptest.NewServer(&Validator{Transport: tr, WebhookSecret: [][]byte{secret}})
+	srv := httptest.NewServer(&Validator{Transport: tr, WebhookSecret: [][]byte{secret}, NoChangeCheckRuns: noChangeCheckRuns})
 	t.Cleanup(srv.Close)
 
 	ghRepo := &github.Repository{
@@ -4520,6 +4527,22 @@ func TestNoPolicyChangesPostsSuccessCheckRun(t *testing.T) {
 	}
 }
 
+// The no-change check run is off by default outside the org policy repository:
+// with the switch unset, an event there that changes no policy costs no API
+// call at all, as before v0.13.0.
+func TestNoPolicyChangesDisabledPostsNothing(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: "bar", hasPolicyDir: true}
+			sendNoChangeEventWith(t, g.server(t), eventType, "bar", false)
+
+			if len(g.created) != 0 || g.probes != 0 || g.lists != 0 {
+				t.Fatalf("created = %d, probes = %d, lists = %d, want 0, 0, 0", len(g.created), g.probes, g.lists)
+			}
+		})
+	}
+}
+
 // A repository without trust policies cannot need the check, so it gets no
 // run: otherwise every push to every installed repository would cost a write.
 func TestNoPolicyChangesWithoutPolicyDirPostsNothing(t *testing.T) {
@@ -4545,6 +4568,25 @@ func TestNoPolicyChangesOrgPolicyRepoSkipsProbe(t *testing.T) {
 		t.Run(eventType, func(t *testing.T) {
 			g := &noChangeGitHub{repo: ".github"}
 			sendNoChangeEvent(t, g.server(t), eventType, ".github")
+
+			if len(g.created) != 1 || g.created[0].GetConclusion() != "success" {
+				t.Fatalf("expected 1 success check run, got %d", len(g.created))
+			}
+			if g.probes != 0 {
+				t.Fatalf("policy directory probed %d times, want 0", g.probes)
+			}
+		})
+	}
+}
+
+// The org policy repository is where the README recommends making the check
+// required, so it gets the no-change run even with the switch off. It costs no
+// policy probe there.
+func TestNoPolicyChangesOrgPolicyRepoPostsWhenDisabled(t *testing.T) {
+	for _, eventType := range []string{"check_suite", "pull_request"} {
+		t.Run(eventType, func(t *testing.T) {
+			g := &noChangeGitHub{repo: ".github"}
+			sendNoChangeEventWith(t, g.server(t), eventType, ".github", false)
 
 			if len(g.created) != 1 || g.created[0].GetConclusion() != "success" {
 				t.Fatalf("expected 1 success check run, got %d", len(g.created))
