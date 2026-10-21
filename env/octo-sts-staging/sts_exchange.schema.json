@@ -321,6 +321,21 @@
                 "mode": "NULLABLE"
             }
           ]
+        },
+        {
+          "name": "app",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "app_pattern",
+          "type": "STRING",
+          "mode": "NULLABLE"
+        },
+        {
+          "name": "repository_ids",
+          "type": "INTEGER",
+          "mode": "REPEATED"
         }
       ]
     },
