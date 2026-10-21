@@ -210,6 +210,26 @@ func TestBaseConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "Sticky store dynamodb valid",
+			envVars: map[string]string{
+				"PORT":                              "8080",
+				"GITHUB_APP_IDS":                    "12345678",
+				"OCTOSTS_STICKY_STORE":              "dynamodb",
+				"OCTOSTS_STICKY_STORE_DYNAMODB_TTL": "1h",
+			},
+			wantErr: false,
+		},
+		{
+			name: "Sticky store dynamodb negative TTL rejected",
+			envVars: map[string]string{
+				"PORT":                              "8080",
+				"GITHUB_APP_IDS":                    "12345678",
+				"OCTOSTS_STICKY_STORE":              "dynamodb",
+				"OCTOSTS_STICKY_STORE_DYNAMODB_TTL": "-1h",
+			},
+			wantErr: true,
+		},
+		{
 			name: "GITHUB_BASE_URL valid HTTPS",
 			envVars: map[string]string{
 				"PORT":            "8080",
