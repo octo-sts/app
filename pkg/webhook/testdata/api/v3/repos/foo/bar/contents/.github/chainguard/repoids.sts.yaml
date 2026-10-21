@@ -1,0 +1,7 @@
+{
+  "name": "repoids.sts.yaml",
+  "path": ".github/chainguard/repoids.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vLy5naXRodWI6cmVmOnJlZnMvaGVhZHMvbWFpbgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZApyZXBvc2l0b3J5X2lkczoKICAtIDEyMwo=",
+  "encoding": "base64"
+}

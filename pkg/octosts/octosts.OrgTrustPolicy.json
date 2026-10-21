@@ -285,6 +285,13 @@
           },
           "type": "array",
           "description": "Repositories is an optional scoping of repositories within the organization.\nIf not provided, all repositories available to the GitHub App within the organization\nare included."
+        },
+        "repository_ids": {
+          "items": {
+            "type": "integer"
+          },
+          "type": "array",
+          "description": "RepositoryIDs scopes the token like Repositories, but by repository ID.\nIDs survive a rename, and a deleted repository's ID is never reused by\na new repository of the same name. At most one of Repositories and\nRepositoryIDs may be set."
         }
       },
       "additionalProperties": false,

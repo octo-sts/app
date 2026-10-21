@@ -59,6 +59,39 @@ type OrgTrustPolicy struct {
 	// If not provided, all repositories available to the GitHub App within the organization
 	// are included.
 	Repositories []string `json:"repositories,omitempty"`
+
+	// RepositoryIDs scopes the token like Repositories, but by repository ID.
+	// IDs survive a rename, and a deleted repository's ID is never reused by
+	// a new repository of the same name. At most one of Repositories and
+	// RepositoryIDs may be set.
+	RepositoryIDs []int64 `json:"repository_ids,omitempty"`
+}
+
+// maxRepositoryIDs is the most repositories GitHub lets one installation
+// token request name.
+const maxRepositoryIDs = 500
+
+// Compile checks the org trust policy for validity, and prepares internal
+// state for validating tokens.
+func (otp *OrgTrustPolicy) Compile() error {
+	if err := otp.TrustPolicy.Compile(); err != nil {
+		return err
+	}
+
+	// GitHub does not document what a token request naming repositories both
+	// ways does, so do not send one.
+	if len(otp.Repositories) > 0 && len(otp.RepositoryIDs) > 0 {
+		return errors.New("trust policy: only one of repositories or repository_ids can be set, got both")
+	}
+	if len(otp.RepositoryIDs) > maxRepositoryIDs {
+		return fmt.Errorf("trust policy: repository_ids can list at most %d repositories, got %d", maxRepositoryIDs, len(otp.RepositoryIDs))
+	}
+	for _, id := range otp.RepositoryIDs {
+		if id <= 0 {
+			return fmt.Errorf("trust policy: repository_ids must be positive, got %d", id)
+		}
+	}
+	return nil
 }
 
 // Compile checks the trust policy for validity, and prepares internal state

@@ -96,6 +96,36 @@ Every pattern is matched against the whole value: `subject_pattern: "[0-9]+"`
 accepts `123` but not `123x`, and `refs/heads/main|refs/heads/develop` accepts
 exactly those two refs. Do not add `^` or `$` yourself.
 
+#### Scoping org-level policies by repository ID
+
+An org-level policy can name its repositories by ID with `repository_ids`
+instead of by name with `repositories`. A policy sets at most one of the two.
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:chainguard-dev/[^:]+:ref:refs/heads/main"
+claim_pattern:
+  repository_id: "123456789"
+
+permissions:
+  contents: read
+
+repository_ids:
+  - 123456789 # chainguard-dev/foo
+```
+
+IDs keep a policy working across a repository rename, and a repository
+recreated under a deleted one's name does not inherit its access. Get an ID with
+`gh api repos/{owner}/{repo} --jq .id`.
+
+To rename a repository scoped by name, rename it first, then update
+`repositories` right away. Adding the new name ahead of the rename breaks the
+policy: GitHub refuses the whole token request while any listed repository does
+not exist. Patterns on the repository name, such as `subject`, change on rename
+too. Matching the `repository_id` claim, as above, avoids that.
+
 #### Autocomplete
 
 [JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:

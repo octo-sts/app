@@ -1,0 +1,7 @@
+{
+  "name": "orgidsandnames.sts.yaml",
+  "path": ".github/chainguard/orgidsandnames.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vLy5naXRodWI6cmVmOnJlZnMvaGVhZHMvbWFpbgpwZXJtaXNzaW9uczoKICBjb250ZW50czogcmVhZApyZXBvc2l0b3JpZXM6CiAgLSBiYXIKcmVwb3NpdG9yeV9pZHM6CiAgLSAxMjMK",
+  "encoding": "base64"
+}

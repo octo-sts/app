@@ -274,6 +274,47 @@ func TestExchange(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "explicit org policy repo",
+			req: &v1.ExchangeRequest{
+				Identity: "foo",
+				Scopes:   []string{"org/.github"},
+			},
+			want: &github.InstallationTokenOptions{
+				Repositories: []string{".github"},
+				Permissions: &github.InstallationPermissions{
+					PullRequests: new("write"),
+				},
+			},
+		},
+		{
+			name: "org repository_ids",
+			req: &v1.ExchangeRequest{
+				Identity: "ids",
+				Scopes:   []string{"org"},
+			},
+			want: &github.InstallationTokenOptions{
+				RepositoryIDs: []int64{123, 456},
+				Permissions: &github.InstallationPermissions{
+					PullRequests: new("write"),
+				},
+			},
+		},
+		{
+			// The scope's repo is only a default: a policy that names its own
+			// repositories by ID replaces it rather than adding to it.
+			name: "explicit org policy repo with repository_ids",
+			req: &v1.ExchangeRequest{
+				Identity: "ids",
+				Scopes:   []string{"org/.github"},
+			},
+			want: &github.InstallationTokenOptions{
+				RepositoryIDs: []int64{123, 456},
+				Permissions: &github.InstallationPermissions{
+					PullRequests: new("write"),
+				},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tok, err := sts.Exchange(ctx, tc.req)
@@ -371,6 +412,19 @@ func TestExchangeMismatchDoesNotLeakPolicy(t *testing.T) {
 	}
 	if got, want := strings.ReplaceAll(status.Convert(malformed).Message(), "malformed", "does-not-exist"), status.Convert(missing).Message(); status.Code(malformed) != codes.NotFound || got != want {
 		t.Errorf("Exchange(malformed) = %v, want same response as missing policy (%v)", malformed, missing)
+	}
+
+	// repository_ids is org-policy-only, and cannot be combined with
+	// repositories. Either mistake is an invalid policy.
+	for _, tc := range []struct{ scope, repo, identity string }{
+		{scope: "org/repo", repo: "repo", identity: "ids"},
+		{scope: "org", repo: ".github", identity: "ids-and-names"},
+	} {
+		k := cacheTrustPolicyKey{owner: "org", repo: tc.repo, identity: tc.identity}
+		t.Cleanup(func() { trustPolicies.Remove(k) })
+		if _, err := sts.Exchange(ctx, &v1.ExchangeRequest{Identity: tc.identity, Scopes: []string{tc.scope}}); status.Code(err) != codes.NotFound {
+			t.Errorf("Exchange(%s, %s) = %v, want NotFound for an invalid policy", tc.scope, tc.identity, err)
+		}
 	}
 }
 
