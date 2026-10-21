@@ -1,7 +1,7 @@
 chainguard.dev/go-grpc-kit v0.21.0 h1:lhy+OeQxxpbvJc9ctBHe4G3T4aEnvXV54T721iu85Fk=
 chainguard.dev/go-grpc-kit v0.21.0/go.mod h1:vpBBX1kjnOMqM/ePAndA7uvYNEKE8rsHitvdZlvqZEM=
-chainguard.dev/sdk v0.1.395 h1:FISAFZ7NWjSQkNdbBm1OK40KXBEvPkraPDs9562GWsY=
-chainguard.dev/sdk v0.1.395/go.mod h1:EhyK8jxoiqdsFK7ZwdCXCy8R9zHs20Su6L9rk5ceilA=
+chainguard.dev/sdk v0.1.397 h1:+niOrr01SY6sQyX0lYA5QVIoJSOuMAfE2FiXV+Jy+SQ=
+chainguard.dev/sdk v0.1.397/go.mod h1:EhyK8jxoiqdsFK7ZwdCXCy8R9zHs20Su6L9rk5ceilA=
 cloud.google.com/go v0.123.0 h1:2NAUJwPR47q+E35uaJeYoNhuNEM9kM8SjgRgdeOJUSE=
 cloud.google.com/go v0.123.0/go.mod h1:xBoMV08QcqUGuPW65Qfm1o9Y4zKZBpGS+7bImXLTAZU=
 cloud.google.com/go/auth v0.24.1-0.20261001053825-dbc26066f70a h1:jW1ZLFy9oa5ai8LOI40z6s+DL1cO/L1KSm9hVGnibn8=
@@ -190,8 +190,8 @@ github.com/knadh/koanf/parsers/yaml v1.1.1 h1:u70vV5IyaM0HvONh8HoqBC97oTgO33KcpZ
 github.com/knadh/koanf/parsers/yaml v1.1.1/go.mod h1:HHmcHXUrp9cOPcuC+2wrr44GTUB0EC+PyfN3HZD9tFg=
 github.com/knadh/koanf/providers/file v1.2.1 h1:bEWbtQwYrA+W2DtdBrQWyXqJaJSG3KrP3AESOJYp9wM=
 github.com/knadh/koanf/providers/file v1.2.1/go.mod h1:bp1PM5f83Q+TOUu10J/0ApLBd9uIzg+n9UgthfY+nRA=
-github.com/knadh/koanf/v2 v2.4.0 h1:wmp0NlAUIasxphpHIU6Su5sKQn3Up/AvI2ZA2GeJTUk=
-github.com/knadh/koanf/v2 v2.4.0/go.mod h1:gRb40VRAbd4iJMYYD5IxZ6hfuopFcXBpc9bbQpZwo28=
+github.com/knadh/koanf/v2 v2.4.1 h1:MK2JDkLy4UGzEUkW1CCCKQftd9+M+NX8hAZ2axbf/jo=
+github.com/knadh/koanf/v2 v2.4.1/go.mod h1:gRb40VRAbd4iJMYYD5IxZ6hfuopFcXBpc9bbQpZwo28=
 github.com/kylelemons/godebug v1.1.0 h1:RPNrshWIDI6G2gRW9EHilWtl7Z6Sb1BR0xunSBf0SNc=
 github.com/kylelemons/godebug v1.1.0/go.mod h1:9/0rRGxNHcop5bhtWyNeEfOS8JIWk580+fNqagV/RAw=
 github.com/mileusna/useragent v1.3.5 h1:SJM5NzBmh/hO+4LGeATKpaEX9+b4vcGg2qXGLiNGDws=
