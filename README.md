@@ -67,12 +67,27 @@ interact with issues:
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
 
 issuer: https://token.actions.githubusercontent.com
-subject: repo:chainguard-dev/foo:ref:refs/heads/main
+subject: repo:chainguard-dev@87436699/foo@123456789:ref:refs/heads/main
 
 permissions:
   contents: read
   issues: write
 ```
+
+This example uses GitHub's
+[immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims),
+which embed the owner and repository IDs in the subject
+(`repo:<owner>@<owner-id>/<repo>@<repo-id>:...`). Unlike the legacy
+name-only subject (`repo:chainguard-dev/foo:ref:refs/heads/main`), they cannot
+be matched by a different organization or repository that later takes over
+the same name, so we recommend them for all GitHub Actions trust policies.
+
+New repositories use immutable subject claims by default. To check or change
+the setting for an existing repository, open its
+`https://github.com/<owner>/<repo>/settings/actions/oidc-configuration` page
+and check **Use immutable subject claim**. The page also shows the exact
+**Default subject claim prefix** (for example
+`repo:chainguard-dev@87436699/foo@123456789`) to use in your trust policy.
 
 The Trust Policy can also match the issuer, subject, and even custom claims with
 regular expressions. For example:
@@ -105,9 +120,7 @@ instead of by name with `repositories`. A policy sets at most one of the two.
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustPolicy.json
 
 issuer: https://token.actions.githubusercontent.com
-subject_pattern: "repo:chainguard-dev/[^:]+:ref:refs/heads/main"
-claim_pattern:
-  repository_id: "123456789"
+subject: repo:chainguard-dev@87436699/foo@123456789:ref:refs/heads/main
 
 permissions:
   contents: read
@@ -123,8 +136,9 @@ recreated under a deleted one's name does not inherit its access. Get an ID with
 To rename a repository scoped by name, rename it first, then update
 `repositories` right away. Adding the new name ahead of the rename breaks the
 policy: GitHub refuses the whole token request while any listed repository does
-not exist. Patterns on the repository name, such as `subject`, change on rename
-too. Matching the `repository_id` claim, as above, avoids that.
+not exist. Subjects that contain only the repository name change on rename
+too. Using [immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims),
+as above, or matching the `repository_id` claim avoids that.
 
 #### Autocomplete
 
@@ -485,7 +499,7 @@ pin the App that mints its tokens:
 ```yaml
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
 issuer: https://token.actions.githubusercontent.com
-subject: repo:my-org/my-repo:ref:refs/heads/main
+subject: repo:my-org@12345678/my-repo@123456789:ref:refs/heads/main
 
 permissions:
   contents: read
@@ -644,7 +658,9 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 
 - **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements.
 
-- **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org/repo:ref:refs/heads/main` instead of `repo:org/repo:.*`.
+- **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org@<org-id>/repo@<repo-id>:ref:refs/heads/main` instead of `repo:org@<org-id>/repo@<repo-id>:.*`.
+
+- **Use immutable subject claims**: For GitHub Actions, enable [immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims) so a policy cannot be satisfied by a different repository or organization that reuses the same name.
 
 #### Token Management
 
