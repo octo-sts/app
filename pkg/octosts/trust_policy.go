@@ -4,10 +4,13 @@
 package octosts
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
+	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/google/go-github/v88/github"
@@ -163,8 +166,37 @@ func (tp *TrustPolicy) Compile() error {
 		tp.appPattern = r
 	}
 
+	if err := validatePermissions(tp.Permissions); err != nil {
+		return err
+	}
+
 	// Mark the trust policy as compiled.
 	tp.isCompiled = true
+	return nil
+}
+
+// PermissionLevels holds every access level GitHub accepts for an installation
+// token permission. Not every permission takes every level (workflows is
+// write-only, few take admin); GitHub enforces that when minting the token.
+var PermissionLevels = []string{"read", "write", "admin"}
+
+// validatePermissions rejects permission values GitHub would never accept,
+// such as a "writ" typo, so a check run catches them before token exchange.
+func validatePermissions(perms github.InstallationPermissions) error {
+	// Round-trip through JSON to get the set fields keyed by their policy names.
+	b, err := json.Marshal(perms)
+	if err != nil {
+		return fmt.Errorf("trust policy: encoding permissions: %w", err)
+	}
+	var levels map[string]string
+	if err := json.Unmarshal(b, &levels); err != nil {
+		return fmt.Errorf("trust policy: decoding permissions: %w", err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(levels)) {
+		if !slices.Contains(PermissionLevels, levels[name]) {
+			return fmt.Errorf("trust policy: invalid permission %s: %q (want one of %s)", name, levels[name], strings.Join(PermissionLevels, ", "))
+		}
+	}
 	return nil
 }
 

@@ -1,0 +1,7 @@
+{
+  "name": "badperm.sts.yaml",
+  "path": ".github/chainguard/badperm.sts.yaml",
+  "type": "file",
+  "content": "aXNzdWVyOiBodHRwczovL3Rva2VuLmFjdGlvbnMuZ2l0aHVidXNlcmNvbnRlbnQuY29tCnN1YmplY3Q6IHJlcG86Zm9vL2JhcjpyZWY6cmVmcy9oZWFkcy9tYWluCnBlcm1pc3Npb25zOgogIGNvbnRlbnRzOiB3cml0Cg==",
+  "encoding": "base64"
+}
