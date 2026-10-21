@@ -112,6 +112,15 @@ func TestValidatePolicyCompileFailure(t *testing.T) {
 	}
 }
 
+func TestValidatePolicyInvalidPermission(t *testing.T) {
+	gh := prefetchGitHub(t)
+	ctx := slogtest.Context(t)
+	_, err := validatePoliciesForRepo(ctx, gh, "foo", "bar", "bar", "deadbeef", []string{".github/chainguard/badperm.sts.yaml"}, ".github", octosts.DefaultPolicyDir)
+	if err == nil || !strings.Contains(err.Error(), `invalid permission contents: "writ"`) {
+		t.Fatalf("validatePolicies = %v, want error about the contents permission", err)
+	}
+}
+
 func TestValidateOrgPolicyCompiles(t *testing.T) {
 	gh := prefetchGitHub(t)
 	ctx := slogtest.Context(t)

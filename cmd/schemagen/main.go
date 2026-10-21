@@ -42,10 +42,22 @@ func main() {
 		}
 		defer out.Close()
 
+		schema := r.Reflect(t)
+		// Constrain each permission to the levels Compile accepts, so editors
+		// flag a typo like "writ" before it reaches a check run.
+		if perms, ok := schema.Definitions["InstallationPermissions"]; ok {
+			for p := perms.Properties.Oldest(); p != nil; p = p.Next() {
+				p.Value.Enum = make([]any, 0, len(octosts.PermissionLevels))
+				for _, l := range octosts.PermissionLevels {
+					p.Value.Enum = append(p.Value.Enum, l)
+				}
+			}
+		}
+
 		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 
-		if err := enc.Encode(r.Reflect(t)); err != nil {
+		if err := enc.Encode(schema); err != nil {
 			// nolint:gocritic
 			log.Fatal(err)
 		}

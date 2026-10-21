@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/google/go-github/v88/github"
 )
 
 func TestCompile(t *testing.T) {
@@ -735,5 +736,57 @@ func TestOrgTrustPolicyCompileStillChecksTrustPolicy(t *testing.T) {
 	otp := &OrgTrustPolicy{TrustPolicy: TrustPolicy{Subject: "subject"}, RepositoryIDs: []int64{1}}
 	if err := otp.Compile(); err == nil {
 		t.Fatal("Compile() = nil, want the embedded TrustPolicy's missing-issuer error")
+	}
+}
+
+func TestCompilePermissions(t *testing.T) {
+	tests := []struct {
+		name    string
+		perms   github.InstallationPermissions
+		wantErr string
+	}{{
+		name: "none",
+	}, {
+		name: "every level",
+		perms: github.InstallationPermissions{
+			Contents:             github.Ptr("read"),
+			PullRequests:         github.Ptr("write"),
+			OrganizationProjects: github.Ptr("admin"),
+		},
+	}, {
+		name:    "typo",
+		perms:   github.InstallationPermissions{Contents: github.Ptr("writ")},
+		wantErr: `invalid permission contents: "writ"`,
+	}, {
+		name:    "wrong case",
+		perms:   github.InstallationPermissions{Issues: github.Ptr("Write")},
+		wantErr: `invalid permission issues: "Write"`,
+	}, {
+		name:    "empty",
+		perms:   github.InstallationPermissions{Checks: github.Ptr("")},
+		wantErr: `invalid permission checks: ""`,
+	}, {
+		name: "first invalid name wins",
+		perms: github.InstallationPermissions{
+			Workflows: github.Ptr("bad"),
+			Actions:   github.Ptr("bad"),
+		},
+		wantErr: "invalid permission actions",
+	}}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, c := range []interface{ Compile() error }{
+				&TrustPolicy{Issuer: "https://example.com", Subject: "subject", Permissions: tt.perms},
+				&OrgTrustPolicy{TrustPolicy: TrustPolicy{Issuer: "https://example.com", Subject: "subject", Permissions: tt.perms}},
+			} {
+				err := c.Compile()
+				switch {
+				case tt.wantErr == "" && err != nil:
+					t.Fatalf("%T.Compile() = %v, want nil", c, err)
+				case tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)):
+					t.Fatalf("%T.Compile() = %v, want error containing %q", c, err, tt.wantErr)
+				}
+			}
+		})
 	}
 }

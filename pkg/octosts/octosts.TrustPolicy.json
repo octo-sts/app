@@ -6,229 +6,604 @@
     "InstallationPermissions": {
       "properties": {
         "actions": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "actions_variables": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "administration": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "attestations": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "blocking": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "checks": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "codespaces": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "codespaces_lifecycle_admin": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "codespaces_metadata": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "codespaces_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "codespaces_user_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "contents": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "content_references": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "copilot_messages": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "dependabot_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "deployments": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "discussions": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "emails": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "environments": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "followers": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "gists": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "git_signing_ssh_public_keys": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "gpg_keys": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "interaction_limits": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "issues": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "keys": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "metadata": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "members": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "merge_queues": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_actions_variables": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_administration": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_announcement_banners": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_api_insights": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_codespaces": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_codespaces_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_codespaces_settings": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_copilot_metrics": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_copilot_seat_management": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_custom_properties": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_custom_roles": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_custom_org_roles": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_dependabot_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_events": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_hooks": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_knowledge_bases": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_packages": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_personal_access_tokens": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_personal_access_token_requests": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_plan": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_pre_receive_hooks": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_projects": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_self_hosted_runners": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "organization_user_blocking": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "packages": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "pages": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "plan": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "profile": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "pull_requests": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "repository_advisories": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "repository_custom_properties": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "repository_hooks": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "repository_projects": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "repository_pre_receive_hooks": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "secrets": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "secret_scanning_alerts": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "security_events": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "single_file": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "starring": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "statuses": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "team_discussions": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "user_events": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "vulnerability_alerts": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "watching": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         },
         "workflows": {
-          "type": "string"
+          "type": "string",
+          "enum": [
+            "read",
+            "write",
+            "admin"
+          ]
         }
       },
       "additionalProperties": false,
