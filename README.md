@@ -691,7 +691,7 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 - **Issues**: `Read/Write`
 - **Merge queues**: `No Access`
 - **Metadata (Mandatory)**: `Read-only`
-- **Packages**: `Read/Write`
+- **Packages**: `Read/Write` (works with the GitHub API, but GHCR rejects App installation tokens for pushes; use `GITHUB_TOKEN` there, see [#840](https://github.com/octo-sts/app/issues/840))
 - **Pages**: `Read/Write`
 - **Projects**: `Read/Write`
 - **Pull requests**: `Read/Write`
