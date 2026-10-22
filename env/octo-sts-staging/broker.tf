@@ -29,7 +29,10 @@ module "cloudevent-recorder" {
   // we shouldn't fail to ingest the event, but instead just ignore those fields.
   ignore_unknown_values = true
 
-  retention-period = 90
+  // Policy cleanup consults the last 90 days of exchanges. Partitions expire
+  // by load day, so keep a few days more than that for the history to always
+  // cover the whole window.
+  retention-period = 95
 
   provisioner = "serviceAccount:${data.google_client_openid_userinfo.me.email}"
 
