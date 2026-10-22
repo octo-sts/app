@@ -43,6 +43,11 @@ func ListPolicies(ctx context.Context, client *github.Client, org, policyDir str
 				continue
 			}
 			p := Policy{Repo: repo, Identity: identity}
+			// Path history leaves out merge commits, so a policy merged with
+			// a merge commit (rather than squashed) gets its branch commit's
+			// date. A policy that sat on a branch for longer than the window
+			// can then look old on the day it lands; the cleanup PR's
+			// reviewer is the backstop for that.
 			commits, _, err := client.Repositories.ListCommits(ctx, org, repo, &github.CommitsListOptions{
 				Path:        path.Join(policyDir, e.GetName()),
 				ListOptions: github.ListOptions{PerPage: 1},

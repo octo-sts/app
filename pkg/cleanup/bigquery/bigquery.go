@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"cloud.google.com/go/civil"
 	"google.golang.org/api/iterator"
 
 	"github.com/octo-sts/app/pkg/cleanup"
@@ -34,11 +36,13 @@ FROM ` + "`%s`" + `
 WHERE _PARTITIONTIME >= TIMESTAMP_TRUNC(@since, DAY) AND time >= @since AND IFNULL(scope, '') != ''
 GROUP BY scope, identity`
 
-	// The oldest record only needs to be found when it is older than the
-	// window start, so only the partitions up to then are scanned.
-	historyStartQuery = `SELECT MIN(time) AS oldest
+	// daysQuery lists each UTC day with at least one exchange and its first
+	// exchange. It reads only the time column of the whole table, which is
+	// bounded by the table's retention.
+	daysQuery = `SELECT DATE(time) AS day, MIN(time) AS first
 FROM ` + "`%s`" + `
-WHERE _PARTITIONTIME < TIMESTAMP_ADD(TIMESTAMP_TRUNC(@since, DAY), INTERVAL 1 DAY)`
+WHERE time IS NOT NULL
+GROUP BY day`
 )
 
 // tableID matches "project.dataset.table". Project and table names may contain
@@ -61,8 +65,13 @@ func New(client *bigquery.Client, table string) (*Source, error) {
 
 // History is the exchange usage loaded for a window.
 type History struct {
-	// Start is the time of the oldest record found, or zero if there is no
-	// record before the window start.
+	// Start is where the unbroken exchange history begins: the first
+	// exchange of the earliest day in the run of consecutive days with
+	// exchanges that ends today or yesterday. It is zero when there is no
+	// such run. Event delivery is best effort, so a missing day means
+	// exchanges may have been lost; Start then moves past the gap and
+	// cleanup.Decide declines to decide over it. This assumes at least one
+	// exchange every UTC day, which a prober guarantees.
 	Start time.Time
 	// Usage holds the usage per organization, keyed by lowercased org name.
 	Usage map[string][]cleanup.Usage
@@ -77,9 +86,14 @@ func (h History) Orgs() []string {
 	return orgs
 }
 
-// Load reads every organization's usage since since, and how far back the
-// table's history goes.
-func (s *Source) Load(ctx context.Context, since time.Time) (History, error) {
+// For returns org's usage. The org name is matched case-insensitively.
+func (h History) For(org string) []cleanup.Usage {
+	return h.Usage[strings.ToLower(org)]
+}
+
+// Load reads every organization's usage since since, and where the unbroken
+// history before now begins.
+func (s *Source) Load(ctx context.Context, since, now time.Time) (History, error) {
 	params := []bigquery.QueryParameter{{Name: "since", Value: since}}
 
 	h := History{Usage: map[string][]cleanup.Usage{}}
@@ -100,20 +114,46 @@ func (s *Source) Load(ctx context.Context, since time.Time) (History, error) {
 		h.Usage[org] = append(h.Usage[org], u)
 	}
 
-	it, err = s.read(ctx, fmt.Sprintf(historyStartQuery, s.table), params)
+	it, err = s.read(ctx, fmt.Sprintf(daysQuery, s.table), nil)
 	if err != nil {
-		return History{}, fmt.Errorf("bigquery: querying history start: %w", err)
+		return History{}, fmt.Errorf("bigquery: querying history days: %w", err)
 	}
-	var r struct {
-		Oldest bigquery.NullTimestamp `bigquery:"oldest"`
+	firsts := map[civil.Date]time.Time{}
+	for {
+		var r struct {
+			Day   civil.Date `bigquery:"day"`
+			First time.Time  `bigquery:"first"`
+		}
+		err := it.Next(&r)
+		if errors.Is(err, iterator.Done) {
+			break
+		}
+		if err != nil {
+			return History{}, fmt.Errorf("bigquery: reading history days: %w", err)
+		}
+		firsts[r.Day] = r.First
 	}
-	if err := it.Next(&r); err != nil && !errors.Is(err, iterator.Done) {
-		return History{}, fmt.Errorf("bigquery: reading history start: %w", err)
-	}
-	if r.Oldest.Valid {
-		h.Start = r.Oldest.Timestamp
-	}
+	h.Start = unbrokenStart(firsts, now)
 	return h, nil
+}
+
+// unbrokenStart walks back from today, or from yesterday if today has no
+// exchanges yet, while every day has exchanges, and returns the first
+// exchange of the earliest day reached.
+func unbrokenStart(firsts map[civil.Date]time.Time, now time.Time) time.Time {
+	day := civil.DateOf(now.UTC())
+	if _, ok := firsts[day]; !ok {
+		day = day.AddDays(-1)
+	}
+	var start time.Time
+	for {
+		first, ok := firsts[day]
+		if !ok {
+			return start
+		}
+		start = first
+		day = day.AddDays(-1)
+	}
 }
 
 func (s *Source) read(ctx context.Context, sql string, params []bigquery.QueryParameter) (*bigquery.RowIterator, error) {
@@ -132,8 +172,9 @@ type usageRow struct {
 
 // usage converts a row, returning the lowercased org the scope belongs to.
 func (r usageRow) usage() (string, cleanup.Usage) {
-	org, _, _ := strings.Cut(r.Scope, "/")
-	u := cleanup.Usage{Scope: r.Scope, Identity: r.Identity.StringVal, LastError: r.LastError.StringVal}
+	scope := canonicalScope(r.Scope)
+	org, _, _ := strings.Cut(scope, "/")
+	u := cleanup.Usage{Scope: scope, Identity: r.Identity.StringVal, LastError: r.LastError.StringVal}
 	if r.LastSucceeded.Valid {
 		u.LastSucceeded = r.LastSucceeded.Timestamp
 	}
@@ -141,4 +182,15 @@ func (r usageRow) usage() (string, cleanup.Usage) {
 		u.LastFailed = r.LastFailed.Timestamp
 	}
 	return strings.ToLower(org), u
+}
+
+// canonicalScope resolves a recorded scope the way the exchange does, with
+// path.Dir and path.Base, so "acme//svc" and "./acme/svc" count as "acme/svc"
+// and "./acme" as "acme".
+func canonicalScope(scope string) string {
+	owner, repo := path.Dir(scope), path.Base(scope)
+	if owner == "." {
+		return repo
+	}
+	return owner + "/" + repo
 }
