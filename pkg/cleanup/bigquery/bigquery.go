@@ -36,23 +36,23 @@ FROM ` + "`%s`" + `
 WHERE _PARTITIONTIME >= TIMESTAMP_TRUNC(@since, DAY) AND time >= @since AND IFNULL(scope, '') != ''
 GROUP BY scope, identity`
 
-	// daysQuery lists each UTC day with at least one exchange and its first
-	// exchange. It reads only the time column of the whole table, which is
-	// bounded by the table's retention.
+	// daysQuery lists each UTC day with at least one exchange, along with its
+	// first and last exchange. It reads only the time column of the whole
+	// table, which is bounded by the table's retention.
 	daysQuery = `SELECT DATE(time) AS day, MIN(time) AS first, MAX(time) AS last
 FROM ` + "`%s`" + `
 WHERE time IS NOT NULL
 GROUP BY day`
 )
 
-// tableID matches "project.dataset.table". Project and table names may contain
-// hyphens (octo-sts.dev's table is "dev_octo-sts_exchange"); datasets may not.
 // MaxStaleness is how old the latest exchange may be before the history is
 // treated as stalled. The recorder loads events every 15 minutes and the
 // prober exchanges every few minutes, so a few hours of silence means events
 // stopped arriving.
 const MaxStaleness = 6 * time.Hour
 
+// tableID matches "project.dataset.table". Project and table names may contain
+// hyphens (octo-sts.dev's table is "dev_octo-sts_exchange"); datasets may not.
 var tableID = regexp.MustCompile(`^[A-Za-z0-9_-]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_-]+$`)
 
 // Source reads exchange events from one BigQuery table.
