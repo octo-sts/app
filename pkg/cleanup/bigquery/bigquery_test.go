@@ -254,7 +254,7 @@ func rows(w http.ResponseWriter, fields []string, values ...[]any) {
 		switch {
 		case f == "day":
 			typ = "DATE"
-		case f == "first", strings.HasPrefix(f, "last_") && f != "last_error":
+		case f == "first", f == "last", strings.HasPrefix(f, "last_") && f != "last_error":
 			typ = "TIMESTAMP"
 		}
 		schema = append(schema, map[string]string{"name": f, "type": typ})
@@ -291,15 +291,8 @@ func TestLoad(t *testing.T) {
 	bad := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
 	now := time.Date(2026, 10, 22, 13, 0, 0, 0, time.UTC)
 	oldest := time.Date(2026, 7, 23, 23, 55, 22, 0, time.UTC)
-	// Every day from oldest's through today has exchanges.
-	var dayRows [][]any
-	for d := civil.DateOf(oldest); !d.After(civil.DateOf(now)); d = d.AddDays(1) {
-		first := d.In(time.UTC).Add(time.Hour)
-		if d == civil.DateOf(oldest) {
-			first = oldest
-		}
-		dayRows = append(dayRows, []any{d, first})
-	}
+	latest := now.Add(-20 * time.Minute)
+	dayRows := days(oldest, latest)
 
 	s := fakeBigQuery(t, since,
 		func(w http.ResponseWriter) {
@@ -310,14 +303,15 @@ func TestLoad(t *testing.T) {
 				[]any{"./acme", "release", ok, nil, nil},
 			)
 		},
-		func(w http.ResponseWriter) { rows(w, []string{"day", "first"}, dayRows...) },
+		func(w http.ResponseWriter) { rows(w, dayFields, dayRows...) },
 	)
 	got, err := s.Load(t.Context(), since, now)
 	if err != nil {
 		t.Fatalf("Load() = %v", err)
 	}
 	want := History{
-		Start: oldest,
+		Start:  oldest,
+		Latest: latest,
 		Usage: map[string][]cleanup.Usage{
 			"acme": {
 				{Scope: "Acme/svc", Identity: "deploy", LastSucceeded: ok},
@@ -336,15 +330,67 @@ func TestLoadNoHistory(t *testing.T) {
 	since := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
 	s := fakeBigQuery(t, since,
 		func(w http.ResponseWriter) { rows(w, usageFields) },
-		func(w http.ResponseWriter) { rows(w, []string{"day", "first"}) },
+		func(w http.ResponseWriter) { rows(w, dayFields) },
 	)
 	got, err := s.Load(t.Context(), since, time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("Load() = %v", err)
 	}
-	if !got.Start.IsZero() || len(got.Usage) != 0 {
-		t.Errorf("Load() = %+v, want no start and no usage", got)
+	if !got.Start.IsZero() || !got.Latest.IsZero() || len(got.Usage) != 0 {
+		t.Errorf("Load() = %+v, want no start, no latest and no usage", got)
 	}
+}
+
+func TestLoadStaleness(t *testing.T) {
+	since := time.Date(2026, 7, 24, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 10, 22, 13, 0, 0, 0, time.UTC)
+	oldest := time.Date(2026, 7, 20, 0, 5, 0, 0, time.UTC)
+	for name, tc := range map[string]struct {
+		age       time.Duration
+		wantStart bool
+	}{
+		"fresh":                   {age: 20 * time.Minute, wantStart: true},
+		"just inside the limit":   {age: MaxStaleness, wantStart: true},
+		"stalled earlier today":   {age: MaxStaleness + time.Minute},
+		"stalled early yesterday": {age: 30 * time.Hour},
+	} {
+		t.Run(name, func(t *testing.T) {
+			latest := now.Add(-tc.age)
+			s := fakeBigQuery(t, since,
+				func(w http.ResponseWriter) { rows(w, usageFields) },
+				func(w http.ResponseWriter) { rows(w, dayFields, days(oldest, latest)...) },
+			)
+			got, err := s.Load(t.Context(), since, now)
+			if err != nil {
+				t.Fatalf("Load() = %v", err)
+			}
+			if !got.Latest.Equal(latest) {
+				t.Errorf("Latest = %v, want %v", got.Latest, latest)
+			}
+			if gotStart := !got.Start.IsZero(); gotStart != tc.wantStart {
+				t.Errorf("Start = %v, want set: %t", got.Start, tc.wantStart)
+			}
+		})
+	}
+}
+
+var dayFields = []string{"day", "first", "last"}
+
+// days returns a row for every UTC day from oldest's through latest's, each
+// with exchanges from oldest (on its day) and until latest (on its day).
+func days(oldest, latest time.Time) [][]any {
+	var out [][]any
+	for d := civil.DateOf(oldest); !d.After(civil.DateOf(latest)); d = d.AddDays(1) {
+		first, last := d.In(time.UTC).Add(time.Hour), d.In(time.UTC).Add(23*time.Hour)
+		if d == civil.DateOf(oldest) {
+			first = oldest
+		}
+		if d == civil.DateOf(latest) {
+			last = latest
+		}
+		out = append(out, []any{d, first, last})
+	}
+	return out
 }
 
 func TestLoadErrors(t *testing.T) {
@@ -354,7 +400,7 @@ func TestLoadErrors(t *testing.T) {
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprint(w, `{"error":{"code":400,"message":"bad query","errors":[{"reason":"invalidQuery"}]}}`)
 	}
-	empty := func(w http.ResponseWriter) { rows(w, []string{"day", "first"}) }
+	empty := func(w http.ResponseWriter) { rows(w, dayFields) }
 	for name, tc := range map[string]struct {
 		usage, history func(http.ResponseWriter)
 		wantErr        string

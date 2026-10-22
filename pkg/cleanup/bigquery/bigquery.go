@@ -36,14 +36,20 @@ FROM ` + "`%s`" + `
 WHERE _PARTITIONTIME >= TIMESTAMP_TRUNC(@since, DAY) AND time >= @since AND IFNULL(scope, '') != ''
 GROUP BY scope, identity`
 
-	// daysQuery lists each UTC day with at least one exchange and its first
-	// exchange. It reads only the time column of the whole table, which is
-	// bounded by the table's retention.
-	daysQuery = `SELECT DATE(time) AS day, MIN(time) AS first
+	// daysQuery lists each UTC day with at least one exchange, along with its
+	// first and last exchange. It reads only the time column of the whole
+	// table, which is bounded by the table's retention.
+	daysQuery = `SELECT DATE(time) AS day, MIN(time) AS first, MAX(time) AS last
 FROM ` + "`%s`" + `
 WHERE time IS NOT NULL
 GROUP BY day`
 )
+
+// MaxStaleness is how old the latest exchange may be before the history is
+// treated as stalled. The recorder loads events every 15 minutes and the
+// prober exchanges every few minutes, so a few hours of silence means events
+// stopped arriving.
+const MaxStaleness = 6 * time.Hour
 
 // tableID matches "project.dataset.table". Project and table names may contain
 // hyphens (octo-sts.dev's table is "dev_octo-sts_exchange"); datasets may not.
@@ -70,9 +76,13 @@ type History struct {
 	// exchanges that ends today or yesterday. It is zero when there is no
 	// such run. Event delivery is best effort, so a missing day means
 	// exchanges may have been lost; Start then moves past the gap and
-	// cleanup.Decide declines to decide over it. This assumes at least one
-	// exchange every UTC day, which a prober guarantees.
+	// cleanup.Decide declines to decide over it. Start is also zero when the
+	// latest exchange is older than MaxStaleness, so a load that stalled
+	// earlier today or yesterday is caught too. This assumes exchanges
+	// arrive at least every few hours, which a prober guarantees.
 	Start time.Time
+	// Latest is the time of the most recent exchange, or zero if none.
+	Latest time.Time
 	// Usage holds the usage per organization, keyed by lowercased org name.
 	Usage map[string][]cleanup.Usage
 }
@@ -123,6 +133,7 @@ func (s *Source) Load(ctx context.Context, since, now time.Time) (History, error
 		var r struct {
 			Day   civil.Date `bigquery:"day"`
 			First time.Time  `bigquery:"first"`
+			Last  time.Time  `bigquery:"last"`
 		}
 		err := it.Next(&r)
 		if errors.Is(err, iterator.Done) {
@@ -132,8 +143,13 @@ func (s *Source) Load(ctx context.Context, since, now time.Time) (History, error
 			return History{}, fmt.Errorf("bigquery: reading history days: %w", err)
 		}
 		firsts[r.Day] = r.First
+		if r.Last.After(h.Latest) {
+			h.Latest = r.Last
+		}
 	}
-	h.Start = unbrokenStart(firsts, now)
+	if now.Sub(h.Latest) <= MaxStaleness {
+		h.Start = unbrokenStart(firsts, now)
+	}
 	return h, nil
 }
 

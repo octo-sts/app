@@ -171,6 +171,10 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 		}
 	}
 
+	if n := len(fileAlias.FindAllString(query, -1)); n > historyPerQuery {
+		t.Errorf("query asks for %d history lookups, more than %d", n, historyPerQuery)
+	}
+
 	// Each repository block lists its files on the following lines.
 	blocks := historyAlias.FindAllStringSubmatchIndex(query, -1)
 	for i, b := range blocks {
@@ -248,6 +252,40 @@ func TestListPoliciesBatches(t *testing.T) {
 	}
 	if n := queries.Load(); n != 5 {
 		t.Errorf("GraphQL queries = %d, want 5 (three directory queries, two history queries)", n)
+	}
+}
+
+func TestListPoliciesManyPolicies(t *testing.T) {
+	// 280 policies in two repositories need three history queries, and the
+	// first repository's policies span two of them.
+	repos := []fakeRepo{{owner: "acme", name: ".github", dates: map[string]time.Time{}}, {owner: "acme", name: "svc", dates: map[string]time.Time{}}}
+	for i, n := range []int{250, 30} {
+		for j := range n {
+			name := fmt.Sprintf("p%03d.sts.yaml", j)
+			repos[i].entries = append(repos[i].entries, entry{name, "blob"})
+			repos[i].dates[name] = changed.Add(time.Duration(i*1000+j) * time.Minute)
+		}
+	}
+	client, queries := fakeGitHub(t, repos, nil, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err != nil {
+		t.Fatalf("ListPolicies() = %v", err)
+	}
+	if len(got) != 280 {
+		t.Fatalf("ListPolicies() returned %d policies, want 280", len(got))
+	}
+	for k, p := range got {
+		i, j := 0, k
+		if k >= 250 {
+			i, j = 1, k-250
+		}
+		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute)}
+		if p != want {
+			t.Fatalf("policy %d = %+v, want %+v", k, p, want)
+		}
+	}
+	if n := queries.Load(); n != 4 {
+		t.Errorf("GraphQL queries = %d, want 4 (one directory query, three history queries)", n)
 	}
 }
 
