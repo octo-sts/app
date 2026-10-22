@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httputil"
@@ -4751,6 +4752,87 @@ func TestNoPolicyChangesTruncatedProbeCountsAsPolicies(t *testing.T) {
 
 			if len(g.created) != tc.wantChecks {
 				t.Fatalf("expected %d check runs, got %d", tc.wantChecks, len(g.created))
+			}
+		})
+	}
+}
+
+// TestWebhookInstallationTokenRefused covers GitHub refusing to mint an
+// installation token. A plain 403 means the installation cannot act until its
+// owner fixes it, so the delivery is acknowledged with GitHub's reason logged.
+// A rate-limit 403 and other failures still fail the delivery.
+func TestWebhookInstallationTokenRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		status     int
+		header     map[string]string
+		body       string
+		wantStatus int
+		wantLog    string
+	}{
+		{name: "suspended", status: http.StatusForbidden, body: `{"message":"This installation has been suspended"}`, wantStatus: http.StatusAccepted, wantLog: "This installation has been suspended"},
+		{name: "non-JSON body", status: http.StatusForbidden, body: "forbidden by policy\n", wantStatus: http.StatusAccepted, wantLog: "forbidden by policy"},
+		{name: "oversized body", status: http.StatusForbidden, body: strings.Repeat("x", 4096), wantStatus: http.StatusAccepted, wantLog: strings.Repeat("x", maxRefusalMessage)},
+		{name: "rate limit remaining", status: http.StatusForbidden, header: map[string]string{"X-RateLimit-Remaining": "0"}, body: `{"message":"API rate limit exceeded"}`, wantStatus: http.StatusInternalServerError},
+		{name: "retry after", status: http.StatusForbidden, header: map[string]string{"Retry-After": "60"}, body: `{"message":"secondary rate limit"}`, wantStatus: http.StatusInternalServerError},
+		{name: "unauthorized", status: http.StatusUnauthorized, body: `{"message":"Bad credentials"}`, wantStatus: http.StatusInternalServerError},
+		{name: "server error", status: http.StatusInternalServerError, body: `{"message":"oops"}`, wantStatus: http.StatusInternalServerError},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /app/installations/1111/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+				for k, v := range tc.header {
+					w.Header().Set(k, v)
+				}
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+				http.NotFound(w, r)
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+			secret := []byte("hunter2")
+			v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+
+			body, err := json.Marshal(github.PushEvent{
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo:         &github.PushEventRepository{Owner: &github.User{Login: new("foo")}, Name: new("bar")},
+				Before:       new("1234"),
+				After:        new("5678"),
+				Commits:      []*github.HeadCommit{{Added: []string{".github/chainguard/test.sts.yaml"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			ctx := clog.WithLogger(context.Background(), clog.New(slog.NewTextHandler(&logs, nil)))
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", bytes.NewReader(body))
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			v.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; logs:\n%s", rec.Code, tc.wantStatus, logs.String())
+			}
+			if tc.wantLog == "" {
+				return
+			}
+			out := logs.String()
+			if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "installation_id=1111") || !strings.Contains(out, tc.wantLog) {
+				t.Fatalf("logs missing warning with installation and %q:\n%s", tc.wantLog, out)
+			}
+			if strings.Contains(out, tc.wantLog+"x") {
+				t.Fatalf("logged message exceeds %d bytes:\n%s", maxRefusalMessage, out)
 			}
 		})
 	}

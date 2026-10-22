@@ -6,6 +6,7 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -426,6 +427,39 @@ func isBotSender(sender *github.User) bool {
 	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
 }
 
+// maxRefusalMessage caps how much of GitHub's response to a refused token
+// mint is read and logged.
+const maxRefusalMessage = 1024
+
+// installationRefused reports whether err comes from GitHub refusing to mint
+// an installation token with a 403 that is not a rate limit, for example a
+// suspended installation or an org IP allow list. Such an installation cannot
+// act until its owner fixes it, so retrying the delivery cannot help. It
+// returns GitHub's message and closes the response body, which ghinstallation
+// leaves open on non-2xx responses.
+func installationRefused(err error) (int64, string, bool) {
+	var refused *ghinstallation.HTTPError
+	if !errors.As(err, &refused) || refused.Response == nil || refused.Response.StatusCode != http.StatusForbidden {
+		return 0, "", false
+	}
+	resp := refused.Response
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "" {
+		return 0, "", false
+	}
+	if resp.Body == nil {
+		return refused.InstallationID, "", true
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRefusalMessage))
+	var body struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(raw, &body) == nil && body.Message != "" {
+		return refused.InstallationID, body.Message, true
+	}
+	return refused.InstallationID, strings.TrimSpace(string(raw)), true
+}
+
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := clog.FromContext(r.Context()).With(
 		HeaderDelivery, r.Header.Get(HeaderDelivery),
@@ -484,6 +518,11 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		log.Infof("unsupported event type: %s", eventType)
 		// Use accepted as "we got it but didn't do anything"
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if id, reason, ok := installationRefused(err); ok {
+		log.Warn("GitHub refused the installation token; skipping event", "installation_id", id, "reason", reason)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
