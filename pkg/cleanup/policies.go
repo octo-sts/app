@@ -20,10 +20,13 @@ import (
 const (
 	policySuffix = ".sts.yaml"
 
-	// batchSize is how many repositories one GraphQL query covers. Each
-	// query costs about a point per hundred policy files, so the batch only
-	// bounds the query's size.
+	// batchSize is how many repositories one directory query covers.
 	batchSize = 50
+
+	// historyPerQuery caps the history lookups in one query. A query costs
+	// about a point per hundred lookups, so this bounds its size, not its
+	// cost.
+	historyPerQuery = 100
 )
 
 // ListPolicies returns the trust policies in every repository of org that the
@@ -134,47 +137,51 @@ func policyFiles(ctx context.Context, client *github.Client, org, policyDir stri
 // lands; the cleanup PR's reviewer is the backstop for that.
 func lastChanged(ctx context.Context, client *github.Client, org, policyDir string, repos []string, files [][]string) ([][]time.Time, error) {
 	changed := make([][]time.Time, len(repos))
-	var q strings.Builder
-	q.WriteString("query {\n")
-	asked := 0
-	for i, repo := range repos {
-		changed[i] = make([]time.Time, len(files[i]))
-		if len(files[i]) == 0 {
-			continue
-		}
-		asked++
-		fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { target { ... on Commit {\n", i, quote(org), quote(repo))
-		for j, name := range files[i] {
-			fmt.Fprintf(&q, "    f%d: history(first: 1, path: %s) { nodes { committedDate } }\n", j, quote(path.Join(policyDir, name)))
-		}
-		q.WriteString("  } } } }\n")
-	}
-	q.WriteString("}")
-
-	if asked == 0 {
-		return changed, nil // No policies in this batch.
-	}
-
-	var data map[string]*struct {
-		DefaultBranchRef *struct {
-			Target map[string]struct {
-				Nodes []struct {
-					CommittedDate time.Time `json:"committedDate"`
-				} `json:"nodes"`
-			} `json:"target"`
-		} `json:"defaultBranchRef"`
-	}
-	if err := graphql(ctx, client, q.String(), &data); err != nil {
-		return nil, fmt.Errorf("cleanup: last changes in %s: %w", org, err)
-	}
+	type ref struct{ repo, file int }
+	var refs []ref
 	for i := range repos {
-		r := data[fmt.Sprintf("r%d", i)]
-		if r == nil || r.DefaultBranchRef == nil {
-			continue
-		}
+		changed[i] = make([]time.Time, len(files[i]))
 		for j := range files[i] {
-			if h := r.DefaultBranchRef.Target[fmt.Sprintf("f%d", j)]; len(h.Nodes) > 0 {
-				changed[i][j] = h.Nodes[0].CommittedDate
+			refs = append(refs, ref{i, j})
+		}
+	}
+
+	// Each history lookup is its own field, so cap them per query rather
+	// than per repository: a few repositories with many policies would
+	// otherwise build one query large enough to time out on every run.
+	for chunk := range slices.Chunk(refs, historyPerQuery) {
+		var q strings.Builder
+		q.WriteString("query {\n")
+		for k, r := range chunk {
+			if k == 0 || chunk[k-1].repo != r.repo {
+				if k > 0 {
+					q.WriteString("  } } } }\n")
+				}
+				fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { target { ... on Commit {\n", r.repo, quote(org), quote(repos[r.repo]))
+			}
+			fmt.Fprintf(&q, "    f%d: history(first: 1, path: %s) { nodes { committedDate } }\n", r.file, quote(path.Join(policyDir, files[r.repo][r.file])))
+		}
+		q.WriteString("  } } } }\n}")
+
+		var data map[string]*struct {
+			DefaultBranchRef *struct {
+				Target map[string]struct {
+					Nodes []struct {
+						CommittedDate time.Time `json:"committedDate"`
+					} `json:"nodes"`
+				} `json:"target"`
+			} `json:"defaultBranchRef"`
+		}
+		if err := graphql(ctx, client, q.String(), &data); err != nil {
+			return nil, fmt.Errorf("cleanup: last changes in %s: %w", org, err)
+		}
+		for _, r := range chunk {
+			d := data[fmt.Sprintf("r%d", r.repo)]
+			if d == nil || d.DefaultBranchRef == nil {
+				continue
+			}
+			if h := d.DefaultBranchRef.Target[fmt.Sprintf("f%d", r.file)]; len(h.Nodes) > 0 {
+				changed[r.repo][r.file] = h.Nodes[0].CommittedDate
 			}
 		}
 	}
