@@ -4837,3 +4837,140 @@ func TestWebhookInstallationTokenRefused(t *testing.T) {
 		})
 	}
 }
+
+type tokenRefusalRoundTripper func(*http.Request) (*http.Response, error)
+
+func (f tokenRefusalRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+type tokenRefusalBody struct {
+	*strings.Reader
+	closeCalls int
+	bytesRead  int
+}
+
+func (b *tokenRefusalBody) Read(p []byte) (int, error) {
+	n, err := b.Reader.Read(p)
+	b.bytesRead += n
+	return n, err
+}
+
+func (b *tokenRefusalBody) Close() error { b.closeCalls++; return nil }
+
+func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, shape := range []struct {
+		name   string
+		forced bool
+		files  []string
+	}{
+		{name: "ordinary policy push", files: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"}},
+		{name: "forced rewind", forced: true},
+		{name: "forced policy push", forced: true, files: []string{".github/chainguard/a.sts.yaml"}},
+	} {
+		for _, failure := range []struct {
+			name       string
+			header     http.Header
+			wantStatus int
+		}{
+			{name: "refused", wantStatus: http.StatusAccepted},
+			{name: "primary rate limit", header: http.Header{"X-Ratelimit-Remaining": {"0"}}, wantStatus: http.StatusInternalServerError},
+			{name: "secondary rate limit", header: http.Header{"Retry-After": {"60"}}, wantStatus: http.StatusInternalServerError},
+		} {
+			t.Run(shape.name+"/"+failure.name, func(t *testing.T) {
+				var bodies []*tokenRefusalBody
+				base := tokenRefusalRoundTripper(func(r *http.Request) (*http.Response, error) {
+					if r.Method != http.MethodPost || r.URL.Path != "/app/installations/1111/access_tokens" {
+						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
+						return nil, fmt.Errorf("unexpected API request")
+					}
+					body := &tokenRefusalBody{Reader: strings.NewReader(`{"message":"installation suspended"}`)}
+					bodies = append(bodies, body)
+					return &http.Response{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: failure.header.Clone(), Body: body, Request: r}, nil
+				})
+				ce := &fakeCEClient{}
+				emitter := newPolicyEmitter(ce, 1, 16)
+				t.Cleanup(func() { drainEvents(t, emitter, ce) })
+				secret := []byte("test-secret")
+				v := &Validator{Transport: ghinstallation.NewAppsTransportFromPrivateKey(base, 1234, key), WebhookSecret: [][]byte{secret}, Emitter: emitter}
+				event := github.PushEvent{
+					Installation: &github.Installation{ID: new(int64(1111))},
+					Repo:         &github.PushEventRepository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), DefaultBranch: new("main")},
+					Ref:          new("refs/heads/main"), Before: new("1234"), After: new("5678"), Forced: new(shape.forced),
+				}
+				if len(shape.files) > 0 {
+					event.Commits = []*github.HeadCommit{{Added: shape.files}}
+				}
+				payload, err := json.Marshal(event)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var logs bytes.Buffer
+				ctx := clog.WithLogger(context.Background(), clog.New(slog.NewTextHandler(&logs, nil)))
+				req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/", bytes.NewReader(payload))
+				req.Header.Set("X-Hub-Signature", signature(secret, payload))
+				req.Header.Set("X-GitHub-Event", "push")
+				req.Header.Set("Content-Type", "application/json")
+				rec := httptest.NewRecorder()
+				v.ServeHTTP(rec, req)
+				if rec.Code != failure.wantStatus {
+					t.Fatalf("status = %d, want %d; logs: %s", rec.Code, failure.wantStatus, logs.String())
+				}
+				if len(bodies) != 1 {
+					t.Fatalf("token requests = %d, want 1", len(bodies))
+				}
+				if bodies[0].closeCalls != 1 {
+					t.Errorf("body closed %d times, want 1", bodies[0].closeCalls)
+				}
+				if failure.wantStatus == http.StatusAccepted {
+					for _, want := range []string{"level=WARN", "installation_id=1111", "installation suspended"} {
+						if !strings.Contains(logs.String(), want) {
+							t.Errorf("logs missing %q: %s", want, logs.String())
+						}
+					}
+					if strings.Contains(logs.String(), "level=ERROR") {
+						t.Errorf("refusal emitted ERROR: %s", logs.String())
+					}
+				}
+				events := drainEvents(t, emitter, ce)
+				wantEvents := len(shape.files)
+				if shape.forced {
+					wantEvents++
+				}
+				if len(events) != wantEvents {
+					t.Fatalf("audit events = %d, want %d", len(events), wantEvents)
+				}
+				for i, event := range events {
+					var pe PolicyEvent
+					if err := event.DataAs(&pe); err != nil {
+						t.Fatal(err)
+					}
+					if pe.Valid != nil || pe.PushError == "" {
+						t.Errorf("event %d must have unknown validity and a push error: %+v", i, pe)
+					}
+					if shape.forced && i == 0 {
+						if pe.Detection != DetectionDegraded || pe.DetectionError == "" || pe.Change != nil {
+							t.Errorf("missing degraded marker: %+v", pe)
+						}
+					} else if pe.Change == nil {
+						t.Errorf("event %d lost its policy change", i)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestInstallationRefusedBoundsReadAndClosesBody(t *testing.T) {
+	body := &tokenRefusalBody{Reader: strings.NewReader(strings.Repeat("x", 4096))}
+	err := fmt.Errorf("wrapped: %w", &ghinstallation.HTTPError{InstallationID: 1111, Response: &http.Response{StatusCode: http.StatusForbidden, Body: body}})
+	id, reason, ok := installationRefused(err)
+	if !ok || id != 1111 || reason != strings.Repeat("x", maxRefusalMessage) {
+		t.Fatalf("got (%d, %q, %v)", id, reason, ok)
+	}
+	if body.bytesRead != maxRefusalMessage || body.closeCalls != 1 {
+		t.Errorf("read %d bytes and closed %d times", body.bytesRead, body.closeCalls)
+	}
+}

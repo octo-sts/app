@@ -181,9 +181,9 @@ func (e *Validator) policyChangesFromPR(ctx context.Context, client *github.Clie
 // repository's policy directory at sha is returned as PolicyPresent instead,
 // so all of them are validated. That scan cannot see deletions, which is safe:
 // it validates everything live at sha rather than only what changed. A rate
-// limit during that scan is returned as is. Any other scan failure returns a
-// *prTooLargeError with scanErr set, so the caller can fail the check run
-// rather than skip it.
+// limit or token-mint 403 during that scan is returned as is. Any other scan
+// failure returns a *prTooLargeError with scanErr set, so the caller can fail
+// the check run rather than skip it.
 func (e *Validator) prPolicyChanges(ctx context.Context, client *github.Client, prOwner, prRepo string, number int, sha, readOwner, readRepo, classifyRepo string) ([]PolicyChange, error) {
 	changes, err := e.policyChangesFromPR(ctx, client, prOwner, prRepo, number, sha, classifyRepo)
 	tooLarge, ok := errors.AsType[*prTooLargeError](err)
@@ -193,7 +193,7 @@ func (e *Validator) prPolicyChanges(ctx context.Context, client *github.Client, 
 	clog.FromContext(ctx).Warnf("%v; validating every policy in %s/%s@%s instead", tooLarge, readOwner, readRepo, sha)
 	snapshot, err := e.policyTreeSnapshotAs(ctx, client, readOwner, readRepo, classifyRepo, sha)
 	if err != nil {
-		if isProvenWebhookRateLimit(err) {
+		if installationToken403(err) != nil || isProvenWebhookRateLimit(err) {
 			return nil, err
 		}
 		return nil, &prTooLargeError{number: tooLarge.number, count: tooLarge.count, scanErr: err}
