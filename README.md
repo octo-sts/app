@@ -74,6 +74,38 @@ permissions:
   issues: write
 ```
 
+The same policy with GitHub's
+[immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims),
+which embed the owner and repository IDs in the subject
+(`repo:<owner>@<owner-id>/<repo>@<repo-id>:...`):
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+subject: repo:chainguard-dev@87436699/foo@123456789:ref:refs/heads/main
+
+permissions:
+  contents: read
+  issues: write
+```
+
+Unlike the name-only subject, an immutable subject cannot be matched by a
+different organization or repository that later takes over the same name, so
+we recommend it for GitHub Actions trust policies.
+
+Which form a repository's tokens carry depends on the repository. Per GitHub's
+[changelog](https://github.blog/changelog/2026-04-23-immutable-subject-claims-for-github-actions-oidc-tokens/),
+repositories created, renamed or transferred after July 15, 2026 use immutable
+subject claims by default. Older repositories keep the name-only subject
+(`repo:<owner>/<repo>:...`) until someone opts in, so a policy written for one
+form does not match tokens of the other and the token exchange fails. To check
+or change the setting for a repository, open its
+`https://github.com/<owner>/<repo>/settings/actions/oidc-configuration` page
+and check **Use immutable subject claim**. The page also shows the exact
+**Default subject claim prefix** (for example
+`repo:chainguard-dev@87436699/foo@123456789`) to use in your trust policy.
+
 The Trust Policy can also match the issuer, subject, and even custom claims with
 regular expressions. For example:
 
@@ -116,6 +148,22 @@ repository_ids:
   - 123456789 # chainguard-dev/foo
 ```
 
+With [immutable subject claims](#the-trust-policy), the subject carries the
+repository ID, so an exact `subject` can name the repository instead:
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+subject: repo:chainguard-dev@87436699/foo@123456789:ref:refs/heads/main
+
+permissions:
+  contents: read
+
+repository_ids:
+  - 123456789 # chainguard-dev/foo
+```
+
 IDs keep a policy working across a repository rename, and a repository
 recreated under a deleted one's name does not inherit its access. Get an ID with
 `gh api repos/{owner}/{repo} --jq .id`.
@@ -124,7 +172,8 @@ To rename a repository scoped by name, rename it first, then update
 `repositories` right away. Adding the new name ahead of the rename breaks the
 policy: GitHub refuses the whole token request while any listed repository does
 not exist. Patterns on the repository name, such as `subject`, change on rename
-too. Matching the `repository_id` claim, as above, avoids that.
+too, including immutable subjects, which keep the owner and repository names
+next to their IDs. Matching the `repository_id` claim, as above, avoids that.
 
 #### Autocomplete
 
@@ -501,6 +550,8 @@ pin the App that mints its tokens:
 # yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.TrustPolicy.json
 issuer: https://token.actions.githubusercontent.com
 subject: repo:my-org/my-repo:ref:refs/heads/main
+# or, with immutable subject claims:
+# subject: repo:my-org@12345678/my-repo@123456789:ref:refs/heads/main
 
 permissions:
   contents: read
@@ -659,7 +710,9 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 
 - **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements.
 
-- **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org/repo:ref:refs/heads/main` instead of `repo:org/repo:.*`.
+- **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org@<org-id>/repo@<repo-id>:ref:refs/heads/main` instead of `repo:org@<org-id>/repo@<repo-id>:.*`.
+
+- **Use immutable subject claims**: For GitHub Actions, enable [immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims) so a policy cannot be satisfied by a different repository or organization that reuses the same name. On an existing repository, update its trust policies to the immutable subject at the same time, since tokens stop matching name-only subjects once the setting is on.
 
 #### Token Management
 
