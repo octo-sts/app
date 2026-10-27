@@ -447,6 +447,9 @@ func installationToken403(err error) *ghinstallation.HTTPError {
 // act until its owner fixes it, so retrying the delivery cannot help. It
 // returns GitHub's message and closes the response body, which ghinstallation
 // leaves open on non-2xx responses.
+//
+// A secondary rate limit may carry neither rate-limit header and is marked
+// only by the body's documentation_url, which go-github matches the same way.
 func installationRefused(err error) (int64, string, bool) {
 	refused := installationToken403(err)
 	if refused == nil {
@@ -464,12 +467,19 @@ func installationRefused(err error) (int64, string, bool) {
 	}
 	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRefusalMessage))
 	var body struct {
-		Message string `json:"message"`
+		Message          string `json:"message"`
+		DocumentationURL string `json:"documentation_url"`
 	}
-	if json.Unmarshal(raw, &body) == nil && body.Message != "" {
-		return refused.InstallationID, body.Message, true
+	if json.Unmarshal(raw, &body) != nil {
+		return refused.InstallationID, strings.TrimSpace(string(raw)), true
 	}
-	return refused.InstallationID, strings.TrimSpace(string(raw)), true
+	if strings.HasSuffix(body.DocumentationURL, "#abuse-rate-limits") || strings.HasSuffix(body.DocumentationURL, "secondary-rate-limits") {
+		return 0, "", false
+	}
+	if body.Message == "" {
+		return refused.InstallationID, strings.TrimSpace(string(raw)), true
+	}
+	return refused.InstallationID, body.Message, true
 }
 
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -915,21 +925,22 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	var changes []PolicyChange
 	detection := DetectionCommits
 	var detectionErr string
+	// tokenErr holds a token-mint 403 hit while discovering changes. The push
+	// is recorded as degraded and the error goes back to ServeHTTP once the
+	// audit emit is registered, so the gap stays visible in the audit trail.
+	var tokenErr error
 
 	switch {
 	case event.GetForced() && isDefaultBranch:
 		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
 		if serr != nil {
 			if installationToken403(serr) != nil {
-				// Preserve the audit gap before returning the token failure to ServeHTTP.
-				if e.Emitter != nil {
-					known := e.policyChangesFromPushEvent(repo, event)
-					if live != nil {
-						known = policiesPresent(live)
-					}
-					e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, known, DetectionDegraded, serr.Error(), validationOutcome{incomplete: serr})
+				detection, detectionErr, tokenErr = DetectionDegraded, serr.Error(), serr
+				changes = e.policyChangesFromPushEvent(repo, event)
+				if live != nil {
+					changes = policiesPresent(live)
 				}
-				return nil, serr
+				break
 			}
 			// Most often the pre-push SHA is no longer reachable, which GitHub
 			// is free to garbage collect after a rewind, so the diff cannot be
@@ -963,6 +974,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	case event.GetBefore() == zeroHash:
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				log.Warnf("rate-limited discovering policies for new ref %s/%s@%s; recording degraded detection", owner, repo, sha)
 				detection, detectionErr = DetectionDegraded, err.Error()
@@ -975,6 +990,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
 				break
@@ -983,6 +1002,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		}
 		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
 				break
@@ -1007,6 +1030,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		defer func() {
 			e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, changes, detection, detectionErr, outcome)
 		}()
+	}
+	if tokenErr != nil {
+		outcome = validationOutcome{incomplete: tokenErr}
+		return nil, tokenErr
 	}
 
 	// Deletions leave nothing to read at the head SHA, so a push that only

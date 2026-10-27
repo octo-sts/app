@@ -4862,20 +4862,28 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, shape := range []struct {
-		name   string
-		forced bool
-		files  []string
+		name     string
+		forced   bool
+		before   string
+		commits  int // empty commits, enough to skip the commit-list fast path
+		files    []string
+		degraded bool // a degraded audit marker precedes any policy events
 	}{
 		{name: "ordinary policy push", files: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"}},
-		{name: "forced rewind", forced: true},
-		{name: "forced policy push", forced: true, files: []string{".github/chainguard/a.sts.yaml"}},
+		{name: "forced rewind", forced: true, degraded: true},
+		{name: "forced policy push", forced: true, files: []string{".github/chainguard/a.sts.yaml"}, degraded: true},
+		{name: "new ref", before: zeroHash, commits: 20, degraded: true},
+		{name: "long push", commits: 20, degraded: true},
 	} {
 		for _, failure := range []struct {
 			name       string
 			header     http.Header
+			body       string
 			wantStatus int
 		}{
 			{name: "refused", wantStatus: http.StatusAccepted},
+			{name: "secondary rate limit body", body: `{"message":"You have exceeded a secondary rate limit","documentation_url":"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`, wantStatus: http.StatusInternalServerError},
+			{name: "abuse rate limit body", body: `{"message":"You have triggered an abuse detection mechanism","documentation_url":"https://docs.github.com/rest/overview/resources-in-the-rest-api#abuse-rate-limits"}`, wantStatus: http.StatusInternalServerError},
 			{name: "primary rate limit", header: http.Header{"X-Ratelimit-Remaining": {"0"}}, wantStatus: http.StatusInternalServerError},
 			{name: "secondary rate limit", header: http.Header{"Retry-After": {"60"}}, wantStatus: http.StatusInternalServerError},
 		} {
@@ -4886,7 +4894,11 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 						t.Errorf("unexpected API request: %s %s", r.Method, r.URL.Path)
 						return nil, fmt.Errorf("unexpected API request")
 					}
-					body := &tokenRefusalBody{Reader: strings.NewReader(`{"message":"installation suspended"}`)}
+					raw := failure.body
+					if raw == "" {
+						raw = `{"message":"installation suspended"}`
+					}
+					body := &tokenRefusalBody{Reader: strings.NewReader(raw)}
 					bodies = append(bodies, body)
 					return &http.Response{StatusCode: http.StatusForbidden, Status: "403 Forbidden", Header: failure.header.Clone(), Body: body, Request: r}, nil
 				})
@@ -4899,6 +4911,12 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 					Installation: &github.Installation{ID: new(int64(1111))},
 					Repo:         &github.PushEventRepository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), DefaultBranch: new("main")},
 					Ref:          new("refs/heads/main"), Before: new("1234"), After: new("5678"), Forced: new(shape.forced),
+				}
+				if shape.before != "" {
+					event.Before = new(shape.before)
+				}
+				for range shape.commits {
+					event.Commits = append(event.Commits, &github.HeadCommit{})
 				}
 				if len(shape.files) > 0 {
 					event.Commits = []*github.HeadCommit{{Added: shape.files}}
@@ -4936,7 +4954,7 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 				}
 				events := drainEvents(t, emitter, ce)
 				wantEvents := len(shape.files)
-				if shape.forced {
+				if shape.degraded {
 					wantEvents++
 				}
 				if len(events) != wantEvents {
@@ -4950,7 +4968,7 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 					if pe.Valid != nil || pe.PushError == "" {
 						t.Errorf("event %d must have unknown validity and a push error: %+v", i, pe)
 					}
-					if shape.forced && i == 0 {
+					if shape.degraded && i == 0 {
 						if pe.Detection != DetectionDegraded || pe.DetectionError == "" || pe.Change != nil {
 							t.Errorf("missing degraded marker: %+v", pe)
 						}
