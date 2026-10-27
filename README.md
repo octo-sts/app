@@ -341,6 +341,21 @@ each environment as follows:
 - To roll back production, run the `deploy-prod.yaml` workflow manually against
   the previous version tag.
 
+### Terraform provider upgrades
+
+The staging and production Terraform roots use Google providers `>= 8.7.0,
+< 9.0.0`. Their `serverless-gclb` modules explicitly set `EXTERNAL` on both
+backend services and forwarding rules to retain the existing Classic load
+balancers. Google provider v8 defaults an unspecified backend scheme to
+`EXTERNAL_MANAGED`, which requires a separate load balancer migration.
+
+Keep the load balancer module and provider requirements compatible when
+updating dependencies: `serverless-gclb` 1.0.2 did not pass the backend scheme
+through to the resource, while 1.72.0 does. Before deploying an upgrade, review
+the plan for backend or forwarding rule scheme changes and replacements.
+`terraform validate` alone cannot establish that an upgrade preserves live
+resources.
+
 ### Container images
 
 For self-hosting, container images are published to
