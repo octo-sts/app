@@ -13,7 +13,7 @@ resource "google_dns_managed_zone" "top-level-zone" {
 // Put the above domain in front of our regional services.
 module "serverless-gclb" {
   source  = "chainguard-dev/common/infra//modules/serverless-gclb"
-  version = "1.0.2"
+  version = "1.72.0"
 
   team = "developer-platform"
 
@@ -26,12 +26,19 @@ module "serverless-gclb" {
   regions         = keys(module.networking.regional-networks)
   serving_regions = keys(module.networking.regional-networks)
 
+  // Preserve the Classic load balancer when upgrading the Google providers.
+  forwarding_rule_load_balancing = {
+    load_balancing_scheme = "EXTERNAL"
+  }
+
   public-services = {
     "octo-staging.dev" = {
-      name = module.app.app.name
+      name                  = module.app.app.name
+      load_balancing_scheme = "EXTERNAL"
     }
     "webhook.octo-staging.dev" = {
-      name = module.app.webhook.name
+      name                  = module.app.webhook.name
+      load_balancing_scheme = "EXTERNAL"
     }
   }
 }
