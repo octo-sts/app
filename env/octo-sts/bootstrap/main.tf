@@ -75,35 +75,3 @@ resource "google_project_iam_member" "github_owner" {
   role    = "roles/owner"
   member  = "serviceAccount:${module.github_identity.email}"
 }
-
-module "github_pull_requests" {
-  source  = "chainguard-dev/common/infra//modules/github-gsa"
-  version = "1.0.2"
-
-  project_id = var.project_id
-  name       = "github-pull-requests"
-  wif-pool   = module.github-wif.pool_name
-
-  repository   = "octo-sts/app"
-  refspec      = "pull_request"
-  workflow_ref = ".github/workflows/verify-prod.yaml"
-
-  notification_channels = local.notification_channels
-}
-
-moved {
-  from = google_service_account.github_pull_requests
-  to   = module.github_pull_requests.google_service_account.this
-}
-
-resource "google_project_iam_member" "github_viewer" {
-  project = var.project_id
-  role    = "roles/viewer"
-  member  = "serviceAccount:${module.github_pull_requests.email}"
-}
-
-resource "google_project_iam_member" "github_iam_viewer" {
-  project = var.project_id
-  role    = "roles/iam.securityReviewer"
-  member  = "serviceAccount:${module.github_pull_requests.email}"
-}
