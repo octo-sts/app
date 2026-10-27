@@ -697,7 +697,7 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 
 - **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org@<org-id>/repo@<repo-id>:ref:refs/heads/main` instead of `repo:org@<org-id>/repo@<repo-id>:.*`.
 
-- **Use immutable subject claims**: For GitHub Actions, enable [immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims) so a policy cannot be satisfied by a different repository or organization that reuses the same name.
+- **Use immutable subject claims**: For GitHub Actions, enable [immutable subject claims](https://docs.github.com/en/actions/reference/security/oidc#immutable-subject-claims) so a policy cannot be satisfied by a different repository or organization that reuses the same name. On an existing repository, update its trust policies to the immutable subject at the same time, since tokens stop matching name-only subjects once the setting is on.
 
 #### Token Management
 
