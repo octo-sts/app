@@ -9,7 +9,7 @@ require (
 	cloud.google.com/go/bigquery v1.85.0
 	cloud.google.com/go/firestore v1.26.0
 	cloud.google.com/go/kms v1.36.0
-	cloud.google.com/go/secretmanager v1.22.0
+	cloud.google.com/go/secretmanager v1.23.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys v1.5.0
