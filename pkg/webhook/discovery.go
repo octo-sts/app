@@ -33,6 +33,16 @@ func isProvenWebhookRateLimit(err error) bool {
 			(response.Response.Header.Get("X-RateLimit-Remaining") == "0" || response.Response.Header.Get("Retry-After") != ""))
 }
 
+// isNoCommonAncestor reports GitHub refusing a compare because the two commits
+// share no history, as after a branch is rewritten onto unrelated commits. That
+// compare can never succeed, so callers validate what is live at the head.
+func isNoCommonAncestor(err error) bool {
+	var response *github.ErrorResponse
+	return errors.As(err, &response) && response.Response != nil &&
+		response.Response.StatusCode == http.StatusNotFound &&
+		strings.HasPrefix(response.Message, "No common ancestor")
+}
+
 // policyReadDeniedError is the per-file verdict for a policy content read that
 // GitHub refused with a 403 that is not a proven rate limit. Its message names
 // the likely cause without echoing the request URL. The GitHub error stays in
