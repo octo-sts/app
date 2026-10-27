@@ -6,6 +6,7 @@ package webhook
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -426,6 +427,61 @@ func isBotSender(sender *github.User) bool {
 	return sender != nil && sender.Login != nil && strings.HasSuffix(sender.GetLogin(), "[bot]")
 }
 
+// maxRefusalMessage caps how much of GitHub's response to a refused token
+// mint is read and logged.
+const maxRefusalMessage = 1024
+
+// installationToken403 identifies token-mint failures without consuming their
+// response bodies. Rate limits are included so callers preserve them for ServeHTTP.
+func installationToken403(err error) *ghinstallation.HTTPError {
+	var tokenErr *ghinstallation.HTTPError
+	if errors.As(err, &tokenErr) && tokenErr.Response != nil && tokenErr.Response.StatusCode == http.StatusForbidden {
+		return tokenErr
+	}
+	return nil
+}
+
+// installationRefused reports whether err comes from GitHub refusing to mint
+// an installation token with a 403 that is not a rate limit, for example a
+// suspended installation or an org IP allow list. Such an installation cannot
+// act until its owner fixes it, so retrying the delivery cannot help. It
+// returns GitHub's message and closes the response body, which ghinstallation
+// leaves open on non-2xx responses.
+//
+// A secondary rate limit may carry neither rate-limit header and is marked
+// only by the body's documentation_url, which go-github matches the same way.
+func installationRefused(err error) (int64, string, bool) {
+	refused := installationToken403(err)
+	if refused == nil {
+		return 0, "", false
+	}
+	resp := refused.Response
+	if resp.Body != nil {
+		defer resp.Body.Close()
+	}
+	if resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != "" {
+		return 0, "", false
+	}
+	if resp.Body == nil {
+		return refused.InstallationID, "", true
+	}
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxRefusalMessage))
+	var body struct {
+		Message          string `json:"message"`
+		DocumentationURL string `json:"documentation_url"`
+	}
+	if json.Unmarshal(raw, &body) != nil {
+		return refused.InstallationID, strings.TrimSpace(string(raw)), true
+	}
+	if strings.HasSuffix(body.DocumentationURL, "#abuse-rate-limits") || strings.HasSuffix(body.DocumentationURL, "secondary-rate-limits") {
+		return 0, "", false
+	}
+	if body.Message == "" {
+		return refused.InstallationID, strings.TrimSpace(string(raw)), true
+	}
+	return refused.InstallationID, body.Message, true
+}
+
 func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	log := clog.FromContext(r.Context()).With(
 		HeaderDelivery, r.Header.Get(HeaderDelivery),
@@ -484,6 +540,11 @@ func (e *Validator) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		log.Infof("unsupported event type: %s", eventType)
 		// Use accepted as "we got it but didn't do anything"
+		w.WriteHeader(http.StatusAccepted)
+		return
+	}
+	if id, reason, ok := installationRefused(err); ok {
+		log.Warn("GitHub refused the installation token; skipping event", "installation_id", id, "reason", reason)
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -624,6 +685,9 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 	} else {
 		results, err = validatePolicyFiles(ctx, client, owner, readRepo, sha, files, e.policyRepo(), e.policyDir())
 	}
+	if installationToken403(err) != nil {
+		return nil, validationOutcome{verdicts: results, incomplete: err}, err
+	}
 	// If we were rate-limited, acknowledge the delivery and skip the CheckRun.
 	// Returning an error would surface as a 5xx, which marks the delivery
 	// failed in GitHub's delivery log. GitHub does not retry it automatically,
@@ -664,7 +728,9 @@ func (e *Validator) handleSHAForPolicyFiles(ctx context.Context, client *github.
 
 	cr, _, err := client.Checks.CreateCheckRun(ctx, owner, readRepo, opts)
 	if err != nil {
-		log.Errorf("error creating CheckRun: %v", err)
+		if installationToken403(err) == nil {
+			log.Errorf("error creating CheckRun: %v", err)
+		}
 		// The verdicts are still authoritative; only reporting them to the
 		// check run failed.
 		return nil, validationOutcome{verdicts: results, incomplete: err}, err
@@ -717,6 +783,9 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 		if !cached {
 			resp, _, _, err := client.Repositories.GetContents(ctx, owner, readRepo, f, &github.RepositoryContentGetOptions{Ref: sha})
 			if err != nil {
+				if installationToken403(err) != nil {
+					return results, fmt.Errorf("%s: %w", f, err)
+				}
 				log.Infof("failed to get content for: %v", err)
 				if isProvenWebhookRateLimit(err) {
 					log.Warnf("rate-limited, aborting remaining policy validations")
@@ -856,11 +925,23 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	var changes []PolicyChange
 	detection := DetectionCommits
 	var detectionErr string
+	// tokenErr holds a token-mint 403 hit while discovering changes. The push
+	// is recorded as degraded and the error goes back to ServeHTTP once the
+	// audit emit is registered, so the gap stays visible in the audit trail.
+	var tokenErr error
 
 	switch {
 	case event.GetForced() && isDefaultBranch:
 		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
 		if serr != nil {
+			if installationToken403(serr) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, serr.Error(), serr
+				changes = e.policyChangesFromPushEvent(repo, event)
+				if live != nil {
+					changes = policiesPresent(live)
+				}
+				break
+			}
 			// Most often the pre-push SHA is no longer reachable, which GitHub
 			// is free to garbage collect after a rewind, so the diff cannot be
 			// computed. Record that the audit view of this push is incomplete.
@@ -893,6 +974,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	case event.GetBefore() == zeroHash:
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				log.Warnf("rate-limited discovering policies for new ref %s/%s@%s; recording degraded detection", owner, repo, sha)
 				detection, detectionErr = DetectionDegraded, err.Error()
@@ -905,6 +990,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	default:
 		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, event.GetBefore(), sha, &github.ListOptions{})
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
 				break
@@ -913,6 +1002,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		}
 		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
 		if err != nil {
+			if installationToken403(err) != nil {
+				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
 				break
@@ -937,6 +1030,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		defer func() {
 			e.emitPolicyEvents(ctx, event, owner, repo, sha, installationID, changes, detection, detectionErr, outcome)
 		}()
+	}
+	if tokenErr != nil {
+		outcome = validationOutcome{incomplete: tokenErr}
+		return nil, tokenErr
 	}
 
 	// Deletions leave nothing to read at the head SHA, so a push that only
@@ -1335,7 +1432,9 @@ func (e *Validator) postNoPolicyChangesCheckRun(ctx context.Context, client *git
 		},
 	})
 	if err != nil {
-		log.Errorf("error creating CheckRun: %v", err)
+		if installationToken403(err) == nil {
+			log.Errorf("error creating CheckRun: %v", err)
+		}
 		return nil, err
 	}
 	return cr, nil
