@@ -5,11 +5,13 @@ package octosts
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -118,6 +120,7 @@ const (
 	fetchAbsent                // no allowlist applies; definitive
 	fetchNoAccess              // this installation cannot see .github; try the next
 	fetchRateLimited           // rate limited at mint or read time; try the next
+	fetchForbidden             // a 403 that is not a rate limit; try the next
 	fetchFailed                // anything else; try the next
 )
 
@@ -132,6 +135,8 @@ func (k fetchKind) String() string {
 		return "fetchNoAccess"
 	case fetchRateLimited:
 		return "fetchRateLimited"
+	case fetchForbidden:
+		return "fetchForbidden"
 	case fetchFailed:
 		return "fetchFailed"
 	default:
@@ -142,7 +147,7 @@ func (k fetchKind) String() string {
 type fetchResult struct {
 	kind  fetchKind
 	entry orgIssuerEntry // valid when kind == fetchOK
-	err   error          // terminal status for fetchRateLimited / fetchFailed
+	err   error          // terminal status for fetchRateLimited / fetchForbidden / fetchFailed
 }
 
 // The kind-to-payload pairing IS the security contract (retryable kinds carry a
@@ -159,15 +164,29 @@ func failedFetch() fetchResult {
 	return fetchResult{kind: fetchFailed, err: status.Error(codes.Unavailable, msgIssuerUnavailable)}
 }
 
+func forbiddenFetch(owner string) fetchResult {
+	return fetchResult{kind: fetchForbidden, err: forbiddenStatus(owner)}
+}
+
+// forbiddenStatus is PermissionDenied, matching a forbidden trust policy read:
+// GitHub refused the App for this org, and retrying will not change that.
+func forbiddenStatus(owner string) error {
+	return status.Errorf(codes.PermissionDenied, msgIssuerForbiddenFmt, owner)
+}
+
 func okFetch(e orgIssuerEntry) fetchResult { return fetchResult{kind: fetchOK, entry: e} }
 
 // Fixed messages returned to callers. Org, issuer, mode and cause go to logs and the
 // Event only: echoing them would let any verified-token holder enumerate an org's IdPs.
+// msgIssuerForbiddenFmt is the one exception: it names the org from the caller's own
+// scope and GitHub's status, never GitHub's body or an installation ID, because only
+// the org's admins can fix a 403 and they need to know where to look.
 const (
 	msgIssuerNotPermitted  = "issuer not permitted by organization policy"
 	msgIssuerConfigInvalid = "organization trusted-issuer configuration is invalid"
 	msgIssuerUnavailable   = "organization trusted-issuer lookup unavailable"
 	msgIssuerRateLimited   = "organization trusted-issuer lookup rate limited"
+	msgIssuerForbiddenFmt  = "GitHub denied access to %s (403): check the org's IP allow list, or whether the octo-sts installation is suspended"
 )
 
 // isOrgIssuerRateLimit reports whether err is PROVEN to be a rate limit. A bare
@@ -194,6 +213,20 @@ func isMintRateLimit(resp *http.Response) bool {
 	return resp.Header.Get("X-RateLimit-Remaining") == "0" || resp.Header.Get("Retry-After") != ""
 }
 
+// isSecondaryLimitBody reports whether a mint failure body marks a secondary rate
+// limit, which may carry neither rate-limit header. It matches documentation_url
+// the way go-github and pkg/webhook's installationRefused do.
+func isSecondaryLimitBody(body []byte) bool {
+	var b struct {
+		DocumentationURL string `json:"documentation_url"`
+	}
+	if json.Unmarshal(body, &b) != nil {
+		return false
+	}
+	return strings.HasSuffix(b.DocumentationURL, "#abuse-rate-limits") ||
+		strings.HasSuffix(b.DocumentationURL, "secondary-rate-limits")
+}
+
 // classifyMintError maps an installation-token mint failure. These are
 // *ghinstallation.HTTPError, not *github.ErrorResponse, because RoundTrip returns
 // (nil, err) so CheckResponse never runs. Closes err's response body.
@@ -201,9 +234,11 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 	var herr *ghinstallation.HTTPError
 	if errors.As(err, &herr) && herr.Response != nil {
 		// ghinstallation leaves the body open for inspection, so closing it is ours.
+		var body []byte
 		if herr.Response.Body != nil {
 			defer herr.Response.Body.Close()
-			if body, rerr := io.ReadAll(io.LimitReader(herr.Response.Body, 4096)); rerr == nil && len(body) > 0 {
+			var rerr error
+			if body, rerr = io.ReadAll(io.LimitReader(herr.Response.Body, 4096)); rerr == nil && len(body) > 0 {
 				clog.DebugContextf(ctx, "org trusted issuers: mint failure body for %s: %s", owner, body)
 			}
 		}
@@ -219,6 +254,11 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 
 		case herr.Response.StatusCode == http.StatusUnprocessableEntity:
 			return noAccessFetch()
+
+		case herr.Response.StatusCode == http.StatusForbidden && !isSecondaryLimitBody(body):
+			// A suspended installation, or an org IP allow list refusing this egress IP.
+			clog.WarnContextf(ctx, "org trusted issuers: mint forbidden for %s (403, not a rate limit)", owner)
+			return forbiddenFetch(owner)
 		}
 	}
 
@@ -246,7 +286,7 @@ func classifyContentsError(ctx context.Context, owner, policyRepo string, err er
 			// would make every installation "agree" no allowlist applies. Genuine
 			// per-installation blindness fails at the MINT with 422, the sole agreement.
 			clog.WarnContextf(ctx, "org trusted issuers: read forbidden for %s/%s (403, not a rate limit); treating as unknown", owner, policyRepo)
-			return failedFetch()
+			return forbiddenFetch(owner)
 		}
 	}
 
@@ -326,8 +366,17 @@ func invalidConfigResult() fetchResult {
 type orgIssuerTally struct {
 	total        int
 	noAccess     int
-	anyFailed    bool // a fetchFailed or fetchRateLimited was seen
+	anyFailed    bool // a fetchFailed, fetchForbidden or fetchRateLimited was seen
 	sawRateLimit bool
+	sawForbidden bool
+	sawOther     bool // a fetchFailed was seen
+}
+
+// onlyForbidden reports whether every failure was a plain 403, the one cause the
+// caller can be told about. Any other failure may be transient, so naming the 403
+// alone could send an admin to fix the wrong thing.
+func (t *orgIssuerTally) onlyForbidden() bool {
+	return t.sawForbidden && !t.sawRateLimit && !t.sawOther
 }
 
 // exhaustiveNoAccess reports whether every installation so far ANSWERED "I cannot see
@@ -352,8 +401,13 @@ func (t *orgIssuerTally) record(k fetchKind) {
 		t.anyFailed = true
 		t.sawRateLimit = true
 
+	case fetchForbidden:
+		t.anyFailed = true
+		t.sawForbidden = true
+
 	default: // fetchFailed
 		t.anyFailed = true
+		t.sawOther = true
 	}
 }
 
@@ -521,6 +575,10 @@ func (s *sts) orgIssuerLookupUncached(ctx context.Context, owner string) (orgIss
 	}
 	if t.sawRateLimit {
 		return orgIssuerEntry{}, status.Error(codes.ResourceExhausted, msgIssuerRateLimited)
+	}
+	// A partial enumeration skipped installations that may have failed differently.
+	if enumErr == nil && t.onlyForbidden() {
+		return orgIssuerEntry{}, forbiddenStatus(owner)
 	}
 	return orgIssuerEntry{}, status.Error(codes.Unavailable, msgIssuerUnavailable)
 }

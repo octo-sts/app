@@ -270,8 +270,8 @@ func TestClassifyMintError(t *testing.T) {
 			// about .github visibility, so it must not be fetchNoAccess.
 			name:     "bare 403",
 			err:      mk(http.StatusForbidden, nil),
-			wantKind: fetchFailed,
-			wantCode: codes.Unavailable,
+			wantKind: fetchForbidden,
+			wantCode: codes.PermissionDenied,
 		},
 		{name: "401", err: mk(http.StatusUnauthorized, nil), wantKind: fetchFailed, wantCode: codes.Unavailable},
 		{name: "404", err: mk(http.StatusNotFound, nil), wantKind: fetchFailed, wantCode: codes.Unavailable},
@@ -342,7 +342,8 @@ func TestClassifyContentsError(t *testing.T) {
 		},
 		{
 			// This is the row that a shared 403-means-rate-limit helper would
-			// have made unreachable. It is ignorance, so fetchFailed.
+			// have made unreachable. It is ignorance, so fetchForbidden, which the
+			// tally counts as a failure exactly like fetchFailed.
 			//
 			// It used to assert fetchNoAccess, on the theory that a 403 is one
 			// installation's blindness. That was wrong in a way worth recording,
@@ -355,16 +356,16 @@ func TestClassifyContentsError(t *testing.T) {
 			//
 			// The old rationale also mis-stated the aggregator: scanInstalls records
 			// a failure and CONTINUES, so a 403 never stopped it from asking an
-			// installation that can read the file. All fetchFailed changes is that an
-			// all-403 enumeration fails closed instead of concluding absence.
+			// installation that can read the file. All a failure kind changes is that
+			// an all-403 enumeration fails closed instead of concluding absence.
 			//
 			// The genuinely per-installation case does not arrive here: an App
 			// without .github in its repository selection fails at the mint with a
 			// 422, which is still NoAccess and still falls open.
 			name:     "bare 403 is ignorance, not agreement that no allowlist applies",
 			err:      &github.ErrorResponse{Response: &http.Response{StatusCode: http.StatusForbidden}},
-			wantKind: fetchFailed,
-			wantCode: codes.Unavailable,
+			wantKind: fetchForbidden,
+			wantCode: codes.PermissionDenied,
 		},
 		{
 			name:     "502",
@@ -1884,7 +1885,7 @@ func TestClassifyMintErrorRateLimitedBeforeNoAccess(t *testing.T) {
 		{
 			name:     "bare 403 is neither a limit nor agreement",
 			err:      mk(http.StatusForbidden, nil),
-			wantKind: fetchFailed,
+			wantKind: fetchForbidden,
 		},
 		{
 			name:     "429 is a limit",
@@ -2045,4 +2046,226 @@ func TestOrgIssuerLookupWaiterHonorsOwnContext(t *testing.T) {
 
 	close(release) // let the leader finish so its goroutine does not linger
 	<-leaderDone
+}
+
+// withMintForbidden refuses every installation-token mint with a 403 that
+// carries no rate-limit marker, as GitHub does for an org IP allow list. The
+// body holds details the caller must never see.
+func withMintForbidden() orgFakeGitHubOption {
+	return func(routes *orgFakeGitHubRoutes) {
+		routes.mint = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(github.ErrorResponse{
+				Message: "Although you appear to have the correct authorization credentials, the `secret-body` organization has an IP allow list enabled, and 203.0.113.7 is not permitted to access this resource.",
+			})
+		}
+	}
+}
+
+// withContentsForbidden refuses every contents read with a bare 403 while the
+// mint succeeds.
+func withContentsForbidden() orgFakeGitHubOption {
+	return func(routes *orgFakeGitHubRoutes) {
+		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(github.ErrorResponse{Message: "Resource protected by organization SAML enforcement. secret-body"})
+		}
+	}
+}
+
+// withMintServerError fails every mint with a 500.
+func withMintServerError() orgFakeGitHubOption {
+	return func(routes *orgFakeGitHubRoutes) {
+		routes.mint = func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}
+}
+
+// withContentsConnectionReset drops the connection on every contents read, so
+// the client sees a network error rather than any HTTP status.
+func withContentsConnectionReset() orgFakeGitHubOption {
+	return func(routes *orgFakeGitHubRoutes) {
+		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
+			conn, _, err := http.NewResponseController(w).Hijack()
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			conn.Close()
+		}
+	}
+}
+
+// TestClassifyMintErrorSecondaryLimitBodyIsNotForbidden: a secondary rate limit
+// can arrive as a 403 with neither rate-limit header, marked only by its
+// documentation_url. Labelling it an access denial would send an org admin
+// chasing an IP allow list that is not the problem.
+func TestClassifyMintErrorSecondaryLimitBodyIsNotForbidden(t *testing.T) {
+	for _, docURL := range []string{
+		"https://docs.github.com/rest/overview/resources-in-the-rest-api#abuse-rate-limits",
+		"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits",
+	} {
+		t.Run(docURL, func(t *testing.T) {
+			body := fmt.Sprintf(`{"message":"You have exceeded a secondary rate limit","documentation_url":%q}`, docURL)
+			err := &ghinstallation.HTTPError{Response: &http.Response{
+				StatusCode: http.StatusForbidden,
+				Header:     http.Header{},
+				Body:       io.NopCloser(strings.NewReader(body)),
+			}}
+			if got := classifyMintError(t.Context(), "org", err); got.kind == fetchForbidden {
+				t.Errorf("kind = %v, want anything but fetchForbidden for a secondary rate limit", got.kind)
+			}
+		})
+	}
+}
+
+// msgForbidden is the caller-visible message for orgallow when every failed
+// answer was a plain 403.
+const msgForbidden = "GitHub denied access to orgallow (403): check the org's IP allow list, or whether the octo-sts installation is suspended"
+
+// TestLookupForbiddenNamesTheCause covers issue #1818. When every failed answer
+// is a plain 403 the caller learns that GitHub denied access and what to check,
+// instead of a bare "lookup unavailable". Any other mix keeps the generic
+// message, and every row still fails closed with nothing cached.
+func TestLookupForbiddenNamesTheCause(t *testing.T) {
+	const owner = "orgallow"
+	generic := msgIssuerUnavailable
+
+	for _, tc := range []struct {
+		name     string
+		fakes    []orgFakeGitHubOption // one installation per entry
+		enumErr  error
+		wantCode codes.Code
+		wantMsg  string
+	}{
+		{name: "mint 403", fakes: []orgFakeGitHubOption{withMintForbidden()}, wantCode: codes.PermissionDenied, wantMsg: msgForbidden},
+		{name: "read 403", fakes: []orgFakeGitHubOption{withContentsForbidden()}, wantCode: codes.PermissionDenied, wantMsg: msgForbidden},
+		{name: "every installation 403", fakes: []orgFakeGitHubOption{withMintForbidden(), withContentsForbidden()}, wantCode: codes.PermissionDenied, wantMsg: msgForbidden},
+		{
+			// A 422 is an installation that cannot see .github, not a failure, so
+			// the only failure left is the 403.
+			name:     "403 alongside a blind installation",
+			fakes:    []orgFakeGitHubOption{withNoGitHubRepoAccess(), withMintForbidden()},
+			wantCode: codes.PermissionDenied,
+			wantMsg:  msgForbidden,
+		},
+		{
+			// The 502 may be transient, so blaming the IP allow list would mislead.
+			name:     "403 alongside a server error",
+			fakes:    []orgFakeGitHubOption{withMintForbidden(), withContentsServerError()},
+			wantCode: codes.Unavailable,
+			wantMsg:  generic,
+		},
+		{
+			name:     "403 alongside a rate limit stays a rate limit",
+			fakes:    []orgFakeGitHubOption{withMintForbidden(), withContentsRateLimited()},
+			wantCode: codes.ResourceExhausted,
+			wantMsg:  msgIssuerRateLimited,
+		},
+		{
+			// Installations the enumeration missed may have answered differently.
+			name:     "403 from a partial enumeration",
+			fakes:    []orgFakeGitHubOption{withMintForbidden()},
+			enumErr:  errors.New("could not list installations for app 20"),
+			wantCode: codes.Unavailable,
+			wantMsg:  generic,
+		},
+		{name: "mint 500", fakes: []orgFakeGitHubOption{withMintServerError()}, wantCode: codes.Unavailable, wantMsg: generic},
+		{name: "read 502", fakes: []orgFakeGitHubOption{withContentsServerError()}, wantCode: codes.Unavailable, wantMsg: generic},
+		{name: "network error", fakes: []orgFakeGitHubOption{withContentsConnectionReset()}, wantCode: codes.Unavailable, wantMsg: generic},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cleanupOrgIssuers(t, owner)
+
+			installs := make([]ghinstall.Installation, 0, len(tc.fakes))
+			for i, opt := range tc.fakes {
+				installs = append(installs, ghinstall.Installation{
+					Transport: newAppsTransport(t, newOrgFakeGitHub(opt)),
+					ID:        int64(9001 + i),
+					AppID:     int64(10 * (i + 1)),
+				})
+			}
+			s := &sts{router: routerFor(&enumMgr{installs: installs, err: tc.enumErr}, len(installs))}
+
+			decision, err := s.checkOrgTrustedIssuers(t.Context(), owner, testGitHubIssuer)
+			st, ok := status.FromError(err)
+			if !ok || err == nil {
+				t.Fatalf("checkOrgTrustedIssuers() = %v, want a gRPC status", err)
+			}
+			if st.Code() != tc.wantCode {
+				t.Errorf("code = %v, want %v", st.Code(), tc.wantCode)
+			}
+			if st.Message() != tc.wantMsg {
+				t.Errorf("message = %q, want %q", st.Message(), tc.wantMsg)
+			}
+			if decision != nil {
+				t.Errorf("decision = %+v, want nil when the lookup failed", decision)
+			}
+			for _, leak := range []string{"secret-body", "203.0.113.7", "9001", "9002"} {
+				if strings.Contains(st.Message(), leak) {
+					t.Errorf("message %q leaks %q", st.Message(), leak)
+				}
+			}
+			if _, ok := orgIssuers.Get(owner); ok {
+				t.Error("a failed lookup must not be cached")
+			}
+		})
+	}
+}
+
+// TestLookupForbiddenServesStale: a 403 is still ignorance, so a last known
+// good entry is served exactly as for any other failure.
+func TestLookupForbiddenServesStale(t *testing.T) {
+	cleanupOrgIssuers(t, "orgallow")
+
+	allow, err := (&OrgTrustedIssuers{Issuers: []string{testGitHubIssuer}}).Compile()
+	if err != nil {
+		t.Fatalf("Compile() = %v", err)
+	}
+	staleOrgIssuers.Add("orgallow", presentOrgIssuerEntry(allow))
+
+	forbidden := newAppsTransport(t, newOrgFakeGitHub(withMintForbidden()))
+	s := &sts{router: routerFor(&enumMgr{installs: []ghinstall.Installation{{Transport: forbidden, ID: 1, AppID: 10}}}, 1)}
+
+	entry, err := s.orgIssuerLookup(t.Context(), "orgallow")
+	if err != nil {
+		t.Fatalf("orgIssuerLookup() = %v, want the stale entry served", err)
+	}
+	if entry.state != orgIssuerPresent {
+		t.Fatalf("state = %v, want the stale orgIssuerPresent", entry.state)
+	}
+}
+
+// TestExchangeForbiddenOrgIssuesNoToken drives the whole exchange: the org named
+// in the scope refuses the App with a 403, so no token is issued and the caller
+// sees the scope's own org in the message. The requesting workload's identity
+// never reaches GitHub, so the scope's org is the only one that can refuse.
+func TestExchangeForbiddenOrgIssuesNoToken(t *testing.T) {
+	const owner = "orgallow"
+	cleanupOrgIssuers(t, owner)
+	forgetTrustPolicy(t, owner)
+
+	atr := newAppsTransport(t, newOrgFakeGitHub(withMintForbidden()))
+	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
+
+	tok, err := s.Exchange(newExchangeContext(t), &v1.ExchangeRequest{
+		Identity: "foo",
+		Scopes:   []string{owner + "/repo"},
+	})
+	if tok != nil {
+		t.Fatalf("Exchange() returned a token %v; a 403 must fail closed", tok)
+	}
+	st, ok := status.FromError(err)
+	if !ok || err == nil {
+		t.Fatalf("Exchange() = %v, want a gRPC status", err)
+	}
+	if st.Code() != codes.PermissionDenied {
+		t.Errorf("code = %v, want %v", st.Code(), codes.PermissionDenied)
+	}
+	if st.Message() != msgForbidden {
+		t.Errorf("message = %q, want %q", st.Message(), msgForbidden)
+	}
 }
