@@ -1263,10 +1263,10 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 			log.Warnf("rate-limited comparing check suite; skipping CheckRun: %v", err)
 			return nil, nil
 		case isNoCommonAncestor(err):
-			// The suite's PR diffs below still say what each PR changes. A
-			// suite without PRs falls back to the rules for a new branch.
+			// Without shared history the compare says nothing, so follow the
+			// rules for a new branch: scan the head, plus each PR's diff below.
 			log.Warnf("check suite before %s and head %s share no history; validating what is live at the head: %v", before, sha, err)
-			scanHead = len(cs.GetCheckSuite().PullRequests) == 0
+			scanHead = true
 		default:
 			return nil, err
 		}
@@ -1352,7 +1352,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 	}
 	if len(files) == 0 {
-		if cs.GetCheckSuite().GetBeforeSHA() == zeroHash && !deletedPolicy {
+		if scanHead && !deletedPolicy {
 			// The full directory scan above already found no policies at sha,
 			// so this repository has nothing a required check could guard.
 			return nil, nil

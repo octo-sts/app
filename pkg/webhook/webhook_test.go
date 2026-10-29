@@ -4995,14 +4995,15 @@ func TestInstallationRefusedBoundsReadAndClosesBody(t *testing.T) {
 
 // TestNoCommonAncestor covers compares between commits with unrelated
 // histories, which GitHub answers with a 404. The event still validates what
-// is live at the head: the suite's PR diffs when it has PRs, otherwise the
-// policy tree at the head, under the same rules as a new branch.
+// is live at the head under the same rules as a new branch: the policy tree at
+// the head plus each PR's diff, skipping a non-default branch without PRs.
 func TestNoCommonAncestor(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		event        string
 		branch       string
 		prs          bool
+		crossRepoPR  bool // the suite's only PR lives in a repository the App cannot read
 		compareBody  string
 		wantStatus   int
 		wantChecks   int
@@ -5010,7 +5011,9 @@ func TestNoCommonAncestor(t *testing.T) {
 	}{
 		{name: "default branch snapshot", event: "check_suite", branch: "main", wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
 		{name: "feature branch without PRs skipped", event: "check_suite", branch: "feature", wantStatus: http.StatusOK},
-		{name: "feature branch PR diff", event: "check_suite", branch: "feature", prs: true, wantStatus: http.StatusOK, wantChecks: 1},
+		{name: "feature branch PR diff and snapshot", event: "check_suite", branch: "feature", prs: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "default branch PR diff and snapshot", event: "check_suite", branch: "main", prs: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "skipped cross-repo PR still snapshots", event: "check_suite", branch: "feature", prs: true, crossRepoPR: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
 		{name: "other 404 still fails", event: "check_suite", branch: "main", compareBody: `{"message":"Not Found"}`, wantStatus: http.StatusInternalServerError},
 		{name: "long push snapshot", event: "push", branch: "main", wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
 	} {
@@ -5037,6 +5040,10 @@ func TestNoCommonAncestor(t *testing.T) {
 			})
 			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/gh", func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprint(w, `{"truncated":false,"tree":[{"path":"chainguard","type":"tree","sha":"cg"}]}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/hidden/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"Not Found"}`)
 			})
 			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/cg", func(w http.ResponseWriter, _ *http.Request) {
 				fmt.Fprint(w, `{"truncated":false,"tree":[{"path":"test.sts.yaml","type":"blob","sha":"blob1"}]}`)
@@ -5077,7 +5084,11 @@ func TestNoCommonAncestor(t *testing.T) {
 			case "check_suite":
 				suite := &github.CheckSuite{ID: new(int64(1)), HeadSHA: new("5678"), HeadBranch: new(tc.branch), BeforeSHA: new("abcd1234")}
 				if tc.prs {
-					suite.PullRequests = []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/foo/bar")}}}}
+					base := "https://api.github.com/repos/foo/bar"
+					if tc.crossRepoPR {
+						base = "https://api.github.com/repos/foo/hidden"
+					}
+					suite.PullRequests = []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new(base)}}}}
 				}
 				event = github.CheckSuiteEvent{
 					Installation: &github.Installation{ID: new(int64(1111))},
