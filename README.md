@@ -48,6 +48,23 @@ large, but with one exception (`contents: read` reading policy files) the App
 only creates tokens with these scopes based on the "trust policies" you have
 configured.
 
+### Organizations with an IP allow list
+
+The hosted service at `octo-sts.dev` does not support GitHub organizations that
+enforce an [IP allow list](https://docs.github.com/en/organizations/keeping-your-organization-secure/managing-security-settings-for-your-organization/managing-allowed-ip-addresses-for-your-organization).
+The hosted service reaches GitHub from shared cloud IP addresses that change
+over time, so you cannot add them to an allow list. GitHub rejects its requests,
+and token exchanges fail with a 403 and
+`GitHub denied access to <org> (403): check the org's IP allow list, or whether the octo-sts installation is suspended`.
+
+These organizations should self-host octo-sts with their own GitHub App and a
+static egress IP, then add that IP to the allow list. The Terraform module in
+[`modules/app`](./modules/app) is a starting point, but it hard-codes
+`egress = "PRIVATE_RANGES_ONLY"`, so GitHub traffic does not use your network.
+A static egress IP means changing the module to `ALL_TRAFFIC` egress and adding
+Cloud NAT. See
+[#1818](https://github.com/octo-sts/app/issues/1818) for details.
+
 ### The Trust Policy
 
 Trust policies are checked into `.github/chainguard/{name}.sts.yaml` (the
