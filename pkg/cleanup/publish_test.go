@@ -37,7 +37,10 @@ type item struct {
 	title  string
 	body   string
 	pull   bool
-	bot    bool
+	// bot means the App opened it; otherwise login, or a person, did.
+	bot      bool
+	login    string
+	archived bool
 }
 
 // fakeOrg is a GitHub organization that records every write.
@@ -55,7 +58,9 @@ type fakeOrg struct {
 	fail    string
 	queries []string
 	writes  []string
-	next    int
+	// repoGets counts repository lookups.
+	repoGets int
+	next     int
 }
 
 func newFakeOrg(t *testing.T) *fakeOrg {
@@ -126,19 +131,25 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 			t.Errorf("search without advanced_search: %s", r.URL.RawQuery)
 		}
 		f.queries = append(f.queries, q.Get("q"))
+		if !strings.Contains(q.Get("q"), " archived:false author:app/octo-sts ") {
+			t.Errorf("search %q is not scoped to unarchived repositories and the App", q.Get("q"))
+		}
 		var all []map[string]any
 		for _, it := range f.items {
-			if strings.Contains(q.Get("q"), "is:pr") != it.pull {
+			if strings.Contains(q.Get("q"), "is:pr") != it.pull || it.archived {
 				continue
 			}
-			typ := "User"
-			if it.bot {
-				typ = "Bot"
+			typ, login := "User", "someone"
+			switch {
+			case it.bot:
+				typ, login = "Bot", "octo-sts[bot]"
+			case it.login != "":
+				typ, login = "Bot", it.login
 			}
 			m := map[string]any{
 				"number": it.number, "title": it.title, "body": it.body,
 				"repository_url": "https://api.github.com/repos/acme/" + it.repo,
-				"user":           map[string]any{"login": "someone", "type": typ},
+				"user":           map[string]any{"login": login, "type": typ},
 			}
 			if it.pull {
 				m["pull_request"] = map[string]any{"url": "x"}
@@ -168,6 +179,7 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && rest == "":
+		f.repoGets++
 		reply(map[string]any{"name": name, "default_branch": repo.defaultBranch})
 
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "branches/"):
@@ -274,11 +286,11 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func publisher(c *github.Client) Publisher {
-	return Publisher{Client: c, Org: "acme", PolicyDir: policyDir, Branch: branch}
+	return Publisher{Client: c, App: "octo-sts", Org: "acme", PolicyDir: policyDir, Branch: branch}
 }
 
 func pol(repo, identity string) Policy {
-	return Policy{Repo: repo, Identity: identity, LastChanged: changed}
+	return Policy{Repo: repo, Identity: identity, LastChanged: changed, DefaultBranch: "main"}
 }
 
 func file(identity string) string { return policyDir + "/" + identity + ".sts.yaml" }
@@ -287,7 +299,7 @@ func TestPublishOpensPullRequest(t *testing.T) {
 	f := newFakeOrg(t)
 	f.addRepo("svc", "README.md", file("deploy"), file("release"), file("keep"))
 	pub := publisher(f.client())
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy"), pol("svc", "release")}}}}
+	plan := Plan{WindowStart: since, Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy"), pol("svc", "release")}}}}
 
 	if err := pub.Publish(t.Context(), plan); err != nil {
 		t.Fatalf("Publish() = %v", err)
@@ -299,7 +311,7 @@ func TestPublishOpensPullRequest(t *testing.T) {
 		t.Errorf("files on main = %v, want %v", got, want)
 	}
 	wantWrites := []string{
-		"svc: commit Remove unused Octo STS trust policies\n\nThese policies have had no token exchanges since 2026-07-23:\n\n- deploy\n- release\n",
+		"svc: commit Remove unused Octo STS trust policies\n\nThese policies have had no token exchanges in the last 90 days:\n\n- deploy\n- release\n",
 		"svc: create ref " + branch,
 		`svc: open pull "Remove unused Octo STS trust policies" ` + branch + "->main",
 	}
@@ -307,24 +319,30 @@ func TestPublishOpensPullRequest(t *testing.T) {
 		t.Errorf("writes =\n%q\nwant\n%q", f.writes, wantWrites)
 	}
 	wantQueries := []string{
-		"org:acme is:open is:pr head:" + branch,
-		`org:acme is:open is:issue in:title "Octo STS trust policies that only fail"`,
+		"org:acme is:open archived:false author:app/octo-sts is:pr head:" + branch,
+		`org:acme is:open archived:false author:app/octo-sts is:issue in:title "Octo STS trust policies that only fail"`,
 	}
 	if !reflect.DeepEqual(f.queries, wantQueries) {
 		t.Errorf("search queries = %q, want %q", f.queries, wantQueries)
 	}
+	if f.repoGets != 0 {
+		t.Errorf("repository lookups = %d, want none, since the policies name their branch", f.repoGets)
+	}
 
-	wantBody := "These trust policies have had no token exchanges since 2026-07-23, and none has changed since then:\n\n" +
+	wantBody := "These trust policies have had no token exchanges in the last 90 days, and none has changed in that time:\n\n" +
 		"- `.github/chainguard/deploy.sts.yaml`, last changed 2026-01-02\n" +
 		"- `.github/chainguard/release.sts.yaml`, last changed 2026-01-02\n\n" +
 		"Merging this pull request removes them. A policy drops out of it once it is used or changed. " +
+		"Closing it without merging only postpones it: the next run proposes the policies that are still unused again.\n\n" +
 		"Octo STS keeps this pull request up to date on the `octo-sts/octo-sts-cleanup` branch and closes it when nothing is left to remove.\n"
 	if got := f.items[0].body; got != wantBody {
 		t.Errorf("pull request body =\n%s\nwant\n%s", got, wantBody)
 	}
 
-	// The next run with the same plan changes nothing.
+	// The next run with the same plan changes nothing, though its window
+	// starts later.
 	f.writes = nil
+	plan.WindowStart = plan.WindowStart.AddDate(0, 0, 1)
 	if err := pub.Publish(t.Context(), plan); err != nil {
 		t.Fatalf("second Publish() = %v", err)
 	}
@@ -337,7 +355,7 @@ func TestPublishUpdatesPullRequest(t *testing.T) {
 	f := newFakeOrg(t)
 	f.addRepo("svc", file("deploy"), file("release"))
 	pub := publisher(f.client())
-	first := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
+	first := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
 	if err := pub.Publish(t.Context(), first); err != nil {
 		t.Fatalf("Publish() = %v", err)
 	}
@@ -347,8 +365,7 @@ func TestPublishUpdatesPullRequest(t *testing.T) {
 	r.files = append(r.files, "new.go")
 	r.branches["main"] = f.commit("svc", r.files)
 	f.writes = nil
-	later := since.AddDate(0, 1, 0)
-	second := Plan{WindowStart: later, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy"), pol("svc", "release")}}}}
+	second := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy"), pol("svc", "release")}}}}
 	if err := pub.Publish(t.Context(), second); err != nil {
 		t.Fatalf("second Publish() = %v", err)
 	}
@@ -358,18 +375,19 @@ func TestPublishUpdatesPullRequest(t *testing.T) {
 	if len(f.writes) != 3 || !strings.HasPrefix(f.writes[0], "svc: commit ") || f.writes[1] != "svc: force-push "+branch || f.writes[2] != "svc: edit #101" {
 		t.Errorf("writes = %q, want a commit, a force-push and an edit of #101", f.writes)
 	}
-	if !strings.Contains(f.items[0].body, "release.sts.yaml") || !strings.Contains(f.items[0].body, "since 2026-08-23") {
+	if !strings.Contains(f.items[0].body, "release.sts.yaml") {
 		t.Errorf("pull request body was not updated:\n%s", f.items[0].body)
 	}
 }
 
 func TestPublishReusesBranchWithoutPullRequest(t *testing.T) {
 	// Someone closed last month's pull request; the branch still holds the
-	// same proposal, so it is reopened without a new commit.
+	// same proposal, so a new pull request is opened from it without a new
+	// commit.
 	f := newFakeOrg(t)
 	f.addRepo("svc", file("deploy"))
 	pub := publisher(f.client())
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
 	if err := pub.Publish(t.Context(), plan); err != nil {
 		t.Fatalf("Publish() = %v", err)
 	}
@@ -390,7 +408,7 @@ func TestPublishClosesStale(t *testing.T) {
 		{repo: "svc", number: 7, title: PullTitle, pull: true, bot: true},
 		{repo: "lib", number: 8, title: IssueTitle, bot: true},
 	}
-	if err := publisher(f.client()).Publish(t.Context(), Plan{WindowStart: since}); err != nil {
+	if err := publisher(f.client()).Publish(t.Context(), Plan{Window: DefaultWindow}); err != nil {
 		t.Fatalf("Publish() = %v", err)
 	}
 	want := []string{"lib: comment #8", "lib: close #8 completed", "svc: comment #7", "svc: close #7 "}
@@ -403,8 +421,8 @@ func TestPublishReportsFailing(t *testing.T) {
 	f := newFakeOrg(t)
 	f.addRepo("svc")
 	pub := publisher(f.client())
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{
-		{Policy: pol("svc", "deploy"), LastFailed: time.Date(2026, 10, 20, 5, 0, 0, 0, time.UTC), LastError: "subject `x`\n@everyone [click](https://evil.example)"},
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{
+		{Policy: pol("svc", "deploy"), LastFailed: time.Date(2026, 10, 20, 5, 0, 0, 0, time.UTC), LastError: `rpc error: code = PermissionDenied desc = trust policy: subject "repo:acme/private:ref:refs/heads/main @everyone" did not match "x"`},
 		{Policy: pol("svc", "release"), LastFailed: time.Date(2026, 10, 19, 0, 0, 0, 0, time.UTC)},
 	}}}}
 	if err := pub.Publish(t.Context(), plan); err != nil {
@@ -413,9 +431,9 @@ func TestPublishReportsFailing(t *testing.T) {
 	if want := []string{`svc: open issue "Octo STS trust policies that only fail"`}; !reflect.DeepEqual(f.writes, want) {
 		t.Fatalf("writes = %q, want %q", f.writes, want)
 	}
-	wantBody := "These trust policies were used since 2026-07-23, but every token exchange for them since they last changed has failed:\n\n" +
-		"- `.github/chainguard/deploy.sts.yaml`, last failed 2026-10-20: `subject 'x' @everyone [click](https://evil.example)`\n" +
-		"- `.github/chainguard/release.sts.yaml`, last failed 2026-10-19: `no error recorded`\n\n" +
+	wantBody := "These trust policies were used in the last 90 days, but every token exchange for them since they last changed has failed:\n\n" +
+		"- `.github/chainguard/deploy.sts.yaml`, last failed 2026-10-20: the token's subject did not match the policy\n" +
+		"- `.github/chainguard/release.sts.yaml`, last failed 2026-10-19: no error was recorded\n\n" +
 		"They are kept, since someone is trying to use them. Octo STS keeps this issue up to date and closes it once each one succeeds, changes, or is removed.\n"
 	if got := f.items[0].body; got != wantBody {
 		t.Errorf("issue body =\n%s\nwant\n%s", got, wantBody)
@@ -436,15 +454,18 @@ func TestPublishReportsFailing(t *testing.T) {
 }
 
 func TestPublishIgnoresOthers(t *testing.T) {
-	// Issues opened by people, or with a merely similar title, are not ours.
+	// Issues opened by people or another App, or with a merely similar
+	// title, are not ours.
 	f := newFakeOrg(t)
 	f.addRepo("svc")
 	f.items = []item{
 		{repo: "svc", number: 1, title: IssueTitle},
 		{repo: "svc", number: 2, title: IssueTitle + " (copy)", bot: true},
 		{repo: "svc", number: 3, title: PullTitle, pull: true},
+		{repo: "svc", number: 4, title: IssueTitle, login: "octo-sts-staging[bot]"},
+		{repo: "svc", number: 5, title: PullTitle, pull: true, login: "octo-sts-staging[bot]"},
 	}
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy"), LastFailed: since}}}}}
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy"), LastFailed: since}}}}}
 	if err := publisher(f.client()).Publish(t.Context(), plan); err != nil {
 		t.Fatalf("Publish() = %v", err)
 	}
@@ -453,9 +474,9 @@ func TestPublishIgnoresOthers(t *testing.T) {
 	}
 }
 
-func TestPublishPagesAndPrefersOldest(t *testing.T) {
+func TestPublishPagesAndClosesDuplicates(t *testing.T) {
 	// Five bot issues across three search pages; the oldest in each
-	// repository is the one kept up to date.
+	// repository is kept up to date, and the others are closed.
 	f := newFakeOrg(t)
 	for _, r := range []string{"a", "b", "c"} {
 		f.addRepo(r)
@@ -470,17 +491,21 @@ func TestPublishPagesAndPrefersOldest(t *testing.T) {
 	failing := func(repo string) RepoPlan {
 		return RepoPlan{Repo: repo, Failing: []Failing{{Policy: pol(repo, "p"), LastFailed: since}}}
 	}
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{failing("a"), failing("b"), failing("c")}}
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{failing("a"), failing("b"), failing("c")}}
 	if err := publisher(f.client()).Publish(t.Context(), plan); err != nil {
 		t.Fatalf("Publish() = %v", err)
 	}
-	if want := []string{"a: edit #4", "b: edit #5", "c: edit #6"}; !reflect.DeepEqual(f.writes, want) {
+	want := []string{
+		"a: comment #9", "a: close #9 completed", "a: comment #11", "a: close #11 completed",
+		"a: edit #4", "b: edit #5", "c: edit #6",
+	}
+	if !reflect.DeepEqual(f.writes, want) {
 		t.Errorf("writes = %q, want %q", f.writes, want)
 	}
 }
 
 func TestPublishErrors(t *testing.T) {
-	remove := Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
+	remove := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
 	tests := []struct {
 		name    string
 		fail    string
@@ -490,20 +515,20 @@ func TestPublishErrors(t *testing.T) {
 	}{
 		{name: "pull request search", fail: "GET /search/issues", plan: remove, wantErr: "searching"},
 		{name: "incomplete search", setup: func(f *fakeOrg) { f.incomplete = true }, plan: remove, wantErr: "incomplete results"},
-		{name: "repository", fail: "GET /repos/acme/svc", plan: remove, wantErr: "getting repository"},
+		{name: "repository", fail: "GET /repos/acme/svc", plan: Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{{Repo: "svc", Identity: "deploy", LastChanged: changed}}}}}, wantErr: "getting repository"},
 		{name: "branch", fail: "GET /repos/acme/svc/branches", plan: remove, wantErr: "getting branch main"},
 		{name: "tree", fail: "POST /repos/acme/svc/git/trees", plan: remove, wantErr: "building tree"},
-		{name: "missing file", plan: Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "gone")}}}}, wantErr: "building tree"},
+		{name: "missing file", plan: Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "gone")}}}}, wantErr: "building tree"},
 		{name: "ref", fail: "GET /repos/acme/svc/git/ref/", plan: remove, wantErr: "getting heads/" + branch},
 		{name: "existing commit", fail: "GET /repos/acme/svc/git/commits/", setup: existingBranch, plan: remove, wantErr: "getting heads/" + branch},
 		{name: "commit", fail: "POST /repos/acme/svc/git/commits", plan: remove, wantErr: "committing"},
 		{name: "push new", fail: "POST /repos/acme/svc/git/refs", plan: remove, wantErr: "pushing"},
 		{name: "push existing", fail: "PATCH /repos/acme/svc/git/refs/", setup: existingBranch, plan: remove, wantErr: "pushing"},
 		{name: "open pull request", fail: "POST /repos/acme/svc/pulls", plan: remove, wantErr: "opening pull request"},
-		{name: "open issue", fail: "POST /repos/acme/svc/issues", plan: Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy")}}}}}, wantErr: "opening issue"},
-		{name: "update", fail: "PATCH /repos/acme/svc/issues/", setup: openIssue, plan: Plan{WindowStart: since, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy")}}}}}, wantErr: "svc#3: updating"},
-		{name: "comment", fail: "POST /repos/acme/svc/issues/3/comments", setup: openIssue, plan: Plan{WindowStart: since}, wantErr: "svc#3: commenting"},
-		{name: "close", fail: "PATCH /repos/acme/svc/issues/3", setup: openIssue, plan: Plan{WindowStart: since}, wantErr: "svc#3: closing"},
+		{name: "open issue", fail: "POST /repos/acme/svc/issues", plan: Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy")}}}}}, wantErr: "opening issue"},
+		{name: "update", fail: "PATCH /repos/acme/svc/issues/", setup: openIssue, plan: Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Failing: []Failing{{Policy: pol("svc", "deploy")}}}}}, wantErr: "svc#3: updating"},
+		{name: "comment", fail: "POST /repos/acme/svc/issues/3/comments", setup: openIssue, plan: Plan{Window: DefaultWindow}, wantErr: "svc#3: commenting"},
+		{name: "close", fail: "PATCH /repos/acme/svc/issues/3", setup: openIssue, plan: Plan{Window: DefaultWindow}, wantErr: "svc#3: closing"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -533,7 +558,7 @@ func TestPublishContinuesPastFailures(t *testing.T) {
 	f.addRepo("bad", file("x"))
 	f.addRepo("good", file("y"))
 	f.fail = "POST /repos/acme/bad/git/trees"
-	plan := Plan{WindowStart: since, Repos: []RepoPlan{
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{
 		{Repo: "bad", Remove: []Policy{pol("bad", "x")}},
 		{Repo: "good", Remove: []Policy{pol("good", "y")}},
 	}}
@@ -551,8 +576,8 @@ func TestPublishRefusesUndecidedPlan(t *testing.T) {
 	f := newFakeOrg(t)
 	f.addRepo("svc")
 	f.items = []item{{repo: "svc", number: 7, title: PullTitle, pull: true, bot: true}, {repo: "svc", number: 8, title: IssueTitle, bot: true}}
-	if err := publisher(f.client()).Publish(t.Context(), Plan{}); err == nil || !strings.Contains(err.Error(), "no window start") {
-		t.Fatalf("Publish(Plan{}) = %v, want an error about the window start", err)
+	if err := publisher(f.client()).Publish(t.Context(), Plan{WindowStart: since}); err == nil || !strings.Contains(err.Error(), "no window") {
+		t.Fatalf("Publish(Plan{}) = %v, want an error about the window", err)
 	}
 	if len(f.writes) != 0 || len(f.queries) != 0 {
 		t.Errorf("Publish(Plan{}) made requests: writes %q, queries %q", f.writes, f.queries)
@@ -565,8 +590,74 @@ func TestPublishNeedsSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range []Publisher{{}, {Client: client, Org: "acme", PolicyDir: policyDir}} {
-		if err := p.Publish(t.Context(), Plan{WindowStart: since}); err == nil {
+		if err := p.Publish(t.Context(), Plan{Window: DefaultWindow}); err == nil {
 			t.Errorf("Publish() with %+v succeeded, want an error", p)
+		}
+	}
+}
+
+func TestPublishSkipsArchived(t *testing.T) {
+	// An archived repository is read-only and missing from the plan; its open
+	// pull request is left alone rather than failing every run.
+	f := newFakeOrg(t)
+	f.addRepo("old")
+	f.items = []item{{repo: "old", number: 7, title: PullTitle, pull: true, bot: true, archived: true}}
+	if err := publisher(f.client()).Publish(t.Context(), Plan{Window: DefaultWindow}); err != nil {
+		t.Fatalf("Publish() = %v", err)
+	}
+	if len(f.writes) != 0 {
+		t.Errorf("writes = %q, want none", f.writes)
+	}
+}
+
+func TestPublishLooksUpDefaultBranch(t *testing.T) {
+	// A policy without a recorded default branch has it looked up.
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	f.repos["svc"].defaultBranch = "trunk"
+	f.repos["svc"].branches["trunk"] = f.repos["svc"].branches["main"]
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{{Repo: "svc", Identity: "deploy", LastChanged: changed}}}}}
+	if err := publisher(f.client()).Publish(t.Context(), plan); err != nil {
+		t.Fatalf("Publish() = %v", err)
+	}
+	if want := `svc: open pull "Remove unused Octo STS trust policies" ` + branch + "->trunk"; !slices.Contains(f.writes, want) {
+		t.Errorf("writes = %q, want %q", f.writes, want)
+	}
+	if f.repoGets != 1 {
+		t.Errorf("repository lookups = %d, want 1", f.repoGets)
+	}
+}
+
+func TestReason(t *testing.T) {
+	const pre = "rpc error: code = PermissionDenied desc = "
+	for in, want := range map[string]string{
+		"": "no error was recorded",
+		pre + `trust policy: issuer "https://evil" did not match "https://token.actions.githubusercontent.com"`: "the token's issuer did not match the policy",
+		pre + `trust policy: subject "repo:acme/private:ref:refs/heads/main" did not match pattern "x"`:         "the token's subject did not match the policy",
+		pre + `trust policy: audience "acme" did not match any of ["x"]`:                                        "the token's audience did not match the policy",
+		pre + `trust policy: audience_pattern "a.*" did not match any of ["x"]`:                                 "the token's audience did not match the policy",
+		pre + `trust policy: expected claim "ref" not found in token`:                                           "a claim in the token did not match the policy's claim_pattern",
+		pre + `trust policy: claim "ref" did not match "main"`:                                                  "a claim in the token did not match the policy's claim_pattern",
+		`trust policy: subject "x" did not match "y"`:                                                           "the token's subject did not match the policy",
+		"rpc error: code = InvalidArgument desc = issuer is not allowed":                                        "the exchange failed for a reason other than a claim mismatch",
+		// A claim value cannot pass for an earlier check.
+		pre + `trust policy: claim "x" did not match "trust policy: subject "`: "a claim in the token did not match the policy's claim_pattern",
+		`junk trust policy: subject "x"`:                                       "the exchange failed for a reason other than a claim mismatch",
+	} {
+		if got := reason(in); got != want {
+			t.Errorf("reason(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSpan(t *testing.T) {
+	for d, want := range map[time.Duration]string{
+		DefaultWindow:  "90 days",
+		24 * time.Hour: "day",
+		36 * time.Hour: "36h0m0s",
+	} {
+		if got := span(d); got != want {
+			t.Errorf("span(%s) = %q, want %q", d, got, want)
 		}
 	}
 }

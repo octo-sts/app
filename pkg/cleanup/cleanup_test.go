@@ -187,6 +187,9 @@ func TestDecideFailingDetails(t *testing.T) {
 	if want := now.Add(-DefaultWindow); !plan.WindowStart.Equal(want) {
 		t.Errorf("WindowStart = %v, want %v", plan.WindowStart, want)
 	}
+	if plan.Window != DefaultWindow {
+		t.Errorf("Window = %v, want %v", plan.Window, DefaultWindow)
+	}
 }
 
 func TestDecideWindow(t *testing.T) {

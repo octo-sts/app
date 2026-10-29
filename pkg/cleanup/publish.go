@@ -4,11 +4,14 @@
 package cleanup
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -25,10 +28,14 @@ const (
 	// fail. Open issues are found again by this exact title.
 	IssueTitle = "Octo STS trust policies that only fail"
 
-	// maxCodeLen caps how much of a value, such as a recorded exchange
-	// error, is quoted.
+	// maxCodeLen caps how much of a value is quoted.
 	maxCodeLen = 200
 )
+
+// mismatch matches the trust policy checks' errors up to the word naming what
+// did not match. Claim values only follow that word, so a requester cannot
+// make one error read as another.
+var mismatch = regexp.MustCompile(`^(?:rpc error: code = \w+ desc = )?trust policy: (issuer|subject|audience|audience_pattern|expected claim|claim) `)
 
 // Publisher acts on an organization's Plan: it keeps one pull request per
 // repository removing its unused policies, and one issue per repository
@@ -37,6 +44,9 @@ const (
 type Publisher struct {
 	// Client is authenticated as the organization's installation.
 	Client *github.Client
+	// App is the slug of the GitHub App that Client is installed as, such as
+	// "octo-sts". Only pull requests and issues it opened are touched.
+	App string
 	// Org is the organization name.
 	Org string
 	// PolicyDir is the directory holding trust policies in each repository.
@@ -52,21 +62,26 @@ type Publisher struct {
 // with plan. A failure in one repository does not stop the others; all
 // failures are returned together.
 func (p Publisher) Publish(ctx context.Context, plan Plan) error {
-	if p.Client == nil || p.Org == "" || p.PolicyDir == "" || p.Branch == "" {
-		return errors.New("cleanup: publisher needs a client, org, policy dir and branch")
+	if p.Client == nil || p.App == "" || p.Org == "" || p.PolicyDir == "" || p.Branch == "" {
+		return errors.New("cleanup: publisher needs a client, app, org, policy dir and branch")
 	}
 	// Decide always sets the window. Without it this is not a decided plan,
 	// and publishing its emptiness would close every open proposal.
-	if plan.WindowStart.IsZero() {
-		return errors.New("cleanup: plan has no window start; publish only what Decide returns")
+	if plan.Window <= 0 {
+		return errors.New("cleanup: plan has no window; publish only what Decide returns")
 	}
-	pulls, err := p.open(ctx, "is:pr head:"+p.Branch, "")
+	pulls, pullDups, err := p.open(ctx, "is:pr head:"+p.Branch, "")
 	if err != nil {
 		return err
 	}
-	issues, err := p.open(ctx, fmt.Sprintf("is:issue in:title %q", IssueTitle), IssueTitle)
+	issues, issueDups, err := p.open(ctx, fmt.Sprintf("is:issue in:title %q", IssueTitle), IssueTitle)
 	if err != nil {
 		return err
+	}
+
+	var errs []error
+	for _, d := range slices.Concat(pullDups, issueDups) {
+		errs = append(errs, p.close(ctx, repoName(d.Issue), d.Issue, fmt.Sprintf("Superseded by #%d.", d.keep)))
 	}
 
 	plans := make(map[string]RepoPlan, len(plan.Repos))
@@ -88,18 +103,17 @@ func (p Publisher) Publish(ctx context.Context, plan Plan) error {
 	}
 	slices.Sort(keys)
 
-	var errs []error
 	for _, key := range keys {
 		repo, rp := names[key], plans[key]
 		switch {
 		case len(rp.Remove) > 0:
-			errs = append(errs, p.propose(ctx, repo, rp.Remove, pulls[key], plan.WindowStart))
+			errs = append(errs, p.propose(ctx, repo, rp.Remove, pulls[key], plan.Window))
 		case pulls[key] != nil:
-			errs = append(errs, p.close(ctx, repo, pulls[key], "Every policy this pull request removed has been used or changed since, so there is nothing left to remove."))
+			errs = append(errs, p.close(ctx, repo, pulls[key], "Nothing here is still proposed for removal: each policy has since been used, changed, or removed."))
 		}
 		switch {
 		case len(rp.Failing) > 0:
-			errs = append(errs, p.report(ctx, repo, rp.Failing, issues[key], plan.WindowStart))
+			errs = append(errs, p.report(ctx, repo, rp.Failing, issues[key], plan.Window))
 		case issues[key] != nil:
 			errs = append(errs, p.close(ctx, repo, issues[key], "None of the policies this issue listed is only failing anymore: each has succeeded, changed, or been removed."))
 		}
@@ -107,49 +121,76 @@ func (p Publisher) Publish(ctx context.Context, plan Plan) error {
 	return errors.Join(errs...)
 }
 
+// duplicate is an open issue or pull request superseded by an older one.
+type duplicate struct {
+	*github.Issue
+	keep int
+}
+
 // open returns the organization's open issues or pull requests matching
-// query and authored by a bot, keyed by lowercased repository name. When title
-// is set, only exact title matches count, since search matches words.
+// query and opened by the App, keyed by lowercased repository name. When title
+// is set, only exact title matches count, since search matches words. The
+// oldest match in each repository is kept, and the rest are returned as
+// duplicates.
+//
+// Archived repositories are left out: they are read-only, and ListPolicies
+// skips them, so their items would otherwise be closed and fail every run.
 //
 // Search is one request per hundred results, far cheaper than asking every
 // repository. Incomplete results fail the run, since a missed pull request
 // would be opened twice and a missed stale one left open.
-func (p Publisher) open(ctx context.Context, query, title string) (map[string]*github.Issue, error) {
-	q := fmt.Sprintf("org:%s is:open %s", p.Org, query)
+func (p Publisher) open(ctx context.Context, query, title string) (map[string]*github.Issue, []duplicate, error) {
+	q := fmt.Sprintf("org:%s is:open archived:false author:app/%s %s", p.Org, p.App, query)
+	login := p.App + "[bot]"
 	opts := &github.SearchOptions{AdvancedSearch: github.Ptr(true), ListOptions: github.ListOptions{PerPage: 100}}
-	found := map[string]*github.Issue{}
+	byRepo := map[string][]*github.Issue{}
 	for {
 		res, resp, err := p.Client.Search.Issues(ctx, q, opts)
 		if err != nil {
-			return nil, fmt.Errorf("cleanup: searching %q: %w", q, err)
+			return nil, nil, fmt.Errorf("cleanup: searching %q: %w", q, err)
 		}
 		if res.GetIncompleteResults() {
-			return nil, fmt.Errorf("cleanup: searching %q: GitHub returned incomplete results", q)
+			return nil, nil, fmt.Errorf("cleanup: searching %q: GitHub returned incomplete results", q)
 		}
 		for _, i := range res.Issues {
-			if i.GetUser().GetType() != "Bot" || (title != "" && i.GetTitle() != title) {
+			if !strings.EqualFold(i.GetUser().GetLogin(), login) || (title != "" && i.GetTitle() != title) {
 				continue
 			}
 			key := strings.ToLower(repoName(i))
-			if prev, ok := found[key]; !ok || i.GetNumber() < prev.GetNumber() {
-				found[key] = i
-			}
+			byRepo[key] = append(byRepo[key], i)
 		}
 		if resp.NextPage == 0 {
-			return found, nil
+			break
 		}
 		opts.Page = resp.NextPage
 	}
+
+	found := make(map[string]*github.Issue, len(byRepo))
+	var dups []duplicate
+	for _, key := range slices.Sorted(maps.Keys(byRepo)) {
+		items := byRepo[key]
+		slices.SortFunc(items, func(a, b *github.Issue) int { return cmp.Compare(a.GetNumber(), b.GetNumber()) })
+		found[key] = items[0]
+		for _, d := range items[1:] {
+			dups = append(dups, duplicate{Issue: d, keep: items[0].GetNumber()})
+		}
+	}
+	return found, dups, nil
 }
 
 // propose points the cleanup branch at a commit removing policies from the
 // default branch, and opens or updates its pull request.
-func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, pr *github.Issue, since time.Time) error {
-	r, _, err := p.Client.Repositories.Get(ctx, p.Org, repo)
-	if err != nil {
-		return fmt.Errorf("cleanup: %s/%s: getting repository: %w", p.Org, repo, err)
+func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, pr *github.Issue, window time.Duration) error {
+	// ListPolicies records the default branch; look it up only when a plan
+	// came from elsewhere.
+	base := policies[0].DefaultBranch
+	if base == "" {
+		r, _, err := p.Client.Repositories.Get(ctx, p.Org, repo)
+		if err != nil {
+			return fmt.Errorf("cleanup: %s/%s: getting repository: %w", p.Org, repo, err)
+		}
+		base = r.GetDefaultBranch()
 	}
-	base := r.GetDefaultBranch()
 	b, _, err := p.Client.Repositories.GetBranch(ctx, p.Org, repo, base, 0)
 	if err != nil {
 		return fmt.Errorf("cleanup: %s/%s: getting branch %s: %w", p.Org, repo, base, err)
@@ -188,7 +229,7 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 		// No author is set, so GitHub authors and signs the commit as the
 		// App.
 		commit, _, err := p.Client.Git.CreateCommit(ctx, p.Org, repo, github.Commit{
-			Message: github.Ptr(commitMessage(policies, since)),
+			Message: github.Ptr(commitMessage(policies, window)),
 			Tree:    &github.Tree{SHA: tree.SHA},
 			Parents: []*github.Commit{{SHA: b.GetCommit().SHA}},
 		}, nil)
@@ -205,7 +246,7 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 		}
 	}
 
-	body := p.pullBody(policies, since)
+	body := p.pullBody(policies, window)
 	if pr == nil {
 		if _, _, err := p.Client.PullRequests.Create(ctx, p.Org, repo, &github.NewPullRequest{
 			Title: github.Ptr(PullTitle),
@@ -221,8 +262,8 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 }
 
 // report opens or updates the issue listing policies that only fail.
-func (p Publisher) report(ctx context.Context, repo string, failing []Failing, issue *github.Issue, since time.Time) error {
-	body := p.issueBody(failing, since)
+func (p Publisher) report(ctx context.Context, repo string, failing []Failing, issue *github.Issue, window time.Duration) error {
+	body := p.issueBody(failing, window)
 	if issue == nil {
 		if _, _, err := p.Client.Issues.Create(ctx, p.Org, repo, &github.IssueRequest{
 			Title: github.Ptr(IssueTitle),
@@ -248,6 +289,11 @@ func (p Publisher) update(ctx context.Context, repo string, i *github.Issue, bod
 
 // close explains why an issue or pull request is no longer needed and closes
 // it. A closed pull request's branch is left for the next run to reuse.
+//
+// Search only sees open items, so a pull request someone closes without
+// merging is opened again on the next run that still finds the policies
+// unused. There is no per-policy opt-out: using or changing a policy is what
+// keeps it.
 func (p Publisher) close(ctx context.Context, repo string, i *github.Issue, why string) error {
 	n := i.GetNumber()
 	if _, _, err := p.Client.Issues.CreateComment(ctx, p.Org, repo, n, &github.IssueComment{Body: github.Ptr(why)}); err != nil {
@@ -267,38 +313,56 @@ func (p Publisher) file(pol Policy) string {
 	return path.Join(p.PolicyDir, pol.Identity+policySuffix)
 }
 
-func (p Publisher) pullBody(policies []Policy, since time.Time) string {
+func (p Publisher) pullBody(policies []Policy, window time.Duration) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "These trust policies have had no token exchanges since %s, and none has changed since then:\n\n", day(since))
+	fmt.Fprintf(&b, "These trust policies have had no token exchanges in the last %s, and none has changed in that time:\n\n", span(window))
 	for _, pol := range policies {
 		fmt.Fprintf(&b, "- %s, last changed %s\n", code(p.file(pol)), day(pol.LastChanged))
 	}
 	b.WriteString("\nMerging this pull request removes them. A policy drops out of it once it is used or changed. ")
+	b.WriteString("Closing it without merging only postpones it: the next run proposes the policies that are still unused again.\n\n")
 	fmt.Fprintf(&b, "Octo STS keeps this pull request up to date on the %s branch and closes it when nothing is left to remove.\n", code(p.Branch))
 	return b.String()
 }
 
-func (p Publisher) issueBody(failing []Failing, since time.Time) string {
+func (p Publisher) issueBody(failing []Failing, window time.Duration) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "These trust policies were used since %s, but every token exchange for them since they last changed has failed:\n\n", day(since))
+	fmt.Fprintf(&b, "These trust policies were used in the last %s, but every token exchange for them since they last changed has failed:\n\n", span(window))
 	for _, f := range failing {
-		msg := f.LastError
-		if msg == "" {
-			msg = "no error recorded"
-		}
-		fmt.Fprintf(&b, "- %s, last failed %s: %s\n", code(p.file(f.Policy)), day(f.LastFailed), code(msg))
+		fmt.Fprintf(&b, "- %s, last failed %s: %s\n", code(p.file(f.Policy)), day(f.LastFailed), reason(f.LastError))
 	}
 	b.WriteString("\nThey are kept, since someone is trying to use them. Octo STS keeps this issue up to date and closes it once each one succeeds, changes, or is removed.\n")
 	return b.String()
 }
 
-func commitMessage(policies []Policy, since time.Time) string {
+func commitMessage(policies []Policy, window time.Duration) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s\n\nThese policies have had no token exchanges since %s:\n\n", PullTitle, day(since))
+	fmt.Fprintf(&b, "%s\n\nThese policies have had no token exchanges in the last %s:\n\n", PullTitle, span(window))
 	for _, pol := range policies {
 		fmt.Fprintf(&b, "- %s\n", pol.Identity)
 	}
 	return b.String()
+}
+
+// reason describes why an exchange failed without quoting the error. Errors
+// can carry the requester's claims, such as a private repository's subject,
+// and the issue may be in a public repository.
+func reason(err string) string {
+	m := mismatch.FindStringSubmatch(err)
+	switch {
+	case err == "":
+		return "no error was recorded"
+	case m == nil:
+		return "the exchange failed for a reason other than a claim mismatch"
+	case m[1] == "issuer":
+		return "the token's issuer did not match the policy"
+	case m[1] == "subject":
+		return "the token's subject did not match the policy"
+	case m[1] == "audience" || m[1] == "audience_pattern":
+		return "the token's audience did not match the policy"
+	default:
+		return "a claim in the token did not match the policy's claim_pattern"
+	}
 }
 
 // repoName returns the name of the repository an issue belongs to. Search
@@ -310,15 +374,26 @@ func repoName(i *github.Issue) string {
 	return path.Base(i.GetRepositoryURL())
 }
 
-// code quotes s as inline Markdown code on one line. Exchange errors can carry
-// claim values from whoever requested the token, so they are kept out of
-// Markdown that could mention users or link elsewhere.
+// code quotes s as inline Markdown code on one line.
 func code(s string) string {
 	s = strings.Join(strings.Fields(strings.ReplaceAll(s, "`", "'")), " ")
 	if r := []rune(s); len(r) > maxCodeLen {
 		s = string(r[:maxCodeLen]) + "…"
 	}
 	return "`" + s + "`"
+}
+
+// span describes a window, in days when it is a whole number of them.
+func span(d time.Duration) string {
+	const day = 24 * time.Hour
+	switch {
+	case d == day:
+		return "day"
+	case d%day == 0:
+		return fmt.Sprintf("%d days", d/day)
+	default:
+		return d.String()
+	}
 }
 
 func day(t time.Time) string {
