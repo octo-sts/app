@@ -52,14 +52,14 @@ func ListPolicies(ctx context.Context, client *github.Client, org, policyDir str
 		if err != nil {
 			return nil, err
 		}
-		changed, err := lastChanged(ctx, client, org, policyDir, batch, files)
+		changed, branches, err := lastChanged(ctx, client, org, policyDir, batch, files)
 		if err != nil {
 			return nil, err
 		}
 		for i, repo := range batch {
 			for j, name := range files[i] {
 				identity, _ := strings.CutSuffix(name, policySuffix)
-				policies = append(policies, Policy{Repo: repo, Identity: identity, LastChanged: changed[i][j]})
+				policies = append(policies, Policy{Repo: repo, Identity: identity, LastChanged: changed[i][j], DefaultBranch: branches[i]})
 			}
 		}
 	}
@@ -129,14 +129,16 @@ func policyFiles(ctx context.Context, client *github.Client, org, policyDir stri
 }
 
 // lastChanged returns when each file in files was last changed on its
-// repository's default branch. A file with no history gets the zero time.
+// repository's default branch, and each repository's default branch name. A
+// file with no history gets the zero time.
 //
 // Path history leaves out merge commits, so a policy merged with a merge
 // commit (rather than squashed) gets its branch commit's date. A policy that
 // sat on a branch for longer than the window can then look old on the day it
 // lands; the cleanup PR's reviewer is the backstop for that.
-func lastChanged(ctx context.Context, client *github.Client, org, policyDir string, repos []string, files [][]string) ([][]time.Time, error) {
+func lastChanged(ctx context.Context, client *github.Client, org, policyDir string, repos []string, files [][]string) ([][]time.Time, []string, error) {
 	changed := make([][]time.Time, len(repos))
+	branches := make([]string, len(repos))
 	type ref struct{ repo, file int }
 	var refs []ref
 	for i := range repos {
@@ -157,7 +159,7 @@ func lastChanged(ctx context.Context, client *github.Client, org, policyDir stri
 				if k > 0 {
 					q.WriteString("  } } } }\n")
 				}
-				fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { target { ... on Commit {\n", r.repo, quote(org), quote(repos[r.repo]))
+				fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { name target { ... on Commit {\n", r.repo, quote(org), quote(repos[r.repo]))
 			}
 			fmt.Fprintf(&q, "    f%d: history(first: 1, path: %s) { nodes { committedDate } }\n", r.file, quote(path.Join(policyDir, files[r.repo][r.file])))
 		}
@@ -165,6 +167,7 @@ func lastChanged(ctx context.Context, client *github.Client, org, policyDir stri
 
 		var data map[string]*struct {
 			DefaultBranchRef *struct {
+				Name   string `json:"name"`
 				Target map[string]struct {
 					Nodes []struct {
 						CommittedDate time.Time `json:"committedDate"`
@@ -173,19 +176,20 @@ func lastChanged(ctx context.Context, client *github.Client, org, policyDir stri
 			} `json:"defaultBranchRef"`
 		}
 		if err := graphql(ctx, client, q.String(), &data); err != nil {
-			return nil, fmt.Errorf("cleanup: last changes in %s: %w", org, err)
+			return nil, nil, fmt.Errorf("cleanup: last changes in %s: %w", org, err)
 		}
 		for _, r := range chunk {
 			d := data[fmt.Sprintf("r%d", r.repo)]
 			if d == nil || d.DefaultBranchRef == nil {
 				continue
 			}
+			branches[r.repo] = d.DefaultBranchRef.Name
 			if h := d.DefaultBranchRef.Target[fmt.Sprintf("f%d", r.file)]; len(h.Nodes) > 0 {
 				changed[r.repo][r.file] = h.Nodes[0].CommittedDate
 			}
 		}
 	}
-	return changed, nil
+	return changed, branches, nil
 }
 
 // graphql runs query and decodes its data into out. A NOT_FOUND error, such as

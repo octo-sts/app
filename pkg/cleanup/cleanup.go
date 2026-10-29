@@ -35,6 +35,9 @@ type Policy struct {
 	// LastChanged is when the policy file was last changed. The zero value
 	// means unknown, and such a policy is never removed.
 	LastChanged time.Time
+	// DefaultBranch is the branch the policy was read from, or empty if
+	// unknown.
+	DefaultBranch string
 }
 
 // Usage summarizes the exchanges for one (scope, identity) pair.
@@ -90,7 +93,9 @@ type RepoPlan struct {
 type Plan struct {
 	// WindowStart is the oldest time an exchange still counts as use.
 	WindowStart time.Time
-	Repos       []RepoPlan
+	// Window is how far back from the decision exchanges counted.
+	Window time.Duration
+	Repos  []RepoPlan
 }
 
 // Decide sorts the organization's policies into those to remove and those to
@@ -163,7 +168,7 @@ func Decide(cfg Config, policies []Policy, usage []Usage) (Plan, error) {
 		}
 	}
 
-	plan := Plan{WindowStart: start}
+	plan := Plan{WindowStart: start, Window: window}
 	for _, p := range plans {
 		slices.SortFunc(p.Remove, func(a, b Policy) int { return cmp.Compare(a.Identity, b.Identity) })
 		slices.SortFunc(p.Failing, func(a, b Failing) int { return cmp.Compare(a.Identity, b.Identity) })

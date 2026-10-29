@@ -4,6 +4,7 @@
 package cleanup
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,8 @@ type fakeRepo struct {
 	// dates maps a file name to its last change; files missing here have no
 	// history.
 	dates map[string]time.Time
+	// branch is the default branch, "main" when empty.
+	branch string
 }
 
 func defaultRepos() []fakeRepo {
@@ -57,7 +60,7 @@ func defaultRepos() []fakeRepo {
 		owner: "other", name: "svc",
 		entries: []entry{{"foreign.sts.yaml", "blob"}},
 	}, {
-		owner: "acme", name: "fork", fork: true,
+		owner: "acme", name: "fork", fork: true, branch: "trunk",
 		entries: []entry{{"upstream.sts.yaml", "blob"}},
 		dates:   map[string]time.Time{"upstream.sts.yaml": changed},
 	}, {
@@ -200,7 +203,8 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 			}
 			target[f[1]] = map[string]any{"nodes": nodes}
 		}
-		data[alias] = map[string]any{"defaultBranchRef": map[string]any{"target": target}}
+		branch := cmp.Or(r.branch, "main")
+		data[alias] = map[string]any{"defaultBranchRef": map[string]any{"name": branch, "target": target}}
 	}
 	return data, errs
 }
@@ -212,10 +216,10 @@ func TestListPolicies(t *testing.T) {
 		t.Fatalf("ListPolicies() = %v", err)
 	}
 	want := []Policy{
-		{Repo: "svc", Identity: "deploy", LastChanged: changed},
-		{Repo: "svc", Identity: "release", LastChanged: changed},
-		{Repo: "fork", Identity: "upstream", LastChanged: changed},
-		{Repo: ".github", Identity: "octo-sts-cleanup"},
+		{Repo: "svc", Identity: "deploy", LastChanged: changed, DefaultBranch: "main"},
+		{Repo: "svc", Identity: "release", LastChanged: changed, DefaultBranch: "main"},
+		{Repo: "fork", Identity: "upstream", LastChanged: changed, DefaultBranch: "trunk"},
+		{Repo: ".github", Identity: "octo-sts-cleanup", DefaultBranch: "main"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListPolicies() =\n%+v\nwant\n%+v", got, want)
@@ -246,7 +250,7 @@ func TestListPoliciesBatches(t *testing.T) {
 		t.Fatalf("ListPolicies() returned %d policies, want %d", len(got), 2*batchSize)
 	}
 	for i, p := range got {
-		if want := fmt.Sprintf("repo-%03d", i); p.Repo != want || p.Identity != "p" || !p.LastChanged.Equal(changed) {
+		if want := fmt.Sprintf("repo-%03d", i); p.Repo != want || p.Identity != "p" || !p.LastChanged.Equal(changed) || p.DefaultBranch != "main" {
 			t.Fatalf("policy %d = %+v, want %s/p changed %v", i, p, want, changed)
 		}
 	}
@@ -279,7 +283,7 @@ func TestListPoliciesManyPolicies(t *testing.T) {
 		if k >= 250 {
 			i, j = 1, k-250
 		}
-		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute)}
+		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main"}
 		if p != want {
 			t.Fatalf("policy %d = %+v, want %+v", k, p, want)
 		}
