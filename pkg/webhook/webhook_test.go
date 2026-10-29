@@ -4992,3 +4992,136 @@ func TestInstallationRefusedBoundsReadAndClosesBody(t *testing.T) {
 		t.Errorf("read %d bytes and closed %d times", body.bytesRead, body.closeCalls)
 	}
 }
+
+// TestNoCommonAncestor covers compares between commits with unrelated
+// histories, which GitHub answers with a 404. The event still validates what
+// is live at the head under the same rules as a new branch: the policy tree at
+// the head plus each PR's diff, skipping a non-default branch without PRs.
+func TestNoCommonAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		event        string
+		branch       string
+		prs          bool
+		crossRepoPR  bool // the suite's only PR lives in a repository the App cannot read
+		compareBody  string
+		wantStatus   int
+		wantChecks   int
+		wantSnapshot bool
+	}{
+		{name: "default branch snapshot", event: "check_suite", branch: "main", wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "feature branch without PRs skipped", event: "check_suite", branch: "feature", wantStatus: http.StatusOK},
+		{name: "feature branch PR diff and snapshot", event: "check_suite", branch: "feature", prs: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "default branch PR diff and snapshot", event: "check_suite", branch: "main", prs: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "skipped cross-repo PR still snapshots", event: "check_suite", branch: "feature", prs: true, crossRepoPR: true, wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+		{name: "other 404 still fails", event: "check_suite", branch: "main", compareBody: `{"message":"Not Found"}`, wantStatus: http.StatusInternalServerError},
+		{name: "long push snapshot", event: "push", branch: "main", wantStatus: http.StatusOK, wantChecks: 1, wantSnapshot: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			checks, snapshots := 0, 0
+			mux := http.NewServeMux()
+			mux.HandleFunc("POST /app/installations/1111/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"token":"t","expires_at":%q}`, time.Now().Add(time.Hour).Format(time.RFC3339))
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, _ *http.Request) {
+				body := tc.compareBody
+				if body == "" {
+					body = `{"message":"No common ancestor between abcd1234 and 5678.","documentation_url":"https://docs.github.com/rest/commits/commits#compare-two-commits"}`
+				}
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, body)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/commits/5678", func(w http.ResponseWriter, _ *http.Request) {
+				snapshots++
+				fmt.Fprint(w, `{"sha":"5678","tree":{"sha":"root"}}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/root", func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, `{"truncated":false,"tree":[{"path":".github","type":"tree","sha":"gh"}]}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/gh", func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, `{"truncated":false,"tree":[{"path":"chainguard","type":"tree","sha":"cg"}]}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/hidden/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusNotFound)
+				fmt.Fprint(w, `{"message":"Not Found"}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/cg", func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprint(w, `{"truncated":false,"tree":[{"path":"test.sts.yaml","type":"blob","sha":"blob1"}]}`)
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/pulls/7", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("5678")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1)})
+			})
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/pulls/7/files", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode([]*github.CommitFile{{Filename: new(".github/chainguard/test.sts.yaml"), Status: new("modified")}})
+			})
+			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+				checks++
+				fmt.Fprint(w, "{}")
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+				if err != nil {
+					t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				defer f.Close()
+				io.Copy(w, f)
+			})
+			gh := httptest.NewServer(mux)
+			t.Cleanup(gh.Close)
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+			secret := []byte("hunter2")
+			v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+
+			var event any
+			switch tc.event {
+			case "check_suite":
+				suite := &github.CheckSuite{ID: new(int64(1)), HeadSHA: new("5678"), HeadBranch: new(tc.branch), BeforeSHA: new("abcd1234")}
+				if tc.prs {
+					base := "https://api.github.com/repos/foo/bar"
+					if tc.crossRepoPR {
+						base = "https://api.github.com/repos/foo/hidden"
+					}
+					suite.PullRequests = []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new(base)}}}}
+				}
+				event = github.CheckSuiteEvent{
+					Installation: &github.Installation{ID: new(int64(1111))},
+					Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), FullName: new("foo/bar"), DefaultBranch: new("main")},
+					Sender:       &github.User{Login: new("test-user")},
+					Action:       new("requested"),
+					CheckSuite:   suite,
+				}
+			case "push":
+				push := github.PushEvent{
+					Installation: &github.Installation{ID: new(int64(1111))},
+					Repo:         &github.PushEventRepository{Owner: &github.User{Login: new("foo")}, Name: new("bar"), DefaultBranch: new("main")},
+					Ref:          new("refs/heads/" + tc.branch), Before: new("abcd1234"), After: new("5678"),
+				}
+				for range 20 {
+					push.Commits = append(push.Commits, &github.HeadCommit{})
+				}
+				event = push
+			}
+			body, err := json.Marshal(event)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequestWithContext(slogtest.Context(t), http.MethodPost, "/", bytes.NewReader(body))
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", tc.event)
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			v.ServeHTTP(rec, req)
+
+			if rec.Code != tc.wantStatus || checks != tc.wantChecks || (snapshots > 0) != tc.wantSnapshot {
+				t.Fatalf("status=%d checks=%d snapshot=%t, want status=%d checks=%d snapshot=%t; body: %s", rec.Code, checks, snapshots > 0, tc.wantStatus, tc.wantChecks, tc.wantSnapshot, rec.Body.String())
+			}
+		})
+	}
+}

@@ -998,7 +998,27 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 				detection, detectionErr = DetectionDegraded, err.Error()
 				break
 			}
-			return nil, err
+			if !isNoCommonAncestor(err) {
+				return nil, err
+			}
+			// Without shared history the push's net change is unknown, so
+			// validate every policy live at the head and record the gap,
+			// which also hides any deletions.
+			detection, detectionErr = DetectionDegraded, err.Error()
+			live, serr := e.policyTreeSnapshot(ctx, client, owner, repo, sha)
+			if serr != nil {
+				if installationToken403(serr) != nil {
+					detectionErr, tokenErr = serr.Error(), serr
+					break
+				}
+				if isProvenWebhookRateLimit(serr) {
+					detectionErr = serr.Error()
+					break
+				}
+				return nil, serr
+			}
+			changes = policiesPresent(live)
+			break
 		}
 		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
 		if err != nil {
@@ -1220,7 +1240,38 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 	// validated, but they prove the repository carried policies, which matters
 	// when the last one goes and the head has no policy directory left.
 	deletedPolicy := false
-	if cs.GetCheckSuite().GetBeforeSHA() == zeroHash {
+	before := cs.GetCheckSuite().GetBeforeSHA()
+	scanHead := before == zeroHash
+	if !scanHead {
+		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, before, sha, &github.ListOptions{})
+		switch {
+		case err == nil:
+			changes, _, err := e.completeCompareChanges(ctx, client, owner, repo, before, sha, resp)
+			if err != nil {
+				if isProvenWebhookRateLimit(err) {
+					log.Warnf("rate-limited discovering check suite changes; skipping CheckRun: %v", err)
+					return nil, nil
+				}
+				return nil, err
+			}
+			toValidate := pathsToValidate(changes)
+			deletedPolicy = len(changes) > len(toValidate)
+			for _, path := range toValidate {
+				files = append(files, policyFile{path: path, repo: repo})
+			}
+		case isProvenWebhookRateLimit(err):
+			log.Warnf("rate-limited comparing check suite; skipping CheckRun: %v", err)
+			return nil, nil
+		case isNoCommonAncestor(err):
+			// Without shared history the compare says nothing, so follow the
+			// rules for a new branch: scan the head, plus each PR's diff below.
+			log.Warnf("check suite before %s and head %s share no history; validating what is live at the head: %v", before, sha, err)
+			scanHead = true
+		default:
+			return nil, err
+		}
+	}
+	if scanHead {
 		// New non-default branch: skip if there are no associated PRs.
 		// A feature branch points at a commit already present in the
 		// repository and doesn't need a full directory scan. This
@@ -1256,28 +1307,6 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 		sort.Strings(paths)
 		for _, path := range paths {
-			files = append(files, policyFile{path: path, repo: repo})
-		}
-	} else {
-		resp, _, err := client.Repositories.CompareCommits(ctx, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, &github.ListOptions{})
-		if err != nil {
-			if isProvenWebhookRateLimit(err) {
-				log.Warnf("rate-limited comparing check suite; skipping CheckRun: %v", err)
-				return nil, nil
-			}
-			return nil, err
-		}
-		changes, _, err := e.completeCompareChanges(ctx, client, owner, repo, cs.GetCheckSuite().GetBeforeSHA(), sha, resp)
-		if err != nil {
-			if isProvenWebhookRateLimit(err) {
-				log.Warnf("rate-limited discovering check suite changes; skipping CheckRun: %v", err)
-				return nil, nil
-			}
-			return nil, err
-		}
-		toValidate := pathsToValidate(changes)
-		deletedPolicy = len(changes) > len(toValidate)
-		for _, path := range toValidate {
 			files = append(files, policyFile{path: path, repo: repo})
 		}
 	}
@@ -1323,7 +1352,7 @@ func (e *Validator) handleCheckSuite(ctx context.Context, cs checkSuite) (*githu
 		}
 	}
 	if len(files) == 0 {
-		if cs.GetCheckSuite().GetBeforeSHA() == zeroHash && !deletedPolicy {
+		if scanHead && !deletedPolicy {
 			// The full directory scan above already found no policies at sha,
 			// so this repository has nothing a required check could guard.
 			return nil, nil
