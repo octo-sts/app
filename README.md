@@ -59,8 +59,10 @@ and token exchanges fail with a 403 and
 
 These organizations should self-host octo-sts with their own GitHub App and a
 static egress IP, then add that IP to the allow list. The Terraform module in
-[`modules/app`](./modules/app) is a starting point, but it does not set up a
-static egress IP for you. See
+[`modules/app`](./modules/app) is a starting point, but it hard-codes
+`egress = "PRIVATE_RANGES_ONLY"`, so GitHub traffic does not use your network.
+A static egress IP means changing the module to `ALL_TRAFFIC` egress and adding
+Cloud NAT. See
 [#1818](https://github.com/octo-sts/app/issues/1818) for details.
 
 ### The Trust Policy

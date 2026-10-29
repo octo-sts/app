@@ -2099,11 +2099,12 @@ func withContentsConnectionReset() orgFakeGitHubOption {
 	}
 }
 
-// TestClassifyMintErrorSecondaryLimitBodyIsNotForbidden: a secondary rate limit
+// TestClassifyMintErrorSecondaryLimitBodyIsRateLimited: a secondary rate limit
 // can arrive as a 403 with neither rate-limit header, marked only by its
-// documentation_url. Labelling it an access denial would send an org admin
-// chasing an IP allow list that is not the problem.
-func TestClassifyMintErrorSecondaryLimitBodyIsNotForbidden(t *testing.T) {
+// documentation_url. It is a rate limit, as on the contents read; labelling it an
+// access denial would send an org admin chasing an IP allow list that is not the
+// problem.
+func TestClassifyMintErrorSecondaryLimitBodyIsRateLimited(t *testing.T) {
 	for _, docURL := range []string{
 		"https://docs.github.com/rest/overview/resources-in-the-rest-api#abuse-rate-limits",
 		"https://docs.github.com/rest/using-the-rest-api/rate-limits-for-the-rest-api#about-secondary-rate-limits",
@@ -2115,8 +2116,8 @@ func TestClassifyMintErrorSecondaryLimitBodyIsNotForbidden(t *testing.T) {
 				Header:     http.Header{},
 				Body:       io.NopCloser(strings.NewReader(body)),
 			}}
-			if got := classifyMintError(t.Context(), "org", err); got.kind == fetchForbidden {
-				t.Errorf("kind = %v, want anything but fetchForbidden for a secondary rate limit", got.kind)
+			if got := classifyMintError(t.Context(), "org", err); got.kind != fetchRateLimited {
+				t.Errorf("kind = %v, want fetchRateLimited for a secondary rate limit", got.kind)
 			}
 		})
 	}

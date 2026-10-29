@@ -168,8 +168,8 @@ func forbiddenFetch(owner string) fetchResult {
 	return fetchResult{kind: fetchForbidden, err: forbiddenStatus(owner)}
 }
 
-// forbiddenStatus is PermissionDenied, matching a forbidden trust policy read:
-// GitHub refused the App for this org, and retrying will not change that.
+// forbiddenStatus is PermissionDenied, the same code as a forbidden trust policy
+// read: GitHub refused the App for this org, and retrying will not change that.
 func forbiddenStatus(owner string) error {
 	return status.Errorf(codes.PermissionDenied, msgIssuerForbiddenFmt, owner)
 }
@@ -255,7 +255,11 @@ func classifyMintError(ctx context.Context, owner string, err error) fetchResult
 		case herr.Response.StatusCode == http.StatusUnprocessableEntity:
 			return noAccessFetch()
 
-		case herr.Response.StatusCode == http.StatusForbidden && !isSecondaryLimitBody(body):
+		case herr.Response.StatusCode == http.StatusForbidden && isSecondaryLimitBody(body):
+			clog.WarnContextf(ctx, "org trusted issuers: mint secondary rate limited for %s", owner)
+			return rateLimitedFetch()
+
+		case herr.Response.StatusCode == http.StatusForbidden:
 			// A suspended installation, or an org IP allow list refusing this egress IP.
 			clog.WarnContextf(ctx, "org trusted issuers: mint forbidden for %s (403, not a rate limit)", owner)
 			return forbiddenFetch(owner)
