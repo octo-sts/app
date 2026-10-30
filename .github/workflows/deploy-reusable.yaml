@@ -49,6 +49,7 @@ jobs:
             cloudbilling.googleapis.com:443
             cloudkms.googleapis.com:443
             cloudresourcemanager.googleapis.com:443
+            cloudscheduler.googleapis.com:443
             compute.googleapis.com:443
             dl.google.com:443
             dns.googleapis.com:443
