@@ -85,6 +85,12 @@ variable "github_webhook_organization_filter" {
   default     = ""
 }
 
+variable "policy_dir" {
+  description = "Directory, relative to the repository root, holding trust policies (OCTOSTS_POLICY_DIR). Set on both the exchange service and the webhook. Deployments that share GitHub orgs should each use their own, so each reads and validates only its own policies."
+  type        = string
+  default     = ".github/chainguard"
+}
+
 variable "sticky_store" {
   description = "Backend for sticky routing (checks:write). Empty string disables."
   type        = string

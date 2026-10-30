@@ -20,8 +20,9 @@ module "prober" {
   working_dir = "${path.module}/../../"
 
   env = {
-    STS_DOMAIN      = "octo-staging.dev"
-    PROBER_IDENTITY = "prober-staging"
+    STS_DOMAIN         = "octo-staging.dev"
+    PROBER_IDENTITY    = "prober-staging"
+    OCTOSTS_POLICY_DIR = local.policy_dir
   }
 
   enable_alert          = true

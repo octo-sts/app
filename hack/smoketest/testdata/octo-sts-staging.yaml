@@ -16,7 +16,7 @@ tests:
       contents_read:
         org: octo-sts
         repo: prober
-        path: .github/chainguard/smoke-test.sts.yaml
+        path: .github/chainguard-staging/smoke-test.sts.yaml
       issues_read:
         org: octo-sts
         repo: prober

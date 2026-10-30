@@ -52,6 +52,8 @@ resource "cosign_sign" "webhook" {
 }
 
 locals {
+  policy_dir = ".github/chainguard-staging"
+
   notification_channels = [
     data.google_monitoring_notification_channel.octo-sts-slack.name
   ]
@@ -71,6 +73,10 @@ module "app" {
   }
 
   domain = "octo-staging.dev"
+  # Staging shares the octo-sts org with prod, so it keeps its own policies.
+  # Each deployment then reads, validates and cleans up only the policies it
+  # serves, against only its own exchange history.
+  policy_dir = local.policy_dir
   images = {
     app     = cosign_sign.this.signed_ref
     webhook = cosign_sign.webhook.signed_ref
