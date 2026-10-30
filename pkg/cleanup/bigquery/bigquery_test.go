@@ -416,3 +416,89 @@ func TestLoadErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestMerge(t *testing.T) {
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	ago := func(d int) time.Time { return now.AddDate(0, 0, -d) }
+	staging := History{
+		Start:  ago(95),
+		Latest: now.Add(-time.Minute),
+		Usage: map[string][]cleanup.Usage{
+			"acme": {{Scope: "acme/prober", Identity: "prober-staging", LastSucceeded: ago(1)}},
+		},
+	}
+	prod := History{
+		Start:  ago(93),
+		Latest: now.Add(-time.Hour),
+		Usage: map[string][]cleanup.Usage{
+			"acme":  {{Scope: "acme", Identity: "sync", LastSucceeded: ago(2)}},
+			"other": {{Scope: "other/svc", Identity: "deploy", LastFailed: ago(3)}},
+		},
+	}
+
+	got := Merge(staging, prod)
+	want := History{
+		Start:  ago(93),
+		Latest: now.Add(-time.Hour),
+		Usage: map[string][]cleanup.Usage{
+			"acme":  {staging.Usage["acme"][0], prod.Usage["acme"][0]},
+			"other": prod.Usage["other"],
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Merge() =\n%+v\nwant\n%+v", got, want)
+	}
+	if got := Merge(prod, staging); !got.Start.Equal(want.Start) || !got.Latest.Equal(want.Latest) {
+		t.Errorf("Merge() in the other order: Start %v Latest %v, want %v %v", got.Start, got.Latest, want.Start, want.Latest)
+	}
+
+	// A table with no usable history stops every decision, whatever its
+	// position.
+	stalled := History{Latest: ago(2)}
+	for _, hs := range [][]History{{stalled, staging}, {staging, stalled}, {staging, stalled, prod}} {
+		if got := Merge(hs...); !got.Start.IsZero() {
+			t.Errorf("Merge() with a stalled table: Start = %v, want zero", got.Start)
+		}
+	}
+
+	if got := Merge(staging); !reflect.DeepEqual(got, staging) {
+		t.Errorf("Merge(one) = %+v, want it unchanged", got)
+	}
+	if got := Merge(); !got.Start.IsZero() || got.Usage != nil {
+		t.Errorf("Merge() = %+v, want the zero History", got)
+	}
+}
+
+func TestMergeKeepsPolicyUsedElsewhere(t *testing.T) {
+	// A policy used only through the other deployment is kept once the
+	// histories are merged, and removed without it.
+	now := time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)
+	cfg := cleanup.Config{Org: "acme", OrgPolicyRepo: ".github", CleanupIdentity: "octo-sts-cleanup", Now: now}
+	policies := []cleanup.Policy{{Repo: "prober", Identity: "prober-staging", LastChanged: now.AddDate(-1, 0, 0)}}
+	prod := History{Start: now.AddDate(0, 0, -93), Latest: now, Usage: map[string][]cleanup.Usage{}}
+	staging := History{Start: now.AddDate(0, 0, -95), Latest: now, Usage: map[string][]cleanup.Usage{
+		"acme": {{Scope: "acme/prober", Identity: "prober-staging", LastSucceeded: now.AddDate(0, 0, -1)}},
+	}}
+
+	for name, tt := range map[string]struct {
+		h          History
+		wantRemove int
+	}{
+		"prod only": {h: prod, wantRemove: 1},
+		"merged":    {h: Merge(prod, staging), wantRemove: 0},
+	} {
+		c := cfg
+		c.HistoryStart = tt.h.Start
+		plan, err := cleanup.Decide(c, policies, tt.h.For("acme"))
+		if err != nil {
+			t.Fatalf("%s: Decide() = %v", name, err)
+		}
+		n := 0
+		for _, r := range plan.Repos {
+			n += len(r.Remove)
+		}
+		if n != tt.wantRemove {
+			t.Errorf("%s: removes %d policies, want %d", name, n, tt.wantRemove)
+		}
+	}
+}

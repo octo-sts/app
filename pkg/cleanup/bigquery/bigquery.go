@@ -101,6 +101,38 @@ func (h History) For(org string) []cleanup.Usage {
 	return h.Usage[strings.ToLower(org)]
 }
 
+// Merge combines histories loaded from several tables, such as the exchange
+// tables of deployments that read the same trust policies. Each records only
+// its own exchanges, so a policy used through just one of them would look
+// unused to the others.
+//
+// The merged history only reaches back as far as the shortest of them, and
+// its Start is zero when any Start is zero, so a table that is too short or
+// stalled stops every decision. Latest is the stalest of the Latest times.
+// Usage is concatenated per organization; cleanup.Decide merges repeated
+// (scope, identity) pairs.
+func Merge(histories ...History) History {
+	if len(histories) == 0 {
+		return History{}
+	}
+	m := History{Start: histories[0].Start, Latest: histories[0].Latest, Usage: map[string][]cleanup.Usage{}}
+	for _, h := range histories {
+		switch {
+		case h.Start.IsZero() || m.Start.IsZero():
+			m.Start = time.Time{}
+		case h.Start.After(m.Start):
+			m.Start = h.Start
+		}
+		if h.Latest.Before(m.Latest) {
+			m.Latest = h.Latest
+		}
+		for org, u := range h.Usage {
+			m.Usage[org] = append(m.Usage[org], u...)
+		}
+	}
+	return m
+}
+
 // Load reads every organization's usage since since, and where the unbroken
 // history before now begins.
 func (s *Source) Load(ctx context.Context, since, now time.Time) (History, error) {
