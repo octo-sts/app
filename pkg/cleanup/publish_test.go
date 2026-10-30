@@ -131,8 +131,8 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 			t.Errorf("search without advanced_search: %s", r.URL.RawQuery)
 		}
 		f.queries = append(f.queries, q.Get("q"))
-		if !strings.Contains(q.Get("q"), " archived:false author:app/octo-sts ") {
-			t.Errorf("search %q is not scoped to unarchived repositories and the App", q.Get("q"))
+		if !strings.Contains(q.Get("q"), " archived:false ") || strings.Contains(q.Get("q"), "author:") {
+			t.Errorf("search %q is not scoped to unarchived repositories, or filters authors in the query", q.Get("q"))
 		}
 		var all []map[string]any
 		for _, it := range f.items {
@@ -286,7 +286,7 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func publisher(c *github.Client) Publisher {
-	return Publisher{Client: c, App: "octo-sts", Org: "acme", PolicyDir: policyDir, Branch: branch}
+	return Publisher{Client: c, Apps: []string{"octo-sts", "octo-sts-2"}, Org: "acme", PolicyDir: policyDir, Branch: branch}
 }
 
 func pol(repo, identity string) Policy {
@@ -319,8 +319,8 @@ func TestPublishOpensPullRequest(t *testing.T) {
 		t.Errorf("writes =\n%q\nwant\n%q", f.writes, wantWrites)
 	}
 	wantQueries := []string{
-		"org:acme is:open archived:false author:app/octo-sts is:pr head:" + branch,
-		`org:acme is:open archived:false author:app/octo-sts is:issue in:title "Octo STS trust policies that only fail"`,
+		"org:acme is:open archived:false is:pr head:" + branch,
+		`org:acme is:open archived:false is:issue in:title "Octo STS trust policies that only fail"`,
 	}
 	if !reflect.DeepEqual(f.queries, wantQueries) {
 		t.Errorf("search queries = %q, want %q", f.queries, wantQueries)
@@ -589,10 +589,41 @@ func TestPublishNeedsSettings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []Publisher{{}, {Client: client, Org: "acme", PolicyDir: policyDir}} {
+	for _, p := range []Publisher{
+		{},
+		{Client: client, Apps: []string{"octo-sts"}, Org: "acme", PolicyDir: policyDir},
+		{Client: client, Apps: []string{"octo-sts", ""}, Org: "acme", PolicyDir: policyDir, Branch: branch},
+	} {
 		if err := p.Publish(t.Context(), Plan{Window: DefaultWindow}); err == nil {
 			t.Errorf("Publish() with %+v succeeded, want an error", p)
 		}
+	}
+}
+
+func TestPublishFindsItemsFromAnyApp(t *testing.T) {
+	// Exchanges rotate across the deployment's Apps, so last run's pull
+	// request and issue may come from another App than this run's token.
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	f.items = []item{
+		{repo: "svc", number: 7, title: PullTitle, body: "old", pull: true, login: "Octo-STS-2[bot]"},
+		{repo: "svc", number: 8, title: IssueTitle, body: "old", login: "octo-sts-2[bot]"},
+	}
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{
+		Repo:    "svc",
+		Remove:  []Policy{pol("svc", "deploy")},
+		Failing: []Failing{{Policy: pol("svc", "release"), LastFailed: since}},
+	}}}
+	if err := publisher(f.client()).Publish(t.Context(), plan); err != nil {
+		t.Fatalf("Publish() = %v", err)
+	}
+	for _, w := range f.writes {
+		if strings.Contains(w, "open ") {
+			t.Errorf("opened a duplicate: writes %q", f.writes)
+		}
+	}
+	if !slices.Contains(f.writes, "svc: edit #7") || !slices.Contains(f.writes, "svc: edit #8") {
+		t.Errorf("writes = %q, want #7 and #8 updated", f.writes)
 	}
 }
 
