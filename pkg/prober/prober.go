@@ -6,6 +6,7 @@ package prober
 import (
 	"context"
 	"fmt"
+	"path"
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
@@ -20,6 +21,9 @@ import (
 type envConfig struct {
 	Domain         string `envconfig:"STS_DOMAIN" required:"true"`
 	ProberIdentity string `envconfig:"PROBER_IDENTITY" required:"true"`
+	// PolicyDir must match the deployment's OCTOSTS_POLICY_DIR, since the
+	// prober reads back the policy it exchanged with.
+	PolicyDir string `envconfig:"OCTOSTS_POLICY_DIR" default:".github/chainguard"`
 }
 
 func Func(ctx context.Context) error {
@@ -72,7 +76,7 @@ func Func(ctx context.Context) error {
 	// used to federate.
 	file, _, _, err := ghc.Repositories.GetContents(ctx,
 		"octo-sts", "prober",
-		fmt.Sprintf(".github/chainguard/%s.sts.yaml", env.ProberIdentity),
+		path.Join(env.PolicyDir, env.ProberIdentity+".sts.yaml"),
 		&github.RepositoryContentGetOptions{ /* defaults to the default branch */ },
 	)
 	if err != nil {

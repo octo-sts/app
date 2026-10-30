@@ -104,6 +104,10 @@ locals {
       value = var.domain
     },
     {
+      name  = "OCTOSTS_POLICY_DIR"
+      value = var.policy_dir
+    },
+    {
       name  = "OCTOSTS_STICKY_STORE"
       value = var.sticky_store
     },

@@ -58,6 +58,10 @@ module "webhook" {
         {
           name  = "KMS_KEYS"
           value = join(",", local.kms_keys)
+        },
+        {
+          name  = "OCTOSTS_POLICY_DIR"
+          value = var.policy_dir
         }
       ]
     }
