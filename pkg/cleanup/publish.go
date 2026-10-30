@@ -44,9 +44,11 @@ var mismatch = regexp.MustCompile(`^(?:rpc error: code = \w+ desc = )?trust poli
 type Publisher struct {
 	// Client is authenticated as the organization's installation.
 	Client *github.Client
-	// App is the slug of the GitHub App that Client is installed as, such as
-	// "octo-sts". Only pull requests and issues it opened are touched.
-	App string
+	// Apps are the slugs of the deployment's GitHub Apps, such as
+	// "octo-sts". A deployment with several Apps spreads exchanges across
+	// them, so any of them may have opened last run's pull requests and
+	// issues. Only those opened by one of them are touched.
+	Apps []string
 	// Org is the organization name.
 	Org string
 	// PolicyDir is the directory holding trust policies in each repository.
@@ -62,8 +64,8 @@ type Publisher struct {
 // with plan. A failure in one repository does not stop the others; all
 // failures are returned together.
 func (p Publisher) Publish(ctx context.Context, plan Plan) error {
-	if p.Client == nil || p.App == "" || p.Org == "" || p.PolicyDir == "" || p.Branch == "" {
-		return errors.New("cleanup: publisher needs a client, app, org, policy dir and branch")
+	if p.Client == nil || len(p.Apps) == 0 || slices.Contains(p.Apps, "") || p.Org == "" || p.PolicyDir == "" || p.Branch == "" {
+		return errors.New("cleanup: publisher needs a client, apps, org, policy dir and branch")
 	}
 	// Decide always sets the window. Without it this is not a decided plan,
 	// and publishing its emptiness would close every open proposal.
@@ -128,7 +130,7 @@ type duplicate struct {
 }
 
 // open returns the organization's open issues or pull requests matching
-// query and opened by the App, keyed by lowercased repository name. When title
+// query and opened by one of the Apps, keyed by lowercased repository name. When title
 // is set, only exact title matches count, since search matches words. The
 // oldest match in each repository is kept, and the rest are returned as
 // duplicates.
@@ -140,8 +142,13 @@ type duplicate struct {
 // repository. Incomplete results fail the run, since a missed pull request
 // would be opened twice and a missed stale one left open.
 func (p Publisher) open(ctx context.Context, query, title string) (map[string]*github.Issue, []duplicate, error) {
-	q := fmt.Sprintf("org:%s is:open archived:false author:app/%s %s", p.Org, p.App, query)
-	login := p.App + "[bot]"
+	// Authors are matched here rather than with author: qualifiers, which
+	// search ANDs together, so the query stays short with any number of Apps.
+	q := fmt.Sprintf("org:%s is:open archived:false %s", p.Org, query)
+	logins := make(map[string]bool, len(p.Apps))
+	for _, app := range p.Apps {
+		logins[strings.ToLower(app)+"[bot]"] = true
+	}
 	opts := &github.SearchOptions{AdvancedSearch: github.Ptr(true), ListOptions: github.ListOptions{PerPage: 100}}
 	byRepo := map[string][]*github.Issue{}
 	for {
@@ -153,7 +160,7 @@ func (p Publisher) open(ctx context.Context, query, title string) (map[string]*g
 			return nil, nil, fmt.Errorf("cleanup: searching %q: GitHub returned incomplete results", q)
 		}
 		for _, i := range res.Issues {
-			if !strings.EqualFold(i.GetUser().GetLogin(), login) || (title != "" && i.GetTitle() != title) {
+			if !logins[strings.ToLower(i.GetUser().GetLogin())] || (title != "" && i.GetTitle() != title) {
 				continue
 			}
 			key := strings.ToLower(repoName(i))
