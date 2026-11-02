@@ -4,22 +4,22 @@ go 1.27.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.21.0
-	chainguard.dev/sdk v0.1.432
+	chainguard.dev/sdk v0.1.443
 	cloud.google.com/go v0.123.0
-	cloud.google.com/go/bigquery v1.86.0
-	cloud.google.com/go/firestore v1.29.0
-	cloud.google.com/go/kms v1.36.0
-	cloud.google.com/go/secretmanager v1.23.0
+	cloud.google.com/go/bigquery v1.86.1
+	cloud.google.com/go/firestore v1.29.2
+	cloud.google.com/go/kms v1.36.1
+	cloud.google.com/go/secretmanager v1.23.1
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.23.3
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys v1.5.0
-	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.5.0
+	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.5.1
 	github.com/aws/aws-sdk-go-v2 v1.47.5
-	github.com/aws/aws-sdk-go-v2/config v1.33.12
-	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.16
-	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.2
-	github.com/aws/aws-sdk-go-v2/service/kms v1.62.1
-	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.7
+	github.com/aws/aws-sdk-go-v2/config v1.33.13
+	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.17
+	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.72.3
+	github.com/aws/aws-sdk-go-v2/service/kms v1.62.2
+	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.8
 	github.com/aws/smithy-go v1.28.7
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/cenkalti/backoff/v5 v5.0.3
@@ -27,7 +27,7 @@ require (
 	github.com/chainguard-dev/terraform-infra-common v1.76.0
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
-	github.com/go-jose/go-jose/v4 v4.1.6
+	github.com/go-jose/go-jose/v4 v4.1.7
 	github.com/go-viper/mapstructure/v2 v2.5.0
 	github.com/golang-jwt/jwt/v4 v4.5.2
 	github.com/google/go-cmp v0.7.0
@@ -46,7 +46,7 @@ require (
 	golang.org/x/sync v0.24.0
 	google.golang.org/api v0.308.0
 	google.golang.org/grpc v1.85.0
-	k8s.io/apimachinery v0.37.1
+	k8s.io/apimachinery v0.37.2
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -54,8 +54,8 @@ require (
 	cloud.google.com/go/auth v0.24.1-0.20261001053825-dbc26066f70a // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.3.0 // indirect
 	cloud.google.com/go/compute/metadata v0.10.0 // indirect
-	cloud.google.com/go/iam v1.12.0 // indirect
-	cloud.google.com/go/longrunning v1.2.0 // indirect
+	cloud.google.com/go/iam v1.14.0 // indirect
+	cloud.google.com/go/longrunning v1.3.0 // indirect
 	cloud.google.com/go/trace v1.16.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.13.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 // indirect
@@ -64,18 +64,18 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/trace v1.37.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.61.0 // indirect
 	github.com/apache/arrow/go/v15 v15.0.2 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.12 // indirect
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.13 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.8 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.8 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.46.3 // indirect
+	github.com/aws/aws-sdk-go-v2/service/dynamodbstreams v1.46.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.23 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/presigned-url v1.14.8 // indirect
-	github.com/aws/aws-sdk-go-v2/service/signin v1.12.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/sso v1.39.0 // indirect
-	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.0 // indirect
+	github.com/aws/aws-sdk-go-v2/service/signin v1.12.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/sso v1.39.1 // indirect
+	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.6 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -94,7 +94,7 @@ require (
 	github.com/google/s2a-go v0.1.11 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.23 // indirect
-	github.com/googleapis/gax-go/v2 v2.26.2 // indirect
+	github.com/googleapis/gax-go/v2 v2.27.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/providers/prometheus v1.1.1 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware/v2 v2.3.4 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.31.0 // indirect
@@ -150,8 +150,8 @@ require (
 	golang.org/x/time v0.16.0 // indirect
 	golang.org/x/tools v0.51.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
-	google.golang.org/genproto v0.0.0-20260715232425-e75dac1f907d // indirect
-	google.golang.org/genproto/googleapis/api v0.0.0-20260928230214-8a89bd6388cc // indirect
+	google.golang.org/genproto v0.0.0-20261012220534-4341edf3f941 // indirect
+	google.golang.org/genproto/googleapis/api v0.0.0-20261012220534-4341edf3f941 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20261019180522-ce908d29299b // indirect
 	google.golang.org/protobuf v1.36.12 // indirect
 )
