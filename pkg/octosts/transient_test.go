@@ -424,7 +424,7 @@ func TestIsTransient(t *testing.T) {
 }
 
 // TestDeletedPolicyNotServedOnRateLimit covers every definitive not-found
-// path: after one, a proven rate limit must not serve the stale copy of the
+// path, including a terminal token-mint 403 or 404: after one, a proven rate limit must not serve the stale copy of the
 // deleted policy or write it back into the primary cache.
 func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	const policy = "issuer: https://example.com\nsubject: sub\n"
@@ -435,6 +435,18 @@ func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 		base, _ := newFakeGitHubContents("", http.StatusOK)
 		mux := http.NewServeMux()
 		mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", h)
+		mux.Handle("/", base.mux)
+		return mux
+	}
+
+	// mintOverride fails the installation token mint itself, which surfaces as
+	// a *ghinstallation.HTTPError rather than a GitHub contents error.
+	mintOverride := func(code int) http.Handler {
+		base, _ := newFakeGitHubContents("", http.StatusOK)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, http.StatusText(code), code)
+		})
 		mux.Handle("/", base.mux)
 		return mux
 	}
@@ -452,6 +464,8 @@ func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 				json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
 			})
 		}},
+		{"token mint 403", func() http.Handler { return mintOverride(http.StatusForbidden) }},
+		{"token mint 404", func() http.Handler { return mintOverride(http.StatusNotFound) }},
 		{"content undecodable", func() http.Handler {
 			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
 				json.NewEncoder(w).Encode(github.RepositoryContent{

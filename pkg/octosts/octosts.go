@@ -1175,6 +1175,15 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			trustPolicies.Add(tpKey, negativeCacheConst)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
+		// A terminal token-mint 403 or 404 means the installation's access is
+		// gone or revoked. Drop the stale copy for the same reason as the 403
+		// branch above; the error stays NotFound as before.
+		var mintErr *ghinstallation.HTTPError
+		if errors.As(err, &mintErr) && mintErr.Response != nil &&
+			(mintErr.Response.StatusCode == http.StatusForbidden || mintErr.Response.StatusCode == http.StatusNotFound) {
+			staleTrustPolicies.Remove(tpKey)
+			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
+		}
 		if isTransient(err) {
 			return "", err
 		}
