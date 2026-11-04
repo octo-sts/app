@@ -1177,9 +1177,10 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		}
 		// A terminal token-mint 403 or 404 means the installation's access is
 		// gone or revoked. Drop the stale copy for the same reason as the 403
-		// branch above; the error stays NotFound as before.
+		// branch above; the error stays NotFound as before. A rate-limited
+		// mint is not terminal, so it keeps the stale copy.
 		var mintErr *ghinstallation.HTTPError
-		if errors.As(err, &mintErr) && mintErr.Response != nil &&
+		if errors.As(err, &mintErr) && mintErr.Response != nil && !isMintRateLimit(mintErr.Response) &&
 			(mintErr.Response.StatusCode == http.StatusForbidden || mintErr.Response.StatusCode == http.StatusNotFound) {
 			staleTrustPolicies.Remove(tpKey)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
