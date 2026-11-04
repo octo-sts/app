@@ -422,3 +422,64 @@ func TestIsTransient(t *testing.T) {
 		})
 	}
 }
+
+// TestDeletedPolicyNotServedOnRateLimit covers every definitive not-found
+// path: after one, a proven rate limit must not serve the stale copy of the
+// deleted policy or write it back into the primary cache.
+func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+
+	// contentsOverride answers the policy read itself and leaves the rest of
+	// the fake GitHub (installations, tokens) untouched.
+	contentsOverride := func(h http.HandlerFunc) http.Handler {
+		base, _ := newFakeGitHubContents("", http.StatusOK)
+		mux := http.NewServeMux()
+		mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", h)
+		mux.Handle("/", base.mux)
+		return mux
+	}
+
+	for _, tc := range []struct {
+		name    string
+		handler func() http.Handler
+	}{
+		{"404", func() http.Handler {
+			h, _ := newFakeGitHubContents("", http.StatusNotFound)
+			return h.mux
+		}},
+		{"path is a directory", func() http.Handler {
+			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
+			})
+		}},
+		{"content undecodable", func() http.Handler {
+			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(github.RepositoryContent{
+					Content:  new("!!not base64!!"),
+					Type:     new("file"),
+					Encoding: new("base64"),
+				})
+			})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := freshTPKey(t, "deleted-policy")
+			staleTrustPolicies.Add(key, policy)
+			s := &sts{}
+
+			if _, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, tc.handler()), 1234, key); status.Code(err) != codes.NotFound {
+				t.Fatalf("first read: code = %v, want NotFound", status.Code(err))
+			}
+			trustPolicies.Remove(key)
+
+			limited, _ := newFakeGitHubContents("", http.StatusTooManyRequests)
+			raw, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, limited), 1234, key)
+			if raw != "" || status.Code(err) != codes.ResourceExhausted {
+				t.Errorf("deleted policy served after rate limit: got (%q, %v), want (\"\", ResourceExhausted)", raw, err)
+			}
+			if _, ok := trustPolicies.Get(key); ok {
+				t.Errorf("deleted policy written back into trustPolicies")
+			}
+		})
+	}
+}
