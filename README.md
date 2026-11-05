@@ -56,6 +56,10 @@ The hosted service reaches GitHub from shared cloud IP addresses that change
 over time, so you cannot add them to an allow list. GitHub rejects its requests,
 and token exchanges fail with a 403 and
 `GitHub denied access to <org> (403): check the org's IP allow list, or whether the octo-sts installation is suspended`.
+This diagnostic also covers token minting for trust policy reads and the final
+exchange token when the organization trusted-issuer lookup is cached. Trust
+policy permission denials are cached for up to one minute to avoid repeated
+requests. Responses carrying rate-limit markers keep their existing handling.
 
 These organizations should self-host octo-sts with their own GitHub App and a
 static egress IP, then add that IP to the allow list. The Terraform module in

@@ -424,8 +424,9 @@ func TestIsTransient(t *testing.T) {
 }
 
 // TestDeletedPolicyNotServedOnRateLimit covers every definitive not-found
-// path, including a terminal token-mint 403 or 404: after one, a proven rate limit must not serve the stale copy of the
-// deleted policy or write it back into the primary cache.
+// path, including a terminal token-mint 404: after one, a proven rate limit must
+// not serve the stale copy of the deleted policy or write it back into the
+// primary cache. TestExchangeMintForbidden covers token-mint 403s separately.
 func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	const policy = "issuer: https://example.com\nsubject: sub\n"
 
@@ -464,7 +465,6 @@ func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 				json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
 			})
 		}},
-		{"token mint 403", func() http.Handler { return mintOverride(http.StatusForbidden) }},
 		{"token mint 404", func() http.Handler { return mintOverride(http.StatusNotFound) }},
 		{"content undecodable", func() http.Handler {
 			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
