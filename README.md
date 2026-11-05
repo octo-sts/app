@@ -671,6 +671,10 @@ The value must be a relative, slash-separated path without a leading or
 trailing slash and without `.` or `..` segments. The process refuses to start
 otherwise.
 
+Deployments that serve the same organizations, such as staging and production,
+should each use their own directory, so each reads, validates and
+[cleans up](#policy-cleanup) only its own policies.
+
 > **Note: two-binary config skew.** As with `ORG_POLICY_REPO`, the exchange
 > service and the webhook validator each read `OCTOSTS_POLICY_DIR` from their
 > own deployment config. Set it on both, or the webhook validates a different
@@ -725,7 +729,7 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 
 - **Scope policies narrowly**: Create specific trust policies for different workloads rather than using broad, catch-all policies.
 
-- **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements.
+- **Regular policy reviews**: Periodically review and audit your trust policies (`.github/chainguard/*.sts.yaml`) to ensure they still align with your security requirements. [Policy cleanup](#policy-cleanup) can propose removing the ones nobody uses.
 
 - **Use specific subject matching**: Prefer exact subject matches over broad patterns when possible. For example, use `repo:org@<org-id>/repo@<repo-id>:ref:refs/heads/main` instead of `repo:org@<org-id>/repo@<repo-id>:.*`.
 
@@ -736,6 +740,96 @@ To ensure secure and effective use of octo-sts, follow these recommended practic
 - **Rotate regularly**: While octo-sts tokens are short-lived, ensure your OIDC token sources (like GitHub Actions) are properly configured and rotated according to best practices.
 
 - **Secure OIDC token handling**: Ensure your workloads properly secure and handle OIDC tokens before exchanging them with octo-sts.
+
+### Policy cleanup
+
+Trust policies outlive the automation they were written for, and removing one
+takes a follow-up pull request that is easy to forget. Octo STS can propose
+those removals for you. Once a month it opens a pull request in each repository
+with unused policies, and an issue for policies that are used but only fail. It
+never merges anything.
+
+It is opt-in, per organization.
+
+#### Opting in
+
+Add this policy as `.github/chainguard/octo-sts-cleanup.sts.yaml` in your
+organization's `.github` repository:
+
+```yaml
+issuer: https://accounts.google.com
+# octo-sts-policy-cleanup@octo-sts.iam.gserviceaccount.com, which runs the
+# cleanup job for octo-sts.dev.
+subject: "<UNIQUE-ID>"
+claim_pattern:
+  email: octo-sts-policy-cleanup@octo-sts\.iam\.gserviceaccount\.com
+
+permissions:
+  contents: write # push the branch that removes unused policies
+  pull_requests: write # open the pull request from it
+  issues: write # report policies that only fail
+repositories: [] # every repository the App can access
+```
+
+To opt out, delete the policy. If your organization restricts
+[trusted token issuers](#organization-trusted-token-issuers), the list must
+allow `https://accounts.google.com`.
+
+This grants the cleanup job write access to contents, pull requests and issues
+in every repository the App can access. It only uses that access to push one
+branch, open pull requests from it, and open or close issues.
+
+#### What it proposes
+
+A policy is proposed for removal when, over the last 90 days:
+
+- no one has tried to exchange a token with it, and
+- its file has not changed.
+
+Any exchange attempt counts as use, even a failed one. A policy whose
+exchanges have all failed since it last changed is kept, and listed in an
+issue titled "Octo STS trust policies that only fail", with the reason for the
+latest failure. The issue closes itself once those policies succeed, change, or
+are removed.
+
+The job never proposes removing `octo-sts-cleanup` itself, and skips archived
+repositories.
+
+#### The pull request
+
+Each repository gets at most one pull request, from the
+`octo-sts/octo-sts-cleanup` branch. Each month the job brings it up to date: it
+force-pushes the branch when the default branch or the policies to remove have
+changed, and closes the pull request once nothing is left to remove.
+
+- **Merging it** removes the listed policies.
+- **To keep a policy**, use it or change it. It then drops out of the pull
+  request on the next run.
+- **Closing the pull request without merging** only postpones it. The next run
+  proposes the policies that are still unused again.
+
+#### Running it yourself
+
+A self-hosted deployment can run the same job, `cmd/policy-cleanup`, on a
+schedule (`env/octo-sts/policy_cleanup.tf` shows one way). It reads exchange
+history from the BigQuery table the cloudevent recorder writes, and exchanges
+with your deployment for each organization's `octo-sts-cleanup` policy.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STS_DOMAIN` | (required) | The deployment to exchange with, such as `octo-sts.dev`. |
+| `GITHUB_APP_SLUGS` | (required) | Every GitHub App the deployment uses, comma-separated. Exchanges rotate across them, so last month's pull request may come from any of them. |
+| `EXCHANGE_TABLE` | (required) | The exchange table, as `project.dataset.table`. |
+| `OCTOSTS_POLICY_DIR` | `.github/chainguard` | Must match the deployment's. |
+| `ORG_POLICY_REPO` | `.github` | Must match the deployment's. |
+| `CLEANUP_IDENTITY` | `octo-sts-cleanup` | The opt-in policy's name, and the branch name after `octo-sts/`. |
+| `WINDOW` | `2160h` (90 days) | How far back an exchange counts as use. The exchange table must keep at least this much history; the job refuses to decide otherwise. |
+| `DRY_RUN` | `true` | Only log what would be proposed. |
+
+The job only sees exchanges recorded by its own deployment. If two deployments
+read policies from the same organization, such as a staging and a production
+deployment, give each its own [policy directory](#custom-policy-directory-octosts_policy_dir).
+Otherwise each sees the other's policies as unused.
 
 ### Permission updates
 
