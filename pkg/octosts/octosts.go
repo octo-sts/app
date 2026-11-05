@@ -1115,11 +1115,13 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 				// GetContents returns a nil file when the path is a directory;
 				// GetContent would panic on it. Treat it as no policy.
 				clog.InfoContextf(ctx, "trust policy path is not a file for %s", tpKey)
+				staleTrustPolicies.Remove(tpKey)
 				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 			}
 			raw, rerr := file.GetContent()
 			if rerr != nil {
 				clog.ErrorContextf(ctx, "failed to read trust policy: %v", rerr)
+				staleTrustPolicies.Remove(tpKey)
 				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 			}
 			// Populate the caches on the fresh-fetch path only. The stale-serve
@@ -1167,7 +1169,20 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		}
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+			// The policy is definitively gone: drop the stale copy so a later
+			// proven rate limit cannot serve a deleted policy.
+			staleTrustPolicies.Remove(tpKey)
 			trustPolicies.Add(tpKey, negativeCacheConst)
+			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
+		}
+		// A terminal token-mint 403 or 404 means the installation's access is
+		// gone or revoked. Drop the stale copy for the same reason as the 403
+		// branch above; the error stays NotFound as before. A rate-limited
+		// mint is not terminal, so it keeps the stale copy.
+		var mintErr *ghinstallation.HTTPError
+		if errors.As(err, &mintErr) && mintErr.Response != nil && !isMintRateLimit(mintErr.Response) &&
+			(mintErr.Response.StatusCode == http.StatusForbidden || mintErr.Response.StatusCode == http.StatusNotFound) {
+			staleTrustPolicies.Remove(tpKey)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
 		if isTransient(err) {
