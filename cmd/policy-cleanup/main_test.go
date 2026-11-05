@@ -174,6 +174,25 @@ func TestRunListFailure(t *testing.T) {
 	}
 }
 
+func TestRunSkipsScopesThatAreNotAccounts(t *testing.T) {
+	// Callers record junk scopes; none of them is worth an exchange, and an
+	// empty org would fail the whole run.
+	f := orgsFake()
+	for _, junk := range []string{"", "$org", "<owner>", "https:", "'wolterskluwer", "...", "${repo"} {
+		f.history.Usage[junk] = nil
+	}
+	f.history.Usage["laszlo-nagy1_wkl"] = nil // an Enterprise Managed User login
+	f.exchanges["laszlo-nagy1_wkl"] = status.Error(codes.NotFound, "no installation found")
+	delete(f.exchanges, "down")
+	delete(f.history.Usage, "down")
+	if err := run(t.Context(), testConfig(), f.deps()); err != nil {
+		t.Fatalf("run() = %v", err)
+	}
+	if want := []string{"acme", "denied", "laszlo-nagy1_wkl", "missing", "pinned"}; !reflect.DeepEqual(f.exchanged, want) {
+		t.Errorf("exchanged = %q, want %q", f.exchanged, want)
+	}
+}
+
 func TestRunRefusesShortHistory(t *testing.T) {
 	for name, h := range map[string]bigquery.History{
 		"no history":    {},

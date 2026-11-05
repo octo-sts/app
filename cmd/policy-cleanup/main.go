@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"regexp"
 	"slices"
 	"strings"
 	"syscall"
@@ -61,6 +62,11 @@ type config struct {
 	// DryRun only logs the decisions. It is on unless turned off.
 	DryRun bool `envconfig:"DRY_RUN" default:"true"`
 }
+
+// accountName matches a GitHub account name: letters, digits and hyphens,
+// starting with a letter or digit. Underscores are allowed too, since
+// Enterprise Managed User logins end in "_shortcode".
+var accountName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$`)
 
 // deps are the job's dependencies on the outside world.
 type deps struct {
@@ -157,9 +163,14 @@ func run(ctx context.Context, cfg config, d deps) error {
 			cleanup.ErrHistoryTooShort, h.Start.Format(time.RFC3339), h.Latest.Format(time.RFC3339), since.Format(time.RFC3339))
 	}
 
-	orgs := h.Orgs()
+	// Recorded scopes are whatever callers sent, including unfilled
+	// placeholders like "$org" or "<owner>", and "/.github", whose org is
+	// empty and fails the exchange outright. Only names that can be a GitHub
+	// account are worth an exchange.
+	orgs := slices.DeleteFunc(h.Orgs(), func(org string) bool { return !accountName.MatchString(org) })
 	slices.Sort(orgs)
-	clog.InfoContextf(ctx, "checking %d organizations, history from %s, dry run %t", len(orgs), h.Start.Format(time.RFC3339), cfg.DryRun)
+	clog.InfoContextf(ctx, "checking %d organizations (%d other recorded scopes skipped), history from %s, dry run %t",
+		len(orgs), len(h.Usage)-len(orgs), h.Start.Format(time.RFC3339), cfg.DryRun)
 
 	var errs []error
 	optedIn := 0
