@@ -828,6 +828,7 @@ with your deployment for each organization's `octo-sts-cleanup` policy.
 | `ORG_POLICY_REPO` | `.github` | Must match the deployment's. |
 | `CLEANUP_IDENTITY` | `octo-sts-cleanup` | The opt-in policy's name, and the branch name after `octo-sts/`. |
 | `WINDOW` | `2160h` (90 days) | How far back an exchange counts as use. The exchange table must keep at least this much history; the job refuses to decide otherwise. |
+| `CONCURRENCY` | `8` | How many organizations are checked at once. Each check is one exchange for that organization, so this only changes how long a run takes. |
 | `DRY_RUN` | `true` | Only log what would be proposed. |
 
 The job only sees exchanges recorded by its own deployment. If two deployments
