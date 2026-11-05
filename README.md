@@ -760,7 +760,7 @@ organization's `.github` repository:
 issuer: https://accounts.google.com
 # octo-sts-policy-cleanup@octo-sts.iam.gserviceaccount.com, which runs the
 # cleanup job for octo-sts.dev.
-subject: "<UNIQUE-ID>"
+subject: "101798790782455855833"
 claim_pattern:
   email: octo-sts-policy-cleanup@octo-sts\.iam\.gserviceaccount\.com
 
