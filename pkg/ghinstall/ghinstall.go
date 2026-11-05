@@ -161,7 +161,9 @@ func (m *manager) lookupInstallation(ctx context.Context, owner string) (int64, 
 		}
 
 		for _, install := range installs {
-			if install.Account.GetLogin() == owner {
+			// GitHub has returned null entries in this list; skip them
+			// rather than dereference one and crash the exchange.
+			if install.GetAccount().GetLogin() == owner {
 				return install.GetID(), true, nil
 			}
 		}
