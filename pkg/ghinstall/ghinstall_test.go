@@ -70,6 +70,33 @@ func TestGet(t *testing.T) {
 	}
 }
 
+func TestGetSkipsNullInstallations(t *testing.T) {
+	// A null entry, or one without an account, must not crash the walk.
+	atr := newTestClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/app/installations" {
+			w.WriteHeader(http.StatusNotImplemented)
+			return
+		}
+		fmt.Fprint(w, `[null, {"id": 7}, {"id": 42, "account": {"login": "my-org"}}]`)
+	}))
+
+	mgr, err := New(atr)
+	if err != nil {
+		t.Fatalf("New() = %v", err)
+	}
+	ctx, logs := logtest.Capture(t)
+	_, gotID, err := mgr.Get(ctx, "my-org", "my-org/repo", "my-identity")
+	if err != nil {
+		t.Fatalf("Get() = %v", err)
+	}
+	if gotID != 42 {
+		t.Errorf("install ID: got = %d, wanted = 42", gotID)
+	}
+	if want := fmt.Sprintf("app %d returned a null installation at page 1, index 0", atr.AppID()); !strings.Contains(logs.String(), want) {
+		t.Errorf("logs = %q, want them to contain %q", logs.String(), want)
+	}
+}
+
 func TestGetCached(t *testing.T) {
 	ctx := context.Background()
 	installID := int64(99)

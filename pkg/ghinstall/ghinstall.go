@@ -160,8 +160,15 @@ func (m *manager) lookupInstallation(ctx context.Context, owner string) (int64, 
 			return 0, false, status.Errorf(codes.Internal, "listing installations for app %d: %v", m.atr.AppID(), err)
 		}
 
-		for _, install := range installs {
-			if install.Account.GetLogin() == owner {
+		for i, install := range installs {
+			// GitHub has returned null entries in this list (2026-11-05).
+			// Skip them rather than crash the exchange, and say which App's
+			// list had one.
+			if install == nil {
+				clog.WarnContextf(ctx, "ghinstall: app %d returned a null installation at page %d, index %d", m.atr.AppID(), page, i)
+				continue
+			}
+			if install.GetAccount().GetLogin() == owner {
 				return install.GetID(), true, nil
 			}
 		}
