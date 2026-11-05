@@ -358,6 +358,13 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	ctx = ghtransport.EnrichContext(ctx, base.AppID(), e.InstallationID)
 	token, err := atr.Token(ctx)
 	if err != nil {
+		owner := path.Dir(requestScope)
+		if owner == "." {
+			owner = path.Base(requestScope)
+		}
+		if isForbiddenMint(ctx, owner, err) {
+			return nil, forbiddenStatus(owner)
+		}
 		var herr *ghinstallation.HTTPError
 		if errors.As(err, &herr) && herr.Response != nil {
 			// Github returns a 422 response when something is off, and the
@@ -933,6 +940,17 @@ func isForbidden(err error) bool {
 		errResp.Response.StatusCode == http.StatusForbidden
 }
 
+// isForbiddenMint recognizes permission denials from the token endpoint, where
+// go-github never sees the response. Reuse the issuer lookup's classification so
+// header- and body-marked rate limits remain distinct from permission failures.
+// classifyMintError reads a bounded body and closes it.
+func isForbiddenMint(ctx context.Context, owner string, err error) bool {
+	var mintErr *ghinstallation.HTTPError
+	return errors.As(err, &mintErr) && mintErr.Response != nil &&
+		mintErr.Response.StatusCode == http.StatusForbidden &&
+		classifyMintError(ctx, owner, err).kind == fetchForbidden
+}
+
 type trustPolicy interface {
 	Compile() error
 }
@@ -989,7 +1007,7 @@ func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (strin
 	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
 	if _, ok := forbiddenPolicies.Get(tpKey); ok {
 		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
-		return "", true, status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity)
+		return "", true, forbiddenStatus(tpKey.owner)
 	}
 	return "", false, nil
 }
@@ -1161,11 +1179,11 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		// already refused the read. A permission problem is not one another app
 		// can resolve. Seed the cooldown so the next exchange short-circuits
 		// instead of re-minting a token to re-probe the same 403.
-		if isForbidden(err) {
+		if isForbidden(err) || isForbiddenMint(ctx, tpKey.owner, err) {
 			clog.WarnContextf(ctx, "trust policy read forbidden for %q (403, not a rate limit): %v", tpKey.identity, err)
 			staleTrustPolicies.Remove(tpKey)
 			forbiddenPolicies.Add(tpKey, struct{}{})
-			return "", backoff.Permanent(status.Errorf(codes.PermissionDenied, "trust policy read forbidden for %q (not a rate limit)", tpKey.identity))
+			return "", backoff.Permanent(forbiddenStatus(tpKey.owner))
 		}
 		var ghErr *github.ErrorResponse
 		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
@@ -1175,13 +1193,13 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			trustPolicies.Add(tpKey, negativeCacheConst)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
-		// A terminal token-mint 403 or 404 means the installation's access is
+		// A terminal token-mint 404 means the installation's access is
 		// gone or revoked. Drop the stale copy for the same reason as the 403
 		// branch above; the error stays NotFound as before. A rate-limited
 		// mint is not terminal, so it keeps the stale copy.
 		var mintErr *ghinstallation.HTTPError
 		if errors.As(err, &mintErr) && mintErr.Response != nil && !isMintRateLimit(mintErr.Response) &&
-			(mintErr.Response.StatusCode == http.StatusForbidden || mintErr.Response.StatusCode == http.StatusNotFound) {
+			mintErr.Response.StatusCode == http.StatusNotFound {
 			staleTrustPolicies.Remove(tpKey)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
