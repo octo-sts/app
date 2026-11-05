@@ -84,12 +84,16 @@ func TestGetSkipsNullInstallations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() = %v", err)
 	}
-	_, gotID, err := mgr.Get(context.Background(), "my-org", "my-org/repo", "my-identity")
+	ctx, logs := logtest.Capture(t)
+	_, gotID, err := mgr.Get(ctx, "my-org", "my-org/repo", "my-identity")
 	if err != nil {
 		t.Fatalf("Get() = %v", err)
 	}
 	if gotID != 42 {
 		t.Errorf("install ID: got = %d, wanted = 42", gotID)
+	}
+	if want := fmt.Sprintf("app %d returned a null installation at page 1, index 0", atr.AppID()); !strings.Contains(logs.String(), want) {
+		t.Errorf("logs = %q, want them to contain %q", logs.String(), want)
 	}
 }
 
