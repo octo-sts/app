@@ -249,6 +249,72 @@ func signature(secret, body []byte) string {
 	return fmt.Sprintf("sha256=%s", hex.EncodeToString(b))
 }
 
+// countingReader serves n bytes of '{' and records how many were read.
+type countingReader struct {
+	n, read int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	if c.read >= c.n {
+		return 0, io.EOF
+	}
+	k := min(len(p), c.n-c.read)
+	for i := range k {
+		p[i] = '{'
+	}
+	c.read += k
+	return k, nil
+}
+
+// TestValidatePayloadBoundsUnauthenticatedBody covers GHSA-4whf-jcmv-cr4v: the
+// body is unauthenticated until its signature is checked, so an unsigned
+// request must be refused without reading the body, and a signed one must not
+// be read past maxPayloadSize.
+func TestValidatePayloadBoundsUnauthenticatedBody(t *testing.T) {
+	v := &Validator{WebhookSecret: [][]byte{[]byte("hunter2")}}
+
+	t.Run("unsigned body is not read", func(t *testing.T) {
+		body := &countingReader{n: 1 << 20}
+		req := httptest.NewRequest(http.MethodPost, "/", body)
+		req.Header.Set("Content-Type", "application/json")
+		if _, err := v.validatePayload(req); err == nil {
+			t.Fatal("validatePayload accepted an unsigned request")
+		}
+		if body.read != 0 {
+			t.Errorf("read %d bytes of an unsigned body, want 0", body.read)
+		}
+	})
+
+	t.Run("oversized body is capped", func(t *testing.T) {
+		body := &countingReader{n: 2 * maxPayloadSize}
+		req := httptest.NewRequest(http.MethodPost, "/", body)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Hub-Signature-256", "sha256=00")
+		if _, err := v.validatePayload(req); err == nil {
+			t.Fatal("validatePayload accepted an oversized body")
+		}
+		if body.read > maxPayloadSize+1 {
+			t.Errorf("read %d bytes, want at most %d", body.read, maxPayloadSize+1)
+		}
+	})
+
+	t.Run("signed body at the limit is accepted", func(t *testing.T) {
+		secret := []byte("hunter2")
+		payload := bytes.Repeat([]byte(" "), maxPayloadSize-2)
+		payload = append(append([]byte("{"), payload...), '}')
+		req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Hub-Signature-256", signature(secret, payload))
+		got, err := v.validatePayload(req)
+		if err != nil {
+			t.Fatalf("validatePayload = %v, want a body of exactly maxPayloadSize accepted", err)
+		}
+		if len(got) != maxPayloadSize {
+			t.Errorf("payload length = %d, want %d", len(got), maxPayloadSize)
+		}
+	})
+}
+
 func TestWebhookOK(t *testing.T) {
 	// CheckRuns will be collected here.
 	got := []*github.CreateCheckRunOptions{}

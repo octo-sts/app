@@ -55,6 +55,10 @@ const (
 	// policiesRemovedTitle is the check run title when an event only removed
 	// trust policies.
 	policiesRemovedTitle = "Trust policies removed."
+
+	// maxPayloadSize caps how much of a webhook body is read. GitHub does not
+	// deliver payloads larger than 25 MB, so a genuine delivery always fits.
+	maxPayloadSize = 25 << 20
 )
 
 type PolicyAction string
@@ -566,14 +570,23 @@ func (e *Validator) validatePayload(r *http.Request) ([]byte, error) {
 	if signature == "" {
 		signature = r.Header.Get(github.SHA1SignatureHeader)
 	}
+	// The body is unauthenticated until the signature is checked, so refuse an
+	// unsigned request before reading it and cap how much is read
+	// (GHSA-4whf-jcmv-cr4v).
+	if signature == "" {
+		return nil, errors.New("missing webhook signature")
+	}
 	contentType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxPayloadSize+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxPayloadSize {
+		return nil, fmt.Errorf("webhook payload exceeds %d bytes", maxPayloadSize)
 	}
 
 	for _, s := range e.WebhookSecret {

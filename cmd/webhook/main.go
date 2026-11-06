@@ -153,7 +153,11 @@ func main() {
 	srv := &http.Server{
 		Addr:              fmt.Sprintf(":%d", baseCfg.Port),
 		ReadHeaderTimeout: 10 * time.Second,
-		Handler:           mux,
+		// Bound the whole request read, body included, so a slow or chunked
+		// body cannot hold a connection open (GHSA-4whf-jcmv-cr4v). Responses
+		// are not bounded: handling an event can take several GitHub calls.
+		ReadTimeout: 30 * time.Second,
+		Handler:     mux,
 	}
 
 	serveErr := make(chan error, 1)
