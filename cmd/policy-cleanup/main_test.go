@@ -6,9 +6,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,12 +35,20 @@ func testConfig() config {
 		OrgPolicyRepo: ".github",
 		PolicyDir:     ".github/chainguard-staging",
 		Window:        90 * 24 * time.Hour,
+		Concurrency:   4,
 		DryRun:        true,
 	}
 }
 
 // fake records what the job did against fake dependencies.
 type fake struct {
+	// mu guards the recorded calls: run checks orgs concurrently.
+	mu sync.Mutex
+	// delay holds each exchange open, so concurrent checks overlap.
+	delay       time.Duration
+	inFlight    int
+	maxInFlight int
+
 	history   bigquery.History
 	loadErr   error
 	exchanges map[string]error // org -> exchange error; missing means success
@@ -63,20 +74,37 @@ func (f *fake) deps() deps {
 			return f.history, f.loadErr
 		},
 		exchange: func(_ context.Context, org string) (string, func(), error) {
+			f.mu.Lock()
 			f.exchanged = append(f.exchanged, org)
-			if err := f.exchanges[org]; err != nil {
+			f.inFlight++
+			f.maxInFlight = max(f.maxInFlight, f.inFlight)
+			err := f.exchanges[org]
+			f.mu.Unlock()
+			time.Sleep(f.delay)
+			f.mu.Lock()
+			f.inFlight--
+			f.mu.Unlock()
+			if err != nil {
 				return "", nil, err
 			}
-			return "token-" + org, func() { f.revoked = append(f.revoked, org) }, nil
+			return "token-" + org, func() {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				f.revoked = append(f.revoked, org)
+			}, nil
 		},
 		list: func(_ context.Context, client *github.Client, org, policyDir string) ([]cleanup.Policy, error) {
 			if client == nil || policyDir != ".github/chainguard-staging" {
 				return nil, errors.New("list called without a client or with the wrong policy dir")
 			}
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			f.listed = append(f.listed, org)
 			return f.policies[org], f.listErr[org]
 		},
 		publish: func(_ context.Context, p cleanup.Publisher, plan cleanup.Plan) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			f.published = append(f.published, p)
 			f.plans = append(f.plans, plan)
 			return nil
@@ -120,10 +148,10 @@ func TestRunDryRun(t *testing.T) {
 	if strings.Contains(err.Error(), "missing") || strings.Contains(err.Error(), "denied") || strings.Contains(err.Error(), "pinned") {
 		t.Errorf("run() = %v, want orgs that did not opt in skipped quietly", err)
 	}
-	if want := []string{"acme", "denied", "down", "missing", "pinned"}; !reflect.DeepEqual(f.exchanged, want) {
+	if want := []string{"acme", "denied", "down", "missing", "pinned"}; !reflect.DeepEqual(slices.Sorted(slices.Values(f.exchanged)), want) {
 		t.Errorf("exchanged = %v, want %v", f.exchanged, want)
 	}
-	if want := []string{"acme"}; !reflect.DeepEqual(f.listed, want) || !reflect.DeepEqual(f.revoked, want) {
+	if want := []string{"acme"}; !reflect.DeepEqual(slices.Sorted(slices.Values(f.listed)), want) || !reflect.DeepEqual(slices.Sorted(slices.Values(f.revoked)), want) {
 		t.Errorf("listed %v and revoked %v, want %v", f.listed, f.revoked, want)
 	}
 	if len(f.published) != 0 {
@@ -188,8 +216,43 @@ func TestRunSkipsScopesThatAreNotAccounts(t *testing.T) {
 	if err := run(t.Context(), testConfig(), f.deps()); err != nil {
 		t.Fatalf("run() = %v", err)
 	}
-	if want := []string{"acme", "denied", "laszlo-nagy1_wkl", "missing", "pinned"}; !reflect.DeepEqual(f.exchanged, want) {
+	if want := []string{"acme", "denied", "laszlo-nagy1_wkl", "missing", "pinned"}; !reflect.DeepEqual(slices.Sorted(slices.Values(f.exchanged)), want) {
 		t.Errorf("exchanged = %q, want %q", f.exchanged, want)
+	}
+}
+
+func TestRunChecksOrgsConcurrently(t *testing.T) {
+	// 20 orgs, each exchange held open briefly: they overlap, but never more
+	// than the limit, and failures still come back in the orgs' order.
+	f := &fake{
+		delay:     20 * time.Millisecond,
+		history:   bigquery.History{Start: old(95), Latest: now, Usage: map[string][]cleanup.Usage{}},
+		exchanges: map[string]error{},
+	}
+	for i := range 20 {
+		org := fmt.Sprintf("org-%02d", i)
+		f.history.Usage[org] = nil
+		if i%7 == 3 {
+			f.exchanges[org] = status.Error(codes.Unavailable, "down")
+		}
+	}
+	cfg := testConfig()
+	cfg.Concurrency = 3
+	err := run(t.Context(), cfg, f.deps())
+	if err == nil {
+		t.Fatal("run() = nil, want the failing orgs' errors")
+	}
+	if got, want := strings.Count(err.Error(), "exchanging for"), 3; got != want {
+		t.Errorf("run() reported %d failures, want %d: %v", got, want, err)
+	}
+	if i, j, k := strings.Index(err.Error(), "org-03"), strings.Index(err.Error(), "org-10"), strings.Index(err.Error(), "org-17"); i < 0 || i >= j || j >= k {
+		t.Errorf("failures out of order: %v", err)
+	}
+	if len(f.exchanged) != 20 {
+		t.Errorf("exchanged %d orgs, want 20", len(f.exchanged))
+	}
+	if f.maxInFlight > 3 || f.maxInFlight < 2 {
+		t.Errorf("at most %d exchanges in flight, want 2 or 3", f.maxInFlight)
 	}
 }
 
@@ -221,6 +284,11 @@ func TestRunErrors(t *testing.T) {
 	cfg.Window = 0
 	if err := run(t.Context(), cfg, (&fake{}).deps()); err == nil || !strings.Contains(err.Error(), "WINDOW") {
 		t.Errorf("run() with no window = %v, want an error", err)
+	}
+	cfg = testConfig()
+	cfg.Concurrency = 0
+	if err := run(t.Context(), cfg, (&fake{}).deps()); err == nil || !strings.Contains(err.Error(), "CONCURRENCY") {
+		t.Errorf("run() with no concurrency = %v, want an error", err)
 	}
 }
 
@@ -254,7 +322,7 @@ func TestConfigDefaults(t *testing.T) {
 	want := config{
 		Domain: "octo-sts.dev", Apps: []string{"octo-sts", "octo-sts-2"}, Table: "p.d.t",
 		Identity: "octo-sts-cleanup", OrgPolicyRepo: ".github", PolicyDir: ".github/chainguard",
-		Window: cleanup.DefaultWindow, DryRun: true,
+		Window: cleanup.DefaultWindow, Concurrency: 8, DryRun: true,
 	}
 	if !reflect.DeepEqual(cfg, want) {
 		t.Errorf("config = %+v, want %+v", cfg, want)
