@@ -116,7 +116,7 @@ jobs:
         run: |
           echo "Deploying to environment: ${ENVIRONMENT}"
 
-      - uses: step-security/google-github-auth@775fc4c80760272ef389c9f9f8d98de7db0c170d # v3.0.2
+      - uses: chainguard-actions/google-github-actions-auth@bd3bbd8882ee8311ef35685ad3c341584e23b4d5 # v3.0.0
         id: auth
         with:
           token_format: "access_token"
