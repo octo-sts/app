@@ -6,6 +6,7 @@ package cleanup
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -139,12 +140,11 @@ func policyFiles(ctx context.Context, client *github.Client, org, policyDir stri
 func lastChanged(ctx context.Context, client *github.Client, org, policyDir string, repos []string, files [][]string) ([][]time.Time, []string, error) {
 	changed := make([][]time.Time, len(repos))
 	branches := make([]string, len(repos))
-	type ref struct{ repo, file int }
-	var refs []ref
+	var refs []historyRef
 	for i := range repos {
 		changed[i] = make([]time.Time, len(files[i]))
 		for j := range files[i] {
-			refs = append(refs, ref{i, j})
+			refs = append(refs, historyRef{i, j})
 		}
 	}
 
@@ -152,44 +152,81 @@ func lastChanged(ctx context.Context, client *github.Client, org, policyDir stri
 	// than per repository: a few repositories with many policies would
 	// otherwise build one query large enough to time out on every run.
 	for chunk := range slices.Chunk(refs, historyPerQuery) {
-		var q strings.Builder
-		q.WriteString("query {\n")
-		for k, r := range chunk {
-			if k == 0 || chunk[k-1].repo != r.repo {
-				if k > 0 {
-					q.WriteString("  } } } }\n")
-				}
-				fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { name target { ... on Commit {\n", r.repo, quote(org), quote(repos[r.repo]))
-			}
-			fmt.Fprintf(&q, "    f%d: history(first: 1, path: %s) { nodes { committedDate } }\n", r.file, quote(path.Join(policyDir, files[r.repo][r.file])))
-		}
-		q.WriteString("  } } } }\n}")
-
-		var data map[string]*struct {
-			DefaultBranchRef *struct {
-				Name   string `json:"name"`
-				Target map[string]struct {
-					Nodes []struct {
-						CommittedDate time.Time `json:"committedDate"`
-					} `json:"nodes"`
-				} `json:"target"`
-			} `json:"defaultBranchRef"`
-		}
-		if err := graphql(ctx, client, q.String(), &data); err != nil {
+		if err := history(ctx, client, org, policyDir, repos, files, chunk, changed, branches); err != nil {
 			return nil, nil, fmt.Errorf("cleanup: last changes in %s: %w", org, err)
-		}
-		for _, r := range chunk {
-			d := data[fmt.Sprintf("r%d", r.repo)]
-			if d == nil || d.DefaultBranchRef == nil {
-				continue
-			}
-			branches[r.repo] = d.DefaultBranchRef.Name
-			if h := d.DefaultBranchRef.Target[fmt.Sprintf("f%d", r.file)]; len(h.Nodes) > 0 {
-				changed[r.repo][r.file] = h.Nodes[0].CommittedDate
-			}
 		}
 	}
 	return changed, branches, nil
+}
+
+// historyRef names one policy file: files[repo][file].
+type historyRef struct{ repo, file int }
+
+// history looks up the last change of each file in chunk with one query and
+// records it in changed, along with each repository's default branch in
+// branches. Path history is slow in large repositories, and GitHub answers a
+// query that runs too long with a gateway error, so on one of those the
+// chunk is split in half and each half retried. A single lookup that still
+// times out fails, so no file is ever left looking unchanged.
+func history(ctx context.Context, client *github.Client, org, policyDir string, repos []string, files [][]string, chunk []historyRef, changed [][]time.Time, branches []string) error {
+	var q strings.Builder
+	q.WriteString("query {\n")
+	for k, r := range chunk {
+		if k == 0 || chunk[k-1].repo != r.repo {
+			if k > 0 {
+				q.WriteString("  } } } }\n")
+			}
+			fmt.Fprintf(&q, "  r%d: repository(owner: %s, name: %s) { defaultBranchRef { name target { ... on Commit {\n", r.repo, quote(org), quote(repos[r.repo]))
+		}
+		fmt.Fprintf(&q, "    f%d: history(first: 1, path: %s) { nodes { committedDate } }\n", r.file, quote(path.Join(policyDir, files[r.repo][r.file])))
+	}
+	q.WriteString("  } } } }\n}")
+
+	var data map[string]*struct {
+		DefaultBranchRef *struct {
+			Name   string `json:"name"`
+			Target map[string]struct {
+				Nodes []struct {
+					CommittedDate time.Time `json:"committedDate"`
+				} `json:"nodes"`
+			} `json:"target"`
+		} `json:"defaultBranchRef"`
+	}
+	if err := graphql(ctx, client, q.String(), &data); err != nil {
+		if len(chunk) > 1 && timedOut(err) {
+			half := len(chunk) / 2
+			if err := history(ctx, client, org, policyDir, repos, files, chunk[:half], changed, branches); err != nil {
+				return err
+			}
+			return history(ctx, client, org, policyDir, repos, files, chunk[half:], changed, branches)
+		}
+		return err
+	}
+	for _, r := range chunk {
+		d := data[fmt.Sprintf("r%d", r.repo)]
+		if d == nil || d.DefaultBranchRef == nil {
+			continue
+		}
+		branches[r.repo] = d.DefaultBranchRef.Name
+		if h := d.DefaultBranchRef.Target[fmt.Sprintf("f%d", r.file)]; len(h.Nodes) > 0 {
+			changed[r.repo][r.file] = h.Nodes[0].CommittedDate
+		}
+	}
+	return nil
+}
+
+// timedOut reports whether err is a gateway error, which is how GitHub
+// answers a GraphQL query that ran past its time limit.
+func timedOut(err error) bool {
+	var e *github.ErrorResponse
+	if !errors.As(err, &e) || e.Response == nil {
+		return false
+	}
+	switch e.Response.StatusCode {
+	case http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	}
+	return false
 }
 
 // graphql runs query and decodes its data into out. A NOT_FOUND error, such as
