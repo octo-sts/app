@@ -185,7 +185,12 @@ module "this" {
           name  = "KMS_KEYS"
           value = join(",", local.kms_keys)
         },
-      ], local.common_env)
+        ], local.common_env, [
+        {
+          name  = "OCTOSTS_OIDC_BLOCK_PRIVATE_IPS"
+          value = tostring(var.oidc_block_private_ips)
+        },
+      ])
       regional-env = [{
         name  = "EVENT_INGRESS_URI"
         value = { for k, v in module.sts-emits-events : k => v.uri }

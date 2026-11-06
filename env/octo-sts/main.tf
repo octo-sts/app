@@ -82,4 +82,8 @@ module "app" {
   # across runs: 1h silently re-rolled them every run. 30 days keeps any
   # consumer that exchanges at least monthly pinned forever.
   sticky_store_firestore_ttl = "720h"
+
+  # Callers choose the issuer, and private ranges egress through the VPC, so
+  # keep OIDC traffic off them. No trusted issuer here is on a private address.
+  oidc_block_private_ips = true
 }

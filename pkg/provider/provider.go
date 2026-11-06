@@ -13,7 +13,6 @@ import (
 
 	"github.com/cenkalti/backoff/v5"
 	"github.com/chainguard-dev/clog"
-	"github.com/chainguard-dev/terraform-infra-common/pkg/httpmetrics"
 	"github.com/coreos/go-oidc/v3/oidc"
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/octo-sts/app/pkg/maxsize"
@@ -111,8 +110,12 @@ func getAfterCacheMiss(ctx context.Context, issuer string) (VerifierProvider, er
 
 		discoveryCtx, cancel := context.WithTimeout(context.Background(), discoveryTimeout)
 		defer cancel()
+		transport := guardedTransport
+		if isLoopbackIssuer(issuer) {
+			transport = loopbackTransport
+		}
 		discoveryCtx = oidc.ClientContext(discoveryCtx, &http.Client{
-			Transport: maxsize.NewRoundTripper(MaximumResponseSize, httpmetrics.Transport),
+			Transport: maxsize.NewRoundTripper(MaximumResponseSize, transport),
 			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
 				// Validate redirect destination using same rules as original issuer
 				if !oidcvalidate.IsValidIssuer(req.URL.String()) {
@@ -186,6 +189,19 @@ func newProviderWithRetry(ctx context.Context, issuer string) (VerifierProvider,
 				return nil, backoff.Permanent(err)
 			}
 			return nil, err
+		}
+		// go-oidc fetches jwks_uri lazily, as a fresh request that the
+		// issuer checks never see, so validate it before the provider is
+		// cached (GHSA-vr42-fr6r-3fj3).
+		var claims struct {
+			JWKSURI string `json:"jwks_uri"`
+		}
+		if err := p.Claims(&claims); err != nil {
+			return nil, backoff.Permanent(fmt.Errorf("reading discovery document: %w", err))
+		}
+		if err := validateJWKSURI(issuer, claims.JWKSURI); err != nil {
+			clog.WarnContext(ctx, "rejecting provider", "issuer", issuer, "error", err)
+			return nil, backoff.Permanent(err)
 		}
 		if attempt > 1 {
 			clog.InfoContext(ctx, "provider creation succeeded after retry", "attempts", attempt, "issuer", issuer)

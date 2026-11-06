@@ -30,6 +30,7 @@ import (
 	"github.com/octo-sts/app/pkg/ghtransport"
 	"github.com/octo-sts/app/pkg/kms"
 	"github.com/octo-sts/app/pkg/octosts"
+	"github.com/octo-sts/app/pkg/provider"
 	"github.com/octo-sts/app/pkg/stickystore"
 )
 
@@ -46,6 +47,7 @@ func main() {
 	if err != nil {
 		log.Panicf("failed to process env var: %s", err)
 	}
+	provider.BlockPrivateIPs(baseCfg.OIDCBlockPrivateIPs)
 
 	if baseCfg.Metrics {
 		go metrics.ServeMetrics()

@@ -108,3 +108,9 @@ variable "sticky_store_firestore_ttl" {
   type        = string
   default     = "720h"
 }
+
+variable "oidc_block_private_ips" {
+  description = "Refuse OIDC discovery and key fetches to private (RFC 1918, fc00::/7) and shared (100.64.0.0/10) addresses (OCTOSTS_OIDC_BLOCK_PRIVATE_IPS). The service egresses private ranges through the VPC, so enable this unless a trusted issuer lives on a private address."
+  type        = bool
+  default     = false
+}

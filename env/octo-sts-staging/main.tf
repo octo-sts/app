@@ -88,4 +88,7 @@ module "app" {
   # Mirrors prod: reads refresh expire_at, so the TTL only reaps idle
   # mappings and must exceed the longest consumer exchange cadence.
   sticky_store_firestore_ttl = "720h"
+
+  # Mirrors prod: keep caller-chosen OIDC traffic off the VPC's private ranges.
+  oidc_block_private_ips = true
 }

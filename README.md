@@ -715,6 +715,46 @@ all; a deployment serving organizations that bring their own issuers, or one
 using `issuer_patterns`, will want to leave it unset and rely on the trust
 policy and the org-level allowlist instead.
 
+### Restricting OIDC egress (`OCTOSTS_OIDC_BLOCK_PRIVATE_IPS`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_OIDC_BLOCK_PRIVATE_IPS` | `false` | Also refuse OIDC discovery and key fetches to private (RFC 1918, `fc00::/7`) and shared (`100.64.0.0/10`) addresses. |
+
+Because the caller chooses the issuer, and the issuer's discovery document
+chooses the `jwks_uri`, octo-sts checks every address it connects to for OIDC.
+These are always refused:
+
+- link-local addresses, including the cloud metadata service at `169.254.169.254`
+- other cloud metadata and host-agent addresses (`fd00:ec2::254`,
+  `100.100.100.200`, `168.63.129.16`)
+- loopback addresses, unless the issuer itself is a local `http://localhost`,
+  `http://127.0.0.1` or `http://[::1]` issuer
+- unspecified and multicast addresses
+- NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`) addresses that embed any of
+  the above
+
+A `jwks_uri` must also use `https`, unless both it and the issuer are local
+`http` addresses.
+
+Private addresses are allowed by default, because a self-hosted deployment may
+trust an issuer on one, such as an in-cluster Kubernetes issuer. If none of your
+issuers is on a private address, and in particular if your deployment can reach
+an internal network, set:
+
+```sh
+OCTOSTS_OIDC_BLOCK_PRIVATE_IPS=true
+```
+
+When an HTTP proxy is configured (`HTTPS_PROXY`), octo-sts can't see the
+address the proxy connects to. It resolves the target name itself and checks
+those addresses before handing the request to the proxy. A name that doesn't
+resolve from the octo-sts host is refused. The proxy's own address isn't
+checked, because you configured it, so a loopback sidecar proxy or one on a
+private address keeps working. The proxy resolves the name again,
+so a DNS answer that changes in between isn't caught. If you rely on a proxy,
+restrict its own egress as well.
+
 ### Best Practices
 
 To ensure secure and effective use of octo-sts, follow these recommended practices:

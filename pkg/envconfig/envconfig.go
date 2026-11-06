@@ -61,6 +61,13 @@ type EnvConfig struct {
 	// operator has named. Leave it unset to keep accepting any issuer the
 	// trust policies allow.
 	AllowedIssuers []string `envconfig:"OCTOSTS_ALLOWED_ISSUERS" required:"false"`
+
+	// OIDCBlockPrivateIPs, when true, refuses OIDC discovery and key fetches
+	// to private (RFC 1918, fc00::/7) and shared (100.64.0.0/10) addresses.
+	// Link-local, loopback and known cloud metadata addresses are always
+	// refused. Leave it off if any trusted issuer is on a private address,
+	// such as an in-cluster Kubernetes issuer.
+	OIDCBlockPrivateIPs bool `envconfig:"OCTOSTS_OIDC_BLOCK_PRIVATE_IPS" required:"false" default:"false"`
 }
 
 type EnvConfigApp struct {
