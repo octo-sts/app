@@ -352,6 +352,73 @@ func TestListPoliciesHistoryError(t *testing.T) {
 	}
 }
 
+// slowHistory answers GraphQL queries from repos, except that a query with
+// more than limit history lookups gets a 502, as GitHub does for a query that
+// runs too long.
+func slowHistory(t *testing.T, repos []fakeRepo, limit int) http.HandlerFunc {
+	byName := map[string]fakeRepo{}
+	for _, r := range repos {
+		byName[r.owner+"/"+r.name] = r
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if len(fileAlias.FindAllString(req.Query, -1)) > limit {
+			http.Error(w, `{"message":"Bad Gateway"}`, http.StatusBadGateway)
+			return
+		}
+		data, errs := answer(t, byName, req.Query)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
+	}
+}
+
+func TestListPoliciesSplitsSlowHistory(t *testing.T) {
+	// 280 policies make history chunks of 100, 100 and 80. With queries over
+	// 25 lookups timing out, each chunk splits twice: 100 -> 50 -> 25 takes
+	// seven queries, and so does 80 -> 40 -> 20.
+	repos := []fakeRepo{{owner: "acme", name: ".github", dates: map[string]time.Time{}}, {owner: "acme", name: "svc", dates: map[string]time.Time{}}}
+	for i, n := range []int{250, 30} {
+		for j := range n {
+			name := fmt.Sprintf("p%03d.sts.yaml", j)
+			repos[i].entries = append(repos[i].entries, entry{name, "blob"})
+			repos[i].dates[name] = changed.Add(time.Duration(i*1000+j) * time.Minute)
+		}
+	}
+	client, queries := fakeGitHub(t, repos, slowHistory(t, repos, 25), false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err != nil {
+		t.Fatalf("ListPolicies() = %v", err)
+	}
+	if len(got) != 280 {
+		t.Fatalf("ListPolicies() returned %d policies, want 280", len(got))
+	}
+	for k, p := range got {
+		i, j := 0, k
+		if k >= 250 {
+			i, j = 1, k-250
+		}
+		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main"}
+		if p != want {
+			t.Fatalf("policy %d = %+v, want %+v", k, p, want)
+		}
+	}
+	if n := queries.Load(); n != 22 {
+		t.Errorf("GraphQL queries = %d, want 22 (one directory query, 21 history queries)", n)
+	}
+}
+
+func TestListPoliciesSingleLookupTimesOut(t *testing.T) {
+	// A lookup that times out on its own can't be split further, so the
+	// listing fails rather than treat the file as unchanged.
+	client, _ := fakeGitHub(t, defaultRepos(), slowHistory(t, defaultRepos(), 0), false)
+	_, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err == nil || !strings.Contains(err.Error(), "last changes in acme") {
+		t.Fatalf("ListPolicies() = %v, want error containing %q", err, "last changes in acme")
+	}
+}
+
 func TestGraphqlURL(t *testing.T) {
 	for base, want := range map[string]string{
 		"https://api.github.com/":            "https://api.github.com/graphql",
