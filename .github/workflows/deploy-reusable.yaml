@@ -154,7 +154,7 @@ jobs:
         run: |
           go run ./hack/smoketest/ -config "hack/smoketest/testdata/${SMOKETEST_ENV}.yaml"
 
-      - uses: chainguard-actions/rtCamp-action-slack-notify@0aa974ffa7b70fef9dbfa9542fe07276b68ab674 # v2.4.0
+      - uses: chainguard-actions/rtCamp-action-slack-notify@bf512f517ddbc637a545627d27bf7453b3e48452 # v2.4.1
         if: ${{ failure() }}
         env:
           SLACK_ICON: http://github.com/chainguard-dev.png?size=48
