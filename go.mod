@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.21.0
-	chainguard.dev/sdk v0.1.451
+	chainguard.dev/sdk v0.1.455
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/bigquery v1.86.1
 	cloud.google.com/go/firestore v1.29.2
