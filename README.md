@@ -196,6 +196,40 @@ not exist. Patterns on the repository name, such as `subject`, change on rename
 too, including immutable subjects, which keep the owner and repository names
 next to their IDs. Matching the `repository_id` claim, as above, avoids that.
 
+#### Scoping org-level policies to the caller's repository
+
+Set `caller_repository: true` to share an org-level policy across approved
+GitHub Actions callers while limiting each issued token to its caller's own
+repository. Octo STS takes the repository ID from the verified token's
+`repository_id` claim after checking the trust policy; no per-repository policy
+records are needed.
+
+```yaml
+# yaml-language-server: $schema=https://raw.githubusercontent.com/octo-sts/app/refs/heads/main/pkg/octosts/octosts.OrgTrustPolicy.json
+
+issuer: https://token.actions.githubusercontent.com
+subject_pattern: "repo:example-org/[A-Za-z0-9_-][^:]*:.*"
+claim_pattern:
+  repository_owner_id: "123456"
+  ref: "refs/heads/main"
+  job_workflow_ref: "example-org/automation/\\.github/workflows/release\\.yaml@refs/heads/main"
+permissions:
+  contents: write
+caller_repository: true
+```
+
+Keep this policy in the org's policy repository and request an org scope, such
+as `scope: example-org`. Use a trusted issuer and restrict the owner ID and
+approved workflow explicitly. The App must have access to both the policy
+repository and the caller repository. Exclude the policy repository and other
+privileged repositories from the caller pattern; the example excludes
+dot-prefixed repository names, including `.github`.
+
+`caller_repository` requires a `repository_owner_id` claim pattern and cannot
+be combined with `repositories` or `repository_ids`. Missing or invalid
+repository IDs are denied. Use static `repository_ids` for policies that need
+cross-repository access, such as deployments.
+
 #### Autocomplete
 
 [JSONSchemas](https://json-schema.org/) are available to aid in IDE autocompletion:
