@@ -333,6 +333,11 @@
           "mode": "NULLABLE"
         },
         {
+          "name": "caller_repository",
+          "type": "BOOLEAN",
+          "mode": "NULLABLE"
+        },
+        {
           "name": "repository_ids",
           "type": "INTEGER",
           "mode": "REPEATED"
