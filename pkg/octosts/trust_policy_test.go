@@ -790,3 +790,39 @@ func TestCompilePermissions(t *testing.T) {
 		})
 	}
 }
+
+func TestOrgTrustPolicyCompileCallerRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		callerRepository bool
+		claimPattern     map[string]string
+		names            []string
+		ids              []int64
+		wantErr          string
+	}{
+		{name: "opt in with owner restriction", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}},
+		{name: "missing owner restriction", callerRepository: true, wantErr: "repository_owner_id"},
+		{name: "static names conflict", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}, names: []string{"project"}, wantErr: "caller_repository"},
+		{name: "static IDs conflict", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}, ids: []int64{123}, wantErr: "caller_repository"},
+		{name: "default remains org wide"},
+		{name: "static names remain supported", names: []string{"project"}},
+		{name: "static IDs remain supported", ids: []int64{123}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := &OrgTrustPolicy{
+				TrustPolicy:      TrustPolicy{Issuer: "https://example.com", Subject: "subject", ClaimPattern: tc.claimPattern},
+				CallerRepository: tc.callerRepository,
+				Repositories:     tc.names,
+				RepositoryIDs:    tc.ids,
+			}
+			err := policy.Compile()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Compile() = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Compile() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}

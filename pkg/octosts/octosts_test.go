@@ -2747,3 +2747,227 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 }
+
+// TestExchangeCallerRepository exercises token verification, policy matching and
+// the final GitHub installation-token request together. The same cached policy
+// must scope successive callers independently, never to its policy repository.
+func TestExchangeCallerRepository(t *testing.T) {
+	const (
+		issuer   = "https://token.actions.githubusercontent.com"
+		workflow = "org/automation/.github/workflows/release.yaml@refs/heads/main"
+	)
+	pk, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.RS256, Key: pk}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.AddTestKeySetVerifier(t, issuer, &oidc.StaticKeySet{PublicKeys: []crypto.PublicKey{pk.Public()}})
+
+	newPolicy := func() OrgTrustPolicy {
+		return OrgTrustPolicy{
+			TrustPolicy: TrustPolicy{
+				Issuer:         issuer,
+				Audience:       "octosts",
+				SubjectPattern: `repo:org/[A-Za-z0-9_-][^:]*:.*`,
+				ClaimPattern: map[string]string{
+					"repository_owner_id": "42",
+					"ref":                 "refs/heads/main",
+					"job_workflow_ref":    `org/automation/\.github/workflows/release\.yaml@refs/heads/main`,
+				},
+				Permissions: github.InstallationPermissions{Contents: new("write")},
+			},
+			CallerRepository: true,
+		}
+	}
+	fake := newFakeGitHub()
+	var writeMints atomic.Int32
+	fake.mux.HandleFunc("/app/installations/1234/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+			http.Error(w, "read token request", http.StatusBadRequest)
+			return
+		}
+		var opts github.InstallationTokenOptions
+		if err := json.Unmarshal(b, &opts); err != nil {
+			t.Error(err)
+			http.Error(w, "decode token request", http.StatusBadRequest)
+			return
+		}
+		if opts.Permissions != nil && opts.Permissions.GetContents() == "write" {
+			writeMints.Add(1)
+		}
+		json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new(base64.StdEncoding.EncodeToString(b)),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	writePolicy := func(w http.ResponseWriter, policy OrgTrustPolicy) {
+		t.Helper()
+		b, err := json.Marshal(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		json.NewEncoder(w).Encode(github.RepositoryContent{Content: new(base64.StdEncoding.EncodeToString(b)), Type: new("file"), Encoding: new("base64")})
+	}
+	fake.mux.HandleFunc("/repos/org/.github/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+		policy := newPolicy()
+		switch r.PathValue("identity") {
+		case "caller-shared.sts.yaml":
+		case "caller-other.sts.yaml":
+			policy.ClaimPattern["repository_id"] = "202"
+		case "caller-static.sts.yaml":
+			policy.CallerRepository = false
+			policy.RepositoryIDs = []int64{900}
+		default:
+			writeGitHubNotFound(w)
+			return
+		}
+		writePolicy(w, policy)
+	})
+	fake.mux.HandleFunc("/repos/org/project/contents/.github/chainguard/caller-local.sts.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		policy := newPolicy()
+		policy.CallerRepository = false
+		writePolicy(w, policy)
+	})
+	fake.mux.HandleFunc("/repos/deploy-org/.github/contents/.github/chainguard/caller-deploy.sts.yaml", func(w http.ResponseWriter, _ *http.Request) {
+		policy := newPolicy()
+		policy.CallerRepository = false
+		policy.RepositoryIDs = []int64{900}
+		writePolicy(w, policy)
+	})
+	// Both policy reads and their token revocations stay on the local fake.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api/v3")
+		fake.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	atr, err := ghinstallation.NewAppsTransportWithOptions(http.DefaultTransport, 1234,
+		ghinstallation.WithSigner(ghinstallation.NewRSASigner(jwt.SigningMethodRS256, sharedAppKey())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	atr.BaseURL = server.URL
+	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1, AppIDs: map[int64]bool{1234: true}}
+	svc := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool, "deploy-org": pool}), baseURL: server.URL}
+	for _, key := range []cacheTrustPolicyKey{
+		{owner: "org", repo: ".github", identity: "caller-shared"},
+		{owner: "org", repo: ".github", identity: "caller-other"},
+		{owner: "org", repo: ".github", identity: "caller-static"},
+		{owner: "org", repo: "project", identity: "caller-local"},
+		{owner: "deploy-org", repo: ".github", identity: "caller-deploy"},
+	} {
+		trustPolicies.Remove(key)
+		t.Cleanup(func() { trustPolicies.Remove(key) })
+	}
+	for _, tc := range []struct {
+		name         string
+		id           any
+		missingID    bool
+		missingOwner bool
+		subject      string
+		ownerID      string
+		ref          string
+		workflow     string
+		identity     string
+		scope        string
+		wantIDs      []int64
+		wantNames    []string
+		wantCode     codes.Code
+	}{
+		{name: "first caller", id: "101", wantIDs: []int64{101}},
+		{name: "second caller uses same policy", id: "202", wantIDs: []int64{202}},
+		{name: "rename keeps repository ID", id: "101", subject: "repo:org/renamed:ref:refs/heads/main", wantIDs: []int64{101}},
+		{name: "explicit policy repo does not broaden scope", id: "101", scope: "org/.github", wantIDs: []int64{101}},
+		{name: "missing ID", missingID: true, wantCode: codes.PermissionDenied},
+		{name: "empty ID", id: "", wantCode: codes.PermissionDenied},
+		{name: "non numeric ID", id: "not-a-repo", wantCode: codes.PermissionDenied},
+		{name: "numeric JSON ID", id: 101, wantCode: codes.PermissionDenied},
+		{name: "zero ID", id: "0", wantCode: codes.PermissionDenied},
+		{name: "negative ID", id: "-1", wantCode: codes.PermissionDenied},
+		{name: "overflowing ID", id: "9223372036854775808", wantCode: codes.PermissionDenied},
+		{name: "fractional ID", id: "1.5", wantCode: codes.PermissionDenied},
+		{name: "wrong owner", id: "101", ownerID: "99", wantCode: codes.PermissionDenied},
+		{name: "missing owner", id: "101", missingOwner: true, wantCode: codes.PermissionDenied},
+		{name: "another organization subject", id: "101", subject: "repo:other/project:ref:refs/heads/main", wantCode: codes.PermissionDenied},
+		{name: "untrusted branch", id: "101", ref: "refs/heads/feature", wantCode: codes.PermissionDenied},
+		{name: "untrusted workflow", id: "101", workflow: "org/project/.github/workflows/release.yaml@refs/heads/main", wantCode: codes.PermissionDenied},
+		{name: "policy repo excluded", id: "101", subject: "repo:org/.github:ref:refs/heads/main", wantCode: codes.PermissionDenied},
+		{name: "another caller policy denied", id: "101", identity: "caller-other", wantCode: codes.PermissionDenied},
+		{name: "static mapping unchanged", id: "101", identity: "caller-static", wantIDs: []int64{900}},
+		{name: "repo local default unchanged", id: "101", identity: "caller-local", scope: "org/project", wantNames: []string{"project"}},
+		{name: "cross org deployment keeps mapped target", id: "101", identity: "caller-deploy", scope: "deploy-org", wantIDs: []int64{900}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			subject := tc.subject
+			if subject == "" {
+				subject = "repo:org/project:ref:refs/heads/main"
+			}
+			ownerID := tc.ownerID
+			if ownerID == "" {
+				ownerID = "42"
+			}
+			ref := tc.ref
+			if ref == "" {
+				ref = "refs/heads/main"
+			}
+			jobWorkflow := tc.workflow
+			if jobWorkflow == "" {
+				jobWorkflow = workflow
+			}
+			claims := map[string]any{"ref": ref, "job_workflow_ref": jobWorkflow}
+			if !tc.missingOwner {
+				claims["repository_owner_id"] = ownerID
+			}
+			if !tc.missingID {
+				claims["repository_id"] = tc.id
+			}
+			token, err := josejwt.Signed(signer).Claims(josejwt.Claims{
+				Subject: subject, Issuer: issuer, Audience: josejwt.Audience{"octosts"},
+				Expiry: josejwt.NewNumericDate(time.Now().Add(10 * time.Minute)),
+			}).Claims(claims).Serialize()
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx := metadata.NewIncomingContext(t.Context(), metadata.Pairs("authorization", "Bearer "+token))
+			identity := tc.identity
+			if identity == "" {
+				identity = "caller-shared"
+			}
+			scope := tc.scope
+			if scope == "" {
+				scope = "org"
+			}
+			writesBefore := writeMints.Load()
+			result, err := svc.Exchange(ctx, &v1.ExchangeRequest{Identity: identity, Scopes: []string{scope}})
+			if got := status.Code(err); got != tc.wantCode {
+				t.Fatalf("Exchange() code = %v, want %v: %v", got, tc.wantCode, err)
+			}
+			if tc.wantCode != codes.OK {
+				if got := writeMints.Load(); got != writesBefore {
+					t.Errorf("denied exchange minted a write token: before %d, after %d", writesBefore, got)
+				}
+				if result != nil {
+					t.Fatal("denied exchange returned a token")
+				}
+				return
+			}
+			b, err := base64.StdEncoding.DecodeString(result.Token)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got github.InstallationTokenOptions
+			if err := json.Unmarshal(b, &got); err != nil {
+				t.Fatal(err)
+			}
+			want := github.InstallationTokenOptions{RepositoryIDs: tc.wantIDs, Repositories: tc.wantNames,
+				Permissions: &github.InstallationPermissions{Contents: new("write")}}
+			if diff := cmp.Diff(want, got); diff != "" {
+				t.Fatalf("installation-token options mismatch (-want +got):\n%s", diff)
+			}
+		})
+	}
+}

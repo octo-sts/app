@@ -654,6 +654,10 @@
           "type": "string",
           "description": "App name regex pattern; exchanges route among matching apps."
         },
+        "caller_repository": {
+          "type": "boolean",
+          "description": "CallerRepository scopes the token to the verified GitHub Actions repository_id claim."
+        },
         "repositories": {
           "items": {
             "type": "string"
