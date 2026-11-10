@@ -371,8 +371,8 @@ resource "google_logging_metric" "trust-policy-not-found" {
   filter = <<EOT
   resource.type="cloud_run_revision"
   resource.labels.service_name="${var.name}"
-  textPayload=~"negative cache hit"
-  -textPayload=~"negative cache hit for {octo-sts prober does-not-exist}"
+  textPayload=~"(?:negative cache hit|trust policy not found) for"
+  -textPayload=~"(?:negative cache hit|trust policy not found) for {octo-sts prober does-not-exist}"
   EOT
 
   metric_descriptor {
@@ -388,7 +388,7 @@ resource "google_logging_metric" "trust-policy-not-found" {
   }
 
   label_extractors = {
-    "identity" = "REGEXP_EXTRACT(textPayload, \"negative cache hit for \\\\{\\\\S+ \\\\S+ (\\\\S+)\\\\}\")"
+    "identity" = "REGEXP_EXTRACT(textPayload, \"(?:negative cache hit|trust policy not found) for \\\\{\\\\S+ \\\\S+ (\\\\S+)\\\\}\")"
   }
 }
 
@@ -402,7 +402,7 @@ resource "google_monitoring_alert_policy" "trust-policy-not-found" {
   }
 
   conditions {
-    display_name = "Trust policy negative cache hits exceed 200/hr"
+    display_name = "Trust policy not found exceeds 200/hr"
 
     condition_threshold {
       filter          = "metric.type=\"logging.googleapis.com/user/${google_logging_metric.trust-policy-not-found.name}\" AND resource.type=\"cloud_run_revision\""
@@ -420,7 +420,7 @@ resource "google_monitoring_alert_policy" "trust-policy-not-found" {
   }
 
   documentation {
-    content   = "Trust policy identity `$${metric.labels.identity}` has exceeded 200 negative cache hits in the last hour."
+    content   = "Trust policy identity `$${metric.labels.identity}` was not found more than 200 times in the last hour."
     mime_type = "text/markdown"
   }
 

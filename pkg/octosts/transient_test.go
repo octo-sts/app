@@ -103,7 +103,7 @@ func TestFetchTrustPolicyRawRetriesTransient(t *testing.T) {
 	if got := counter.Load(); got != int32(maxRetry) {
 		t.Errorf("contents calls = %d, want %d (bounded retry)", got, maxRetry)
 	}
-	// A transient failure must never poison the negative cache.
+	// A transient failure must never populate the policy cache.
 	if _, ok := trustPolicies.Get(key); ok {
 		t.Error("transient failure seeded the trust policy cache; it must not")
 	}
@@ -153,8 +153,8 @@ func TestFetchTrustPolicyRawRecoversAfterTransient(t *testing.T) {
 	}
 }
 
-// TestFetchTrustPolicyRawNotFoundNotRetried keeps the 404 path fast and
-// negative-cached: a real 404 must not be retried as if it were transient.
+// TestFetchTrustPolicyRawNotFoundNotRetried keeps the 404 path fast: a real
+// 404 must not be retried as if it were transient.
 func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 	key := freshTPKey(t, "missing")
 	gh, counter := newFakeGitHubContents("", http.StatusNotFound)
@@ -168,8 +168,8 @@ func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 	if got := counter.Load(); got != 1 {
 		t.Errorf("contents calls = %d, want 1 (404 is not retried)", got)
 	}
-	if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
-		t.Error("404 did not seed the negative cache")
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("404 must not be cached")
 	}
 }
 
@@ -216,8 +216,7 @@ func TestFetchTrustPolicyRawForbiddenFailsClosed(t *testing.T) {
 	if got := counter.Load(); got != 1 {
 		t.Errorf("contents calls = %d, want 1 (a 403 is not retried)", got)
 	}
-	// A 403 is not a definitive "no policy" answer, so it must not poison the
-	// negative cache the way a 404 does.
+	// A 403 must not populate the trust policy cache.
 	if _, ok := trustPolicies.Get(key); ok {
 		t.Error("a 403 seeded the trust policy cache; it must not")
 	}
@@ -371,7 +370,7 @@ func TestFetchTrustPolicyRawContextDeadline(t *testing.T) {
 
 // TestFetchTrustPolicyRawTransientThenNotFound pins the subtle boundary where
 // backoff's try limit and a Permanent stop coincide on the final attempt: two
-// 5xx then a 404 must resolve to NotFound and seed the negative cache.
+// 5xx then a 404 must resolve to NotFound.
 func TestFetchTrustPolicyRawTransientThenNotFound(t *testing.T) {
 	key := freshTPKey(t, "eventually-404")
 	gh, counter := newFakeGitHubContents("",
@@ -386,8 +385,8 @@ func TestFetchTrustPolicyRawTransientThenNotFound(t *testing.T) {
 	if got := counter.Load(); got != int32(maxRetry) {
 		t.Errorf("contents calls = %d, want %d", got, maxRetry)
 	}
-	if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
-		t.Error("final 404 did not seed the negative cache")
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("final 404 must not be cached")
 	}
 }
 

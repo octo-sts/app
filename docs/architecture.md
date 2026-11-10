@@ -67,8 +67,8 @@ sequenceDiagram
         TP-->>S: policy YAML
     else miss
         S->>GH: mint contents:read token + read <identity>.sts.yaml (revoked after)
-        GH-->>S: YAML (404 → negative cache)
-        S->>TP: cache policy
+        GH-->>S: YAML / 404
+        S->>TP: cache policy if found
     end
 
     Note over S: CheckToken — does issuer/subject match the trust policy?

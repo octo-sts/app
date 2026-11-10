@@ -1149,48 +1149,6 @@ func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
 	return &fakeGitHub{mux: mux}, &counter
 }
 
-func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "does-not-exist"}
-	trustPolicies.Remove(key)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
-
-	gh, counter := newFakeGitHubNotFoundCounter()
-	atr := newAppsTransport(t, gh)
-
-	// lookupTrustPolicy doesn't consult the router, but populate it for safety.
-	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
-	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
-
-	otp := &OrgTrustPolicy{}
-	otp.Repositories = []string{"repo"}
-
-	// First call: should hit GitHub and get a 404.
-	err := s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
-	if err == nil {
-		t.Fatal("expected NotFound error on first call, got nil")
-	}
-	st, ok := status.FromError(err)
-	if !ok || st.Code() != codes.NotFound {
-		t.Fatalf("expected gRPC NotFound, got %v", err)
-	}
-	if got := counter.Load(); got != 1 {
-		t.Fatalf("expected 1 GitHub API call, got %d", got)
-	}
-
-	// Second call: should be served from negative cache, no GitHub API call.
-	err = s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
-	if err == nil {
-		t.Fatal("expected NotFound error on second call, got nil")
-	}
-	st, ok = status.FromError(err)
-	if !ok || st.Code() != codes.NotFound {
-		t.Fatalf("expected gRPC NotFound, got %v", err)
-	}
-	if got := counter.Load(); got != 1 {
-		t.Fatalf("expected still 1 GitHub API call after negative cache hit, got %d", got)
-	}
-}
-
 // A caller can miss the cache, be descheduled until an earlier flight finishes,
 // then become the leader of a new flight. It must use the result just cached by
 // that earlier flight rather than fetching a stale 404 and overwriting a 200.
@@ -1202,7 +1160,6 @@ func TestPolicyReadRechecksCachesAfterJoiningFlight(t *testing.T) {
 		want codes.Code
 	}{
 		{"successful policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, policy) }, codes.OK},
-		{"missing policy read", func(k cacheTrustPolicyKey) { trustPolicies.Add(k, negativeCacheConst) }, codes.NotFound},
 		{"forbidden policy read", func(k cacheTrustPolicyKey) { forbiddenPolicies.Add(k, struct{}{}) }, codes.PermissionDenied},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1830,10 +1787,8 @@ func TestPolicyReadFailedMintDoesNotMintForRevocation(t *testing.T) {
 	}
 }
 
-// Single-flight only protects concurrent cache writers. A first (possibly
-// transient) 404 is still shared and cached for five minutes, preserving
-// #1334's quota tradeoff; recovering a newly visible policy is separate.
-func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
+// Concurrent reads share a 404, but a later request can recover immediately.
+func TestPolicyReadRecoversAfterFirst404(t *testing.T) {
 	key := freshTPKey(t, "first-404")
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1888,34 +1843,12 @@ func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
 			t.Fatalf("policy read = %v, want NotFound", err)
 		}
 	}
-	// Even though the next GitHub response would be 200, the first 404 is
-	// cached; this PR must not add a GET for each concurrent caller.
-	if _, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key); status.Code(err) != codes.NotFound {
-		t.Fatalf("cached policy read = %v, want NotFound", err)
+	raw, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key)
+	if err != nil || raw != "new policy" {
+		t.Fatalf("subsequent policy read = (%q, %v), want new policy", raw, err)
 	}
-	if got := reads.Load(); got != 1 {
-		t.Errorf("contents requests = %d, want 1 (no retry of genuine missing policies)", got)
-	}
-}
-
-func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
-	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "cached-missing"}
-	trustPolicies.Add(key, negativeCacheConst)
-	t.Cleanup(func() { trustPolicies.Remove(key) })
-
-	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
-	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
-
-	_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "cached-missing", "some-subject", testGitHubIssuer, func(*OrgTrustPolicy) error {
-		t.Fatal("authorize called for a negatively cached policy")
-		return nil
-	})
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	st, ok := status.FromError(err)
-	if !ok || st.Code() != codes.NotFound {
-		t.Fatalf("expected gRPC NotFound from negative cache, got %v (managers should not have been called)", err)
+	if got := reads.Load(); got != 2 {
+		t.Errorf("contents requests = %d, want 2", got)
 	}
 }
 

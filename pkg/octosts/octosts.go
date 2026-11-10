@@ -54,7 +54,6 @@ const (
 	// re-reads on its own installation after inheriting another
 	// installation's rate limit from a shared flight.
 	maxInheritedRateLimitRejoins = 3
-	negativeCacheConst           = ""
 )
 
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
@@ -99,9 +98,8 @@ const forbiddenPolicyTTL = time.Minute
 
 // forbiddenPolicies caches trust policy reads that returned a permission 403 so a
 // persistently misconfigured org stops re-probing GitHub (mint, read, revoke) on
-// every exchange. It is kept separate from the trustPolicies 404 negative cache
-// because a 403 must surface as PermissionDenied, not NotFound, and expires
-// faster than the 5-minute policy cache so a fixed permission recovers quickly.
+// every exchange. It expires faster than the 5-minute policy cache so a fixed
+// permission recovers quickly.
 var forbiddenPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, struct{}](200, nil, forbiddenPolicyTTL)
 
 // Pin confirmation caches share one size and TTL. The TTL is deliberately
@@ -809,11 +807,6 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	tpKey := cacheTrustPolicyKey{owner: owner, repo: repo, identity: identity}
 
-	if cached, ok := trustPolicies.Get(tpKey); ok && cached == negativeCacheConst {
-		clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-		return nil, 0, nil, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
-	}
-
 	// Read the trust policy using any available installation in this org's pool.
 	readAtr, readID, err := pool.M.Get(ctx, owner, scope, identity)
 	if err != nil {
@@ -834,6 +827,9 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, pool, readAtr, readID, owner, scope, identity, tpKey, tp)
 	if err != nil {
+		if status.Code(err) == codes.NotFound {
+			clog.InfoContextf(ctx, "trust policy not found for %s", tpKey)
+		}
 		return nil, 0, nil, decision, err
 	}
 
@@ -987,24 +983,19 @@ func (s *sts) fetchTrustPolicyRaw(ctx context.Context, base *ghinstallation.Apps
 	return s.fetchTrustPolicyRawAfterCacheMiss(ctx, base, install, tpKey)
 }
 
-// cachedTrustPolicyRaw checks the three caches that can terminate a policy
-// read: a cached policy, a cached 404, and the 403 cooldown. The same check
+// cachedTrustPolicyRaw checks the caches that can terminate a policy
+// read: a cached policy and the 403 cooldown. The same check
 // runs inside the flight: a caller can miss here and be descheduled until
 // after an earlier flight has filled a cache entry.
 func cachedTrustPolicyRaw(ctx context.Context, tpKey cacheTrustPolicyKey) (string, bool, error) {
 	if cached, ok := trustPolicies.Get(tpKey); ok {
-		if cached == negativeCacheConst {
-			clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-			return "", true, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
-		}
 		clog.InfoContextf(ctx, "found trust policy in cache for %s", tpKey)
 		return cached, true, nil
 	}
 
 	// A recent permission 403 short-circuits the mint/read/revoke cycle for the
 	// cooldown window, so a misconfigured org stops re-probing GitHub on every
-	// exchange. Distinct from the 404 negative cache: this returns
-	// PermissionDenied and expires faster (see forbiddenPolicyTTL).
+	// exchange. It returns PermissionDenied (see forbiddenPolicyTTL).
 	if _, ok := forbiddenPolicies.Get(tpKey); ok {
 		clog.InfoContextf(ctx, "forbidden cooldown hit for %s", tpKey)
 		return "", true, forbiddenStatus(tpKey.owner)
@@ -1113,8 +1104,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 	// backoff, sitting below the fleet rotation in lookupTrustPolicyWithRetry,
 	// and surface an unresolved transient failure as Unavailable. Three classes
 	// stop immediately instead: a proven rate limit (the rotation layer handles
-	// it), a permission-denied 403 (no app can resolve it), and a 404 (the
-	// genuine "no policy" answer that seeds the negative cache).
+	// it), a permission-denied 403 (no app can resolve it), and a 404.
 	op := func() (string, error) {
 		// GetContents would mint through this same transport. Acquire explicitly
 		// so revocation knows which token to use even if the read times out.
@@ -1190,7 +1180,6 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			// The policy is definitively gone: drop the stale copy so a later
 			// proven rate limit cannot serve a deleted policy.
 			staleTrustPolicies.Remove(tpKey)
-			trustPolicies.Add(tpKey, negativeCacheConst)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
 		}
 		// A terminal token-mint 404 means the installation's access is
