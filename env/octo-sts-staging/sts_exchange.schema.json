@@ -336,6 +336,11 @@
           "name": "repository_ids",
           "type": "INTEGER",
           "mode": "REPEATED"
+        },
+        {
+          "name": "caller_repository",
+          "type": "BOOLEAN",
+          "mode": "NULLABLE"
         }
       ]
     },

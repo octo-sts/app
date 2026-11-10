@@ -790,3 +790,52 @@ func TestCompilePermissions(t *testing.T) {
 		})
 	}
 }
+
+func TestOrgTrustPolicyCompileCallerRepository(t *testing.T) {
+	for _, tc := range []struct {
+		name             string
+		callerRepository bool
+		claimPattern     map[string]string
+		issuer           string
+		issuerPattern    string
+		names            []string
+		ids              []int64
+		wantErr          string
+	}{
+		{name: "opt in with owner restriction", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}},
+		{name: "GitHub Actions issuer", issuer: "https://token.actions.githubusercontent.com", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}},
+		{name: "GHES Actions issuer", issuer: "https://github.example.com/_services/token", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}},
+		{name: "issuer pattern rejected for caller repository", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": ".*"}, issuerPattern: ".*", wantErr: "requires an exact issuer"},
+		{name: "issuer pattern still supported without caller repository", issuerPattern: ".*"},
+		{name: "missing owner restriction", callerRepository: true, wantErr: "repository_owner_id"},
+		{name: "static names conflict", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}, names: []string{"project"}, wantErr: "caller_repository"},
+		{name: "static IDs conflict", callerRepository: true, claimPattern: map[string]string{"repository_owner_id": "42"}, ids: []int64{123}, wantErr: "caller_repository"},
+		{name: "default remains org wide"},
+		{name: "static names remain supported", names: []string{"project"}},
+		{name: "static IDs remain supported", ids: []int64{123}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			issuer := tc.issuer
+			if issuer == "" {
+				issuer = "https://example.com"
+			}
+			if tc.issuerPattern != "" {
+				issuer = ""
+			}
+			policy := &OrgTrustPolicy{
+				TrustPolicy:      TrustPolicy{Issuer: issuer, IssuerPattern: tc.issuerPattern, Subject: "subject", ClaimPattern: tc.claimPattern},
+				CallerRepository: tc.callerRepository,
+				Repositories:     tc.names,
+				RepositoryIDs:    tc.ids,
+			}
+			err := policy.Compile()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Compile() = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Compile() = %v, want error containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}

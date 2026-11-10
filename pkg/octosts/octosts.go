@@ -336,6 +336,13 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			e.Error = cerr.Error()
 			return status.Error(codes.PermissionDenied, "token does not match trust policy")
 		}
+		if tp.CallerRepository {
+			if cerr := tp.setCallerRepositoryScope(tok); cerr != nil {
+				clog.FromContext(ctx).Warnf("invalid caller repository claim: %v", cerr)
+				e.Error = cerr.Error()
+				return status.Error(codes.PermissionDenied, "caller repository claim is invalid")
+			}
+		}
 		return nil
 	}
 
@@ -841,7 +848,7 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	// policy read for it names its own repositories. Applied after parsing so
 	// a policy's repository_ids replace this default instead of colliding
 	// with it in Compile.
-	if scopedToRepo && len(otp.Repositories) == 0 && len(otp.RepositoryIDs) == 0 {
+	if scopedToRepo && !otp.CallerRepository && len(otp.Repositories) == 0 && len(otp.RepositoryIDs) == 0 {
 		otp.Repositories = []string{repo}
 	}
 

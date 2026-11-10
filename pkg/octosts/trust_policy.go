@@ -10,6 +10,7 @@ import (
 	"maps"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -58,6 +59,9 @@ type TrustPolicy struct {
 type OrgTrustPolicy struct {
 	TrustPolicy `json:",inline"`
 
+	// CallerRepository scopes the token to the verified GitHub Actions repository_id claim.
+	CallerRepository bool `json:"caller_repository,omitempty"`
+
 	// Repositories is an optional scoping of repositories within the organization.
 	// If not provided, all repositories available to the GitHub App within the organization
 	// are included.
@@ -86,6 +90,17 @@ func (otp *OrgTrustPolicy) Compile() error {
 	if len(otp.Repositories) > 0 && len(otp.RepositoryIDs) > 0 {
 		return errors.New("trust policy: only one of repositories or repository_ids can be set, got both")
 	}
+	if otp.CallerRepository {
+		if len(otp.Repositories) > 0 || len(otp.RepositoryIDs) > 0 {
+			return errors.New("trust policy: caller_repository cannot be combined with repositories or repository_ids")
+		}
+		if otp.Issuer == "" {
+			return errors.New("trust policy: caller_repository requires an exact issuer, not issuer_pattern")
+		}
+		if _, ok := otp.ClaimPattern["repository_owner_id"]; !ok {
+			return errors.New("trust policy: caller_repository requires a repository_owner_id claim pattern")
+		}
+	}
 	if len(otp.RepositoryIDs) > maxRepositoryIDs {
 		return fmt.Errorf("trust policy: repository_ids can list at most %d repositories, got %d", maxRepositoryIDs, len(otp.RepositoryIDs))
 	}
@@ -94,6 +109,26 @@ func (otp *OrgTrustPolicy) Compile() error {
 			return fmt.Errorf("trust policy: repository_ids must be positive, got %d", id)
 		}
 	}
+	return nil
+}
+
+// setCallerRepositoryScope restricts the policy to the caller's repository.
+// The token must be verified and pass CheckToken before this method is called.
+func (otp *OrgTrustPolicy) setCallerRepositoryScope(token *oidc.IDToken) error {
+	if !otp.CallerRepository {
+		return errors.New("trust policy: caller_repository is disabled")
+	}
+	var claims struct {
+		RepositoryID string `json:"repository_id"`
+	}
+	if err := token.Claims(&claims); err != nil {
+		return fmt.Errorf("trust policy: decoding repository_id claim: %w", err)
+	}
+	id, err := strconv.ParseInt(claims.RepositoryID, 10, 64)
+	if err != nil || id <= 0 {
+		return errors.New("trust policy: repository_id claim must be a positive integer")
+	}
+	otp.RepositoryIDs = []int64{id}
 	return nil
 }
 
