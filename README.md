@@ -225,10 +225,14 @@ repository and the caller repository. Exclude the policy repository and other
 privileged repositories from the caller pattern; the example excludes
 dot-prefixed repository names, including `.github`.
 
-`caller_repository` requires a `repository_owner_id` claim pattern and cannot
-be combined with `repositories` or `repository_ids`. Missing or invalid
-repository IDs are denied. Use static `repository_ids` for policies that need
-cross-repository access, such as deployments.
+`caller_repository` requires an exact `issuer` and a `repository_owner_id` claim
+pattern; it cannot be combined with `issuer_pattern`, `repositories`, or
+`repository_ids`. Configure the exact GitHub Actions issuer for your GitHub
+instance (including GHES or enterprise-scoped issuers). An exact issuer alone
+does not prove the claims came from GitHub: trusting another issuer permits it
+to supply arbitrary repository IDs. Missing or invalid repository IDs are
+denied. Use static `repository_ids` for policies that need cross-repository
+access, such as deployments.
 
 #### Autocomplete
 

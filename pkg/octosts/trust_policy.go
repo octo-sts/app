@@ -94,6 +94,9 @@ func (otp *OrgTrustPolicy) Compile() error {
 		if len(otp.Repositories) > 0 || len(otp.RepositoryIDs) > 0 {
 			return errors.New("trust policy: caller_repository cannot be combined with repositories or repository_ids")
 		}
+		if otp.Issuer == "" {
+			return errors.New("trust policy: caller_repository requires an exact issuer, not issuer_pattern")
+		}
 		if _, ok := otp.ClaimPattern["repository_owner_id"]; !ok {
 			return errors.New("trust policy: caller_repository requires a repository_owner_id claim pattern")
 		}
