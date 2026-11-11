@@ -29,6 +29,8 @@ import (
 	"github.com/google/go-github/v88/github"
 	lru "github.com/hashicorp/golang-lru/v2"
 	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 
 	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc/codes"
@@ -88,6 +90,34 @@ var policyReadFlight singleflight.Group
 // stops waiting, but must not keep an installation token or a GitHub request
 // alive indefinitely. It is a var so tests can shorten it.
 var policyReadTimeout = 30 * time.Second
+
+// notFoundRereadDelays are the waits before each re-read of a trust policy
+// that GitHub reported missing. GitHub can answer 404 for a second or two
+// after an installation token is minted, so a single 404 must not seed the
+// negative cache: that fails every exchange for the identity for the cache's
+// 5 minutes (#1866). This applies whether or not the policy was read before,
+// since a new instance or an evicted entry has no stale copy to go by.
+//
+// Two re-reads keep the cost of a policy that really is missing (a typo, or a
+// caller trying names) to two extra contents reads on the same token, once
+// per negative-cache TTL. The total wait, about 4s, stays well inside
+// policyReadTimeout. A policy that is really gone still fails closed, after
+// the last re-read. It is a var so tests can shorten it.
+var notFoundRereadDelays = []time.Duration{
+	time.Second,
+	3 * time.Second,
+}
+
+// notFoundRereadTotal counts 404s on a trust policy read by how re-reading
+// them ended: "recovered" (a re-read found the policy), "not_found" (every
+// re-read was a 404) or "error" (a re-read failed another way, or the read's
+// deadline passed). known is "true" when the policy was read within the last
+// hour (it was still in staleTrustPolicies), so recovered with known="false"
+// shows how often a cold read hits GitHub's lag.
+var notFoundRereadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "octosts_trust_policy_not_found_reread_total",
+	Help: "GitHub 404s for a trust policy, by the outcome of re-reading it and whether it was read within the last hour.",
+}, []string{"outcome", "known"})
 
 // A shared read can hit policyReadTimeout after minting its short-lived token.
 // Give revocation its own small budget instead of using the expired read context.
@@ -1121,19 +1151,37 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 	// and surface an unresolved transient failure as Unavailable. Three classes
 	// stop immediately instead: a proven rate limit (the rotation layer handles
 	// it), a permission-denied 403 (no app can resolve it), and a 404 (the
-	// genuine "no policy" answer that seeds the negative cache).
-	op := func() (string, error) {
+	// genuine "no policy" answer that seeds the negative cache). A 404 is first
+	// re-read twice, as GitHub can briefly 404 on a newly minted token (see
+	// notFoundRereadDelays).
+	read := func() (*github.RepositoryContent, error) {
 		// GetContents would mint through this same transport. Acquire explicitly
 		// so revocation knows which token to use even if the read times out.
+		// The transport caches the token, so retries reuse it rather than
+		// minting another.
 		tok, err := atr.Token(ctx)
-		var file *github.RepositoryContent
-		if err == nil {
-			mintedToken = tok
-			file, _, _, err = client.Repositories.GetContents(ctx,
-				tpKey.owner, tpKey.repo,
-				path.Join(s.policyDirectory(), tpKey.identity+".sts.yaml"),
-				&github.RepositoryContentGetOptions{},
-			)
+		if err != nil {
+			return nil, err
+		}
+		mintedToken = tok
+		file, _, _, err := client.Repositories.GetContents(ctx,
+			tpKey.owner, tpKey.repo,
+			path.Join(s.policyDirectory(), tpKey.identity+".sts.yaml"),
+			&github.RepositoryContentGetOptions{},
+		)
+		return file, err
+	}
+	// sawNotFound records that GitHub answered 404 earlier in this fetch. It
+	// limits the re-reads to one round per fetch (if a re-read fails
+	// transiently and the backoff below retries op, a 404 then is not given
+	// another ~4s), and it stops a later rate limit in the same fetch from
+	// treating the policy as merely unreachable (see the rate-limit branch).
+	sawNotFound := false
+	op := func() (string, error) {
+		file, err := read()
+		if isContentsNotFound(err) && !sawNotFound {
+			sawNotFound = true
+			file, err = rereadNotFound(ctx, tpKey, read)
 		}
 		if err == nil {
 			if file == nil {
@@ -1169,6 +1217,17 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		// 429. A bare 403 is handled below as permission-denied, not here, so it
 		// no longer masquerades as a rate limit (see isProvenRateLimit).
 		if isProvenRateLimit(err) {
+			if sawNotFound {
+				// GitHub answered 404 earlier in this fetch and the re-reads
+				// couldn't show otherwise, so treat that 404 as final, as a 404
+				// that persists would be. Serving a stale copy here would serve
+				// a policy GitHub just reported gone, and ResourceExhausted
+				// would rotate apps to repeat the 404 and its re-reads.
+				// rereadNotFound already dropped the stale copy.
+				clog.InfoContextf(ctx, "rate-limited after a 404 for %s; treating the 404 as final", tpKey)
+				trustPolicies.Add(tpKey, negativeCacheConst)
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
+			}
 			if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 				clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
 				// Seed the primary cache so further exchanges during the
@@ -1192,10 +1251,11 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			forbiddenPolicies.Add(tpKey, struct{}{})
 			return "", backoff.Permanent(forbiddenStatus(tpKey.owner))
 		}
-		var ghErr *github.ErrorResponse
-		if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+		if isContentsNotFound(err) {
 			// The policy is definitively gone: drop the stale copy so a later
-			// proven rate limit cannot serve a deleted policy.
+			// proven rate limit cannot serve a deleted policy. A 404 reaches
+			// here once rereadNotFound found nothing, or on a later attempt in
+			// the same fetch, after the one round of re-reads was used up.
 			staleTrustPolicies.Remove(tpKey)
 			trustPolicies.Add(tpKey, negativeCacheConst)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
@@ -1244,6 +1304,64 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		return "", status.Errorf(codes.Unavailable, "transient error fetching trust policy for %q", tpKey.identity)
 	}
 	return raw, nil
+}
+
+// isContentsNotFound reports whether err is GitHub answering 404 to a contents
+// read. A token-mint 404 is a *ghinstallation.HTTPError and does not match.
+func isContentsNotFound(err error) bool {
+	var ghErr *github.ErrorResponse
+	return errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound
+}
+
+// rereadNotFound re-reads a trust policy after a 404, waiting
+// notFoundRereadDelays between tries. It returns the first result that is not
+// a contents 404, or the last 404. The caller classifies whatever comes back
+// exactly as it would a first read, so a 404 that persists still seeds the
+// negative cache.
+//
+// It drops the stale copy before re-reading, as a first 404 always has
+// (#1847): whatever the re-reads end in (a rate limit, a transient error, the
+// read's deadline), nothing may serve a policy GitHub has just reported gone.
+// A re-read that finds the policy adds it back through the caller's normal
+// success path.
+func rereadNotFound(ctx context.Context, tpKey cacheTrustPolicyKey, read func() (*github.RepositoryContent, error)) (*github.RepositoryContent, error) {
+	// Peek, unlike Contains, ignores an entry that has expired but not yet
+	// been swept, so known means "read within the last hour".
+	_, wasKnown := staleTrustPolicies.Peek(tpKey)
+	staleTrustPolicies.Remove(tpKey)
+	known := strconv.FormatBool(wasKnown)
+	clog.InfoContextf(ctx, "GitHub returned 404 for trust policy %s (read within the last hour: %s); re-reading", tpKey, known)
+	var err error
+	for i, delay := range notFoundRereadDelays {
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			notFoundRereadTotal.WithLabelValues("error", known).Inc()
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+		var file *github.RepositoryContent
+		file, err = read()
+		if err == nil && file == nil {
+			// The path is now a directory. The caller reports that as
+			// NotFound, so don't count it as a recovery.
+			notFoundRereadTotal.WithLabelValues("not_found", known).Inc()
+			return nil, nil
+		}
+		if err == nil {
+			clog.WarnContextf(ctx, "trust policy %s found on re-read %d after GitHub returned 404 (read within the last hour: %s)", tpKey, i+1, known)
+			notFoundRereadTotal.WithLabelValues("recovered", known).Inc()
+			return file, nil
+		}
+		if !isContentsNotFound(err) {
+			notFoundRereadTotal.WithLabelValues("error", known).Inc()
+			return nil, err
+		}
+	}
+	clog.InfoContextf(ctx, "trust policy %s still not found after %d re-reads", tpKey, len(notFoundRereadDelays))
+	notFoundRereadTotal.WithLabelValues("not_found", known).Inc()
+	return nil, err
 }
 
 // isTransient reports whether err is a retriable, non-rate-limit failure from a
