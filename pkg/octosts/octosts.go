@@ -1238,9 +1238,10 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			return "", backoff.Permanent(forbiddenStatus(tpKey.owner))
 		}
 		if isContentsNotFound(err) {
-			// The policy is definitively gone (the re-reads also found
-			// nothing): drop the stale copy so a later proven rate limit cannot
-			// serve a deleted policy.
+			// The policy is definitively gone: drop the stale copy so a later
+			// proven rate limit cannot serve a deleted policy. A 404 reaches
+			// here once rereadNotFound found nothing, or on a later attempt in
+			// the same fetch, after the one round of re-reads was used up.
 			staleTrustPolicies.Remove(tpKey)
 			trustPolicies.Add(tpKey, negativeCacheConst)
 			return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
@@ -1321,6 +1322,12 @@ func rereadNotFound(ctx context.Context, tpKey cacheTrustPolicyKey, read func() 
 		}
 		var file *github.RepositoryContent
 		file, err = read()
+		if err == nil && file == nil {
+			// The path is now a directory. The caller reports that as
+			// NotFound, so don't count it as a recovery.
+			notFoundRereadTotal.WithLabelValues("not_found", known).Inc()
+			return nil, nil
+		}
 		if err == nil {
 			clog.WarnContextf(ctx, "trust policy %s found on re-read %d after GitHub returned 404 (read within the last hour: %s)", tpKey, i+1, known)
 			notFoundRereadTotal.WithLabelValues("recovered", known).Inc()

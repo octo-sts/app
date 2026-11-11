@@ -5,25 +5,21 @@ package octosts
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
-	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/go-github/v88/github"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
-// TestMain keeps every 404 re-read in this package's tests but drops the
-// waits between them, so tests that reach a 404 don't sleep for seconds.
-// Tests that need the real waits set notFoundRereadDelays themselves.
-func TestMain(m *testing.M) {
-	notFoundRereadDelays = []time.Duration{time.Millisecond, time.Millisecond}
-	os.Exit(m.Run())
-}
+// The re-read delays are shortened for every test in this package; see
+// main_test.go.
 
 const rereadPolicy = "issuer: https://example.com\nsubject: sub\n"
 
@@ -204,5 +200,48 @@ func TestNotFoundRereadReadTimeout(t *testing.T) {
 	}
 	if got := rereadCount("error", "true") - before; got != 1 {
 		t.Errorf("error{known=true} rose by %v, want 1", got)
+	}
+}
+
+// TestNotFoundRereadFindsDirectory checks that a re-read finding a directory
+// where the policy file was is reported as NotFound, as a first read would
+// be, and counted as not_found rather than as a recovery.
+func TestNotFoundRereadFindsDirectory(t *testing.T) {
+	key := freshTPKey(t, "reread-directory")
+	staleTrustPolicies.Add(key, rereadPolicy)
+	base, _ := newFakeGitHubContents("", http.StatusOK)
+	var contents atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+		if contents.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(github.ErrorResponse{
+				Response: &http.Response{StatusCode: http.StatusNotFound},
+				Message:  http.StatusText(http.StatusNotFound),
+			})
+			return
+		}
+		json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
+	})
+	mux.Handle("/", base.mux)
+	recoveredBefore, notFoundBefore := rereadCount("recovered", "true"), rereadCount("not_found", "true")
+
+	s := &sts{}
+	_, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, mux), 1234, key)
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("code = %v, want NotFound; err = %v", got, err)
+	}
+	if got := contents.Load(); got != 2 {
+		t.Errorf("contents calls = %d, want 2 (the 404, then the directory)", got)
+	}
+	if _, ok := staleTrustPolicies.Get(key); ok {
+		t.Error("a directory left the stale copy in place")
+	}
+	if got := rereadCount("recovered", "true") - recoveredBefore; got != 0 {
+		t.Errorf("recovered{known=true} rose by %v, want 0", got)
+	}
+	if got := rereadCount("not_found", "true") - notFoundBefore; got != 1 {
+		t.Errorf("not_found{known=true} rose by %v, want 1", got)
 	}
 }
