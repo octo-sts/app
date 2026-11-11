@@ -429,6 +429,8 @@ func TestIsTransient(t *testing.T) {
 // primary cache. TestExchangeMintForbidden covers token-mint 403s separately.
 func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	const policy = "issuer: https://example.com\nsubject: sub\n"
+	// Each case starts with a stale copy, so the 404 case re-reads first.
+	shortSuspectDelays(t)
 
 	// contentsOverride answers the policy read itself and leaves the rest of
 	// the fake GitHub (installations, tokens) untouched.
