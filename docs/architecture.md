@@ -14,7 +14,7 @@ The diagrams reflect the exchange path in `pkg/octosts` (`Exchange` →
 |---|---|---|---|
 | **Install cache** (per App, `pkg/ghinstall`) | positive: owner → installation id · negative: owner → "not installed" | positive: none · negative: ~5 min | avoid a `ListInstallations` walk on every call |
 | **Org-issuer LRU** (`pkg/octosts`, + single-flight) | owner → allowlist decision | 5 min fresh · ~1 h stale | avoid re-reading the org allowlist per exchange |
-| **Trust-policy LRU** (`pkg/octosts`) | (owner, repo, identity) → policy YAML (and a negative entry) | LRU, with a stale-on-rate-limit fallback (a definitive not-found drops the stale copy; a 404 while a stale copy exists is re-read for ~4s first, as GitHub can briefly 404 on a new token) | avoid re-reading `.sts.yaml` per exchange |
+| **Trust-policy LRU** (`pkg/octosts`) | (owner, repo, identity) → policy YAML (and a negative entry) | LRU, with a stale-on-rate-limit fallback (a definitive not-found drops the stale copy; a 404 is re-read twice over ~4s before it is cached, as GitHub can briefly 404 on a new token) | avoid re-reading `.sts.yaml` per exchange |
 | **Sticky store** (Firestore or in-memory) | route key → installation id | ~1 h | pin a `checks:write` identity to one App so check-run ownership is stable |
 
 ## Single application instance
@@ -67,7 +67,7 @@ sequenceDiagram
         TP-->>S: policy YAML
     else miss
         S->>GH: mint contents:read token + read <identity>.sts.yaml (revoked after)
-        GH-->>S: YAML (404 → negative cache, after ~4s of re-reads if a stale copy exists)
+        GH-->>S: YAML (404 → two re-reads over ~4s → negative cache)
         S->>TP: cache policy
     end
 

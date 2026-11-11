@@ -1164,7 +1164,7 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	otp := &OrgTrustPolicy{}
 	otp.Repositories = []string{"repo"}
 
-	// First call: should hit GitHub and get a 404.
+	// First call: should hit GitHub, get a 404 and re-read it, all 404.
 	err := s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
 	if err == nil {
 		t.Fatal("expected NotFound error on first call, got nil")
@@ -1173,8 +1173,9 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	if !ok || st.Code() != codes.NotFound {
 		t.Fatalf("expected gRPC NotFound, got %v", err)
 	}
-	if got := counter.Load(); got != 1 {
-		t.Fatalf("expected 1 GitHub API call, got %d", got)
+	wantCalls := int32(1 + len(notFoundRereadDelays))
+	if got := counter.Load(); got != wantCalls {
+		t.Fatalf("expected %d GitHub API calls (a read and its re-reads), got %d", wantCalls, got)
 	}
 
 	// Second call: should be served from negative cache, no GitHub API call.
@@ -1186,8 +1187,8 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	if !ok || st.Code() != codes.NotFound {
 		t.Fatalf("expected gRPC NotFound, got %v", err)
 	}
-	if got := counter.Load(); got != 1 {
-		t.Fatalf("expected still 1 GitHub API call after negative cache hit, got %d", got)
+	if got := counter.Load(); got != wantCalls {
+		t.Fatalf("expected still %d GitHub API calls after negative cache hit, got %d", wantCalls, got)
 	}
 }
 
@@ -1830,10 +1831,13 @@ func TestPolicyReadFailedMintDoesNotMintForRevocation(t *testing.T) {
 	}
 }
 
-// Single-flight only protects concurrent cache writers. A first (possibly
-// transient) 404 is still shared and cached for five minutes, preserving
-// #1334's quota tradeoff; recovering a newly visible policy is separate.
-func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
+// A first 404 can be GitHub's lag on a new token (#1866), so it is re-read
+// before it is cached. Concurrent callers share that one flight, so the
+// re-read happens once, not once per caller; and once the policy is found it
+// is cached, so later callers don't read GitHub at all. A policy that stays
+// missing is still negatively cached after the re-reads, keeping #1334's
+// quota protection.
+func TestPolicyReadFirst404IsRereadOncePerFlight(t *testing.T) {
 	key := freshTPKey(t, "first-404")
 	started := make(chan struct{})
 	release := make(chan struct{})
@@ -1883,18 +1887,15 @@ func TestPolicyReadFirst404StillUsesNegativeCache(t *testing.T) {
 	}
 	close(release)
 	for range 2 {
-		err := <-results
-		if got := status.Code(err); got != codes.NotFound {
-			t.Fatalf("policy read = %v, want NotFound", err)
+		if err := <-results; err != nil {
+			t.Fatalf("policy read = %v, want the policy found on re-read", err)
 		}
 	}
-	// Even though the next GitHub response would be 200, the first 404 is
-	// cached; this PR must not add a GET for each concurrent caller.
-	if _, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key); status.Code(err) != codes.NotFound {
-		t.Fatalf("cached policy read = %v, want NotFound", err)
+	if _, err := s.fetchTrustPolicyRaw(ctx, atr, 1234, key); err != nil {
+		t.Fatalf("cached policy read = %v, want the cached policy", err)
 	}
-	if got := reads.Load(); got != 1 {
-		t.Errorf("contents requests = %d, want 1 (no retry of genuine missing policies)", got)
+	if got := reads.Load(); got != 2 {
+		t.Errorf("contents requests = %d, want 2 (the 404 and one shared re-read)", got)
 	}
 }
 

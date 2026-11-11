@@ -153,9 +153,10 @@ func TestFetchTrustPolicyRawRecoversAfterTransient(t *testing.T) {
 	}
 }
 
-// TestFetchTrustPolicyRawNotFoundNotRetried keeps the 404 path fast and
-// negative-cached: a real 404 must not be retried as if it were transient.
-func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
+// TestFetchTrustPolicyRawNotFoundRereadThenCached keeps the 404 path bounded
+// and negative-cached: a real 404 gets only the notFoundRereadDelays re-reads,
+// not the transient backoff on top, and then seeds the negative cache.
+func TestFetchTrustPolicyRawNotFoundRereadThenCached(t *testing.T) {
 	key := freshTPKey(t, "missing")
 	gh, counter := newFakeGitHubContents("", http.StatusNotFound)
 	atr := newAppsTransport(t, gh)
@@ -165,8 +166,8 @@ func TestFetchTrustPolicyRawNotFoundNotRetried(t *testing.T) {
 	if got := status.Code(err); got != codes.NotFound {
 		t.Fatalf("code = %v, want NotFound; err = %v", got, err)
 	}
-	if got := counter.Load(); got != 1 {
-		t.Errorf("contents calls = %d, want 1 (404 is not retried)", got)
+	if got, want := counter.Load(), int32(1+len(notFoundRereadDelays)); got != want {
+		t.Errorf("contents calls = %d, want %d (a read and its re-reads only)", got, want)
 	}
 	if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
 		t.Error("404 did not seed the negative cache")
@@ -371,7 +372,8 @@ func TestFetchTrustPolicyRawContextDeadline(t *testing.T) {
 
 // TestFetchTrustPolicyRawTransientThenNotFound pins the subtle boundary where
 // backoff's try limit and a Permanent stop coincide on the final attempt: two
-// 5xx then a 404 must resolve to NotFound and seed the negative cache.
+// 5xx then a 404 must resolve to NotFound and seed the negative cache. The
+// 404 on the last attempt is still re-read first.
 func TestFetchTrustPolicyRawTransientThenNotFound(t *testing.T) {
 	key := freshTPKey(t, "eventually-404")
 	gh, counter := newFakeGitHubContents("",
@@ -383,8 +385,8 @@ func TestFetchTrustPolicyRawTransientThenNotFound(t *testing.T) {
 	if got := status.Code(err); got != codes.NotFound {
 		t.Fatalf("code = %v, want NotFound; err = %v", got, err)
 	}
-	if got := counter.Load(); got != int32(maxRetry) {
-		t.Errorf("contents calls = %d, want %d", got, maxRetry)
+	if got, want := counter.Load(), int32(maxRetry+len(notFoundRereadDelays)); got != want {
+		t.Errorf("contents calls = %d, want %d", got, want)
 	}
 	if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
 		t.Error("final 404 did not seed the negative cache")
@@ -429,8 +431,6 @@ func TestIsTransient(t *testing.T) {
 // primary cache. TestExchangeMintForbidden covers token-mint 403s separately.
 func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	const policy = "issuer: https://example.com\nsubject: sub\n"
-	// Each case starts with a stale copy, so the 404 case re-reads first.
-	shortSuspectDelays(t)
 
 	// contentsOverride answers the policy read itself and leaves the rest of
 	// the fake GitHub (installations, tokens) untouched.
