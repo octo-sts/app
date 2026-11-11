@@ -186,8 +186,11 @@ The `sticky_repeat` field tests that multi-app sticky routing is working for
 `checks: write` policies. It exploits the GitHub check-run ownership constraint:
 only the app that created a check run can update it. The test exchanges a token,
 creates a check run on the target repo, then exchanges N-1 more times and
-updates the same check run with each token. If any update fails with 403, a
-different app was used — proving sticky routing is broken.
+updates the same check run with each token. GitHub refuses an update from a
+different app, usually with 404. GitHub can also answer 404 for a second or
+two right after a token mint or a check run create, so the test retries a 404
+for about 4 seconds. An update still refused after that means a different app
+was used, and sticky routing is broken.
 
 This requires a trust policy with `checks: write` and `contents: read`
 permissions, and a deployment with multiple GitHub Apps and a sticky store
