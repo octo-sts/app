@@ -1381,10 +1381,13 @@ func isTransient(err error) bool {
 	}
 	// Installation-token creation surfaces as *ghinstallation.HTTPError, not a
 	// go-github error. A permanent 401/404 (bad key, app not installed) must not
-	// be retried; only a 5xx mint failure is transient.
+	// be retried; a 5xx mint failure is transient. So is a mint that got no
+	// response at all: ghinstallation still returns an *HTTPError then, with a
+	// nil Response and the cause (DNS, TLS, dial, a reset connection, or a
+	// failed JWT signature) as RootCause (#1867).
 	var httpErr *ghinstallation.HTTPError
 	if errors.As(err, &httpErr) {
-		return httpErr.Response != nil && httpErr.Response.StatusCode >= 500
+		return httpErr.Response == nil || httpErr.Response.StatusCode >= 500
 	}
 	// No HTTP response at all: transport, DNS, or TLS.
 	return true

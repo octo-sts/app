@@ -416,12 +416,56 @@ func TestIsTransient(t *testing.T) {
 		{"token-mint 500", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusBadGateway}}, true},
 		{"token-mint 401", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusUnauthorized}}, false},
 		{"token-mint 404", &ghinstallation.HTTPError{Response: &http.Response{StatusCode: http.StatusNotFound}}, false},
+		// #1867: a mint that got no response (DNS, TLS, dial, a reset
+		// connection, a failed JWT signature) is still an *HTTPError.
+		{"token-mint, no response", &ghinstallation.HTTPError{RootCause: errors.New("dial tcp: connection refused")}, true},
+		{"wrapped token-mint, no response", fmt.Errorf("mint: %w", &ghinstallation.HTTPError{RootCause: errors.New("could not sign jwt")}), true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := isTransient(tc.err); got != tc.want {
 				t.Errorf("isTransient(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFetchTrustPolicyRawMintWithoutResponse covers #1867: a token mint whose
+// connection fails before any response arrives must be retried like any
+// transient error and, if it never succeeds, reported as Unavailable, not as
+// a missing trust policy. Nothing is cached and the stale copy is kept, since
+// GitHub never answered.
+func TestFetchTrustPolicyRawMintWithoutResponse(t *testing.T) {
+	key := freshTPKey(t, "mint-no-response")
+	const policy = "issuer: https://example.com\nsubject: sub\n"
+	staleTrustPolicies.Add(key, policy)
+
+	base, contents := newFakeGitHubContents(policy, http.StatusOK)
+	var mints atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(http.ResponseWriter, *http.Request) {
+		mints.Add(1)
+		// Abort the connection without writing a response, as a reset or a
+		// dropped connection would.
+		panic(http.ErrAbortHandler)
+	})
+	mux.Handle("/", base.mux)
+
+	s := &sts{}
+	_, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, mux), 1234, key)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable; err = %v", got, err)
+	}
+	if got := mints.Load(); got != int32(maxRetry) {
+		t.Errorf("token mint attempts = %d, want %d (retried as transient)", got, maxRetry)
+	}
+	if got := contents.Load(); got != 0 {
+		t.Errorf("contents calls = %d, want 0 without a token", got)
+	}
+	if _, ok := trustPolicies.Get(key); ok {
+		t.Error("a mint with no response wrote to trustPolicies")
+	}
+	if got, ok := staleTrustPolicies.Get(key); !ok || got != policy {
+		t.Errorf("a mint with no response dropped the stale copy: got (%q, %v)", got, ok)
 	}
 }
 
