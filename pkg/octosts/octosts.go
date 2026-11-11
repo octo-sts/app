@@ -1171,13 +1171,16 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		)
 		return file, err
 	}
-	// One round of re-reads per fetch: if a re-read fails transiently and the
-	// backoff below retries op, a 404 then is not given another ~4s.
-	reread := false
+	// sawNotFound records that GitHub answered 404 earlier in this fetch. It
+	// limits the re-reads to one round per fetch (if a re-read fails
+	// transiently and the backoff below retries op, a 404 then is not given
+	// another ~4s), and it stops a later rate limit in the same fetch from
+	// treating the policy as merely unreachable (see the rate-limit branch).
+	sawNotFound := false
 	op := func() (string, error) {
 		file, err := read()
-		if isContentsNotFound(err) && !reread {
-			reread = true
+		if isContentsNotFound(err) && !sawNotFound {
+			sawNotFound = true
 			file, err = rereadNotFound(ctx, tpKey, read)
 		}
 		if err == nil {
@@ -1214,6 +1217,17 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		// 429. A bare 403 is handled below as permission-denied, not here, so it
 		// no longer masquerades as a rate limit (see isProvenRateLimit).
 		if isProvenRateLimit(err) {
+			if sawNotFound {
+				// GitHub answered 404 earlier in this fetch and the re-reads
+				// couldn't show otherwise, so treat that 404 as final, as a 404
+				// that persists would be. Serving a stale copy here would serve
+				// a policy GitHub just reported gone, and ResourceExhausted
+				// would rotate apps to repeat the 404 and its re-reads.
+				// rereadNotFound already dropped the stale copy.
+				clog.InfoContextf(ctx, "rate-limited after a 404 for %s; treating the 404 as final", tpKey)
+				trustPolicies.Add(tpKey, negativeCacheConst)
+				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
+			}
 			if stale, ok := staleTrustPolicies.Get(tpKey); ok {
 				clog.InfoContextf(ctx, "rate-limited, serving stale cached trust policy for %s", tpKey)
 				// Seed the primary cache so further exchanges during the
@@ -1302,12 +1316,19 @@ func isContentsNotFound(err error) bool {
 // rereadNotFound re-reads a trust policy after a 404, waiting
 // notFoundRereadDelays between tries. It returns the first result that is not
 // a contents 404, or the last 404. The caller classifies whatever comes back
-// exactly as it would a first read, so a 404 that persists still drops the
-// stale copy and seeds the negative cache.
+// exactly as it would a first read, so a 404 that persists still seeds the
+// negative cache.
+//
+// It drops the stale copy before re-reading, as a first 404 always has
+// (#1847): whatever the re-reads end in (a rate limit, a transient error, the
+// read's deadline), nothing may serve a policy GitHub has just reported gone.
+// A re-read that finds the policy adds it back through the caller's normal
+// success path.
 func rereadNotFound(ctx context.Context, tpKey cacheTrustPolicyKey, read func() (*github.RepositoryContent, error)) (*github.RepositoryContent, error) {
 	// Peek, unlike Contains, ignores an entry that has expired but not yet
 	// been swept, so known means "read within the last hour".
 	_, wasKnown := staleTrustPolicies.Peek(tpKey)
+	staleTrustPolicies.Remove(tpKey)
 	known := strconv.FormatBool(wasKnown)
 	clog.InfoContextf(ctx, "GitHub returned 404 for trust policy %s (read within the last hour: %s); re-reading", tpKey, known)
 	var err error

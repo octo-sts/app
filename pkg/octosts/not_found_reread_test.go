@@ -173,9 +173,9 @@ func TestNotFoundRereadOneRoundPerFetch(t *testing.T) {
 }
 
 // TestNotFoundRereadReadTimeout checks that when the shared read's deadline
-// passes during the waits, the caller gets Unavailable and nothing is cached:
-// no negative entry, and the stale copy stays, since nothing proved the
-// policy gone.
+// passes during the waits, the caller gets Unavailable and no negative entry
+// is cached, since the 404 wasn't confirmed. The stale copy is still gone: a
+// 404 was seen, so a later rate-limited fetch must not serve it.
 func TestNotFoundRereadReadTimeout(t *testing.T) {
 	origDelays, origTimeout := notFoundRereadDelays, policyReadTimeout
 	notFoundRereadDelays = []time.Duration{time.Hour}
@@ -195,11 +195,61 @@ func TestNotFoundRereadReadTimeout(t *testing.T) {
 	if _, ok := trustPolicies.Get(key); ok {
 		t.Error("a timed-out read wrote to trustPolicies")
 	}
-	if _, ok := staleTrustPolicies.Get(key); !ok {
-		t.Error("a timed-out read dropped the stale copy")
+	if _, ok := staleTrustPolicies.Get(key); ok {
+		t.Error("a timed-out read after a 404 left the stale copy in place")
 	}
 	if got := rereadCount("error", "true") - before; got != 1 {
 		t.Errorf("error{known=true} rose by %v, want 1", got)
+	}
+}
+
+// TestNotFoundThenRateLimitFailsClosed covers a 404 whose re-reads end in a
+// rate limit, directly or after a transient error and the backoff's retry.
+// The 404 is final: NotFound (not ResourceExhausted, which would rotate apps
+// to repeat it), a negative cache entry, and no stale copy, so neither this
+// fetch nor a later rate-limited one serves a policy GitHub reported gone.
+func TestNotFoundThenRateLimitFailsClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		stale    bool
+		statuses []int
+	}{
+		{"404 then 429, stale copy", true, []int{http.StatusNotFound, http.StatusTooManyRequests}},
+		{"404 then 429, no stale copy", false, []int{http.StatusNotFound, http.StatusTooManyRequests}},
+		{"404 then 5xx then 429, stale copy", true,
+			[]int{http.StatusNotFound, http.StatusInternalServerError, http.StatusTooManyRequests}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key := freshTPKey(t, "reread-rate-limited")
+			if tc.stale {
+				staleTrustPolicies.Add(key, rereadPolicy)
+			}
+			gh, contents := newFakeGitHubContents("", tc.statuses...)
+
+			s := &sts{}
+			raw, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, gh.mux), 1234, key)
+			if raw != "" || status.Code(err) != codes.NotFound {
+				t.Fatalf("got (%q, %v), want (\"\", NotFound)", raw, err)
+			}
+			if got, want := contents.Load(), int32(len(tc.statuses)); got != want {
+				t.Errorf("contents calls = %d, want %d", got, want)
+			}
+			if cached, ok := trustPolicies.Get(key); !ok || cached != negativeCacheConst {
+				t.Error("a 404 followed by a rate limit did not seed the negative cache")
+			}
+			if _, ok := staleTrustPolicies.Get(key); ok {
+				t.Error("a 404 followed by a rate limit left the stale copy in place")
+			}
+
+			// Once the negative entry expires, a rate-limited read must not
+			// find a stale copy to serve.
+			trustPolicies.Remove(key)
+			limited, _ := newFakeGitHubContents("", http.StatusTooManyRequests)
+			raw, err = s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, limited.mux), 1234, key)
+			if raw != "" || status.Code(err) != codes.ResourceExhausted {
+				t.Errorf("later rate-limited read: got (%q, %v), want (\"\", ResourceExhausted)", raw, err)
+			}
+		})
 	}
 }
 
