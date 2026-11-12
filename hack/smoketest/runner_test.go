@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -18,6 +20,13 @@ import (
 // checkRunServer answers PATCH /repos/o/r/check-runs/1 with statuses[i] on
 // the i-th call, repeating the last status once they run out.
 func checkRunServer(t *testing.T, statuses ...int) (*github.Client, *atomic.Int32) {
+	t.Helper()
+	return checkRunServerWithTransport(t, nil, statuses...)
+}
+
+// checkRunServerWithTransport is checkRunServer with the client's transport
+// passed through wrap, when wrap is not nil.
+func checkRunServerWithTransport(t *testing.T, wrap func(http.RoundTripper) http.RoundTripper, statuses ...int) (*github.Client, *atomic.Int32) {
 	t.Helper()
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,8 +47,12 @@ func checkRunServer(t *testing.T, statuses ...int) (*github.Client, *atomic.Int3
 	}))
 	t.Cleanup(srv.Close)
 
+	hc := srv.Client()
+	if wrap != nil {
+		hc.Transport = wrap(hc.Transport)
+	}
 	base := srv.URL + "/"
-	ghc, err := github.NewClient(github.WithHTTPClient(srv.Client()), github.WithURLs(&base, &base))
+	ghc, err := github.NewClient(github.WithHTTPClient(hc), github.WithURLs(&base, &base))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,15 +117,50 @@ func TestUpdateCheckRunWithRetry(t *testing.T) {
 	}
 }
 
-func TestUpdateCheckRunWithRetryStopsOnCancel(t *testing.T) {
-	ghc, calls := checkRunServer(t, http.StatusNotFound)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	err := updateCheckRunWithRetry(ctx, ghc, "o", "r", 1, github.UpdateCheckRunOptions{Name: "x"}, 5, time.Hour)
+// cancelAfterResponse buffers each response body, then cancels the context,
+// so the caller sees the full response and the cancel lands during the
+// retry wait rather than mid-request.
+type cancelAfterResponse struct {
+	next   http.RoundTripper
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterResponse) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := c.next.RoundTrip(req)
 	if err == nil {
-		t.Fatal("expected an error after cancel")
+		body, rErr := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if rErr != nil {
+			return nil, rErr
+		}
+		resp.Body = io.NopCloser(bytes.NewReader(body))
 	}
-	if got := calls.Load(); got > 1 {
-		t.Errorf("calls = %d, want at most 1 after cancel", got)
+	c.cancel()
+	return resp, err
+}
+
+func TestUpdateCheckRunWithRetryStopsOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ghc, calls := checkRunServerWithTransport(t, func(next http.RoundTripper) http.RoundTripper {
+		return cancelAfterResponse{next: next, cancel: cancel}
+	}, http.StatusNotFound)
+
+	// The hour-long delay means only the cancel can end the retry wait.
+	done := make(chan error, 1)
+	go func() {
+		done <- updateCheckRunWithRetry(ctx, ghc, "o", "r", 1, github.UpdateCheckRunOptions{Name: "x"}, 5, time.Hour)
+	}()
+
+	select {
+	case err := <-done:
+		if got := statusOf(err); got != http.StatusNotFound {
+			t.Errorf("status = %d (err %v), want %d", got, err, http.StatusNotFound)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("retry did not stop after the context was cancelled")
+	}
+	if got := calls.Load(); got != 1 {
+		t.Errorf("calls = %d, want 1", got)
 	}
 }
