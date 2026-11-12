@@ -190,6 +190,10 @@ module "this" {
           name  = "OCTOSTS_OIDC_BLOCK_PRIVATE_IPS"
           value = tostring(var.oidc_block_private_ips)
         },
+        {
+          name  = "OCTOSTS_REQUIRE_APP_PIN"
+          value = tostring(var.require_app_pin)
+        },
       ])
       regional-env = [{
         name  = "EVENT_INGRESS_URI"

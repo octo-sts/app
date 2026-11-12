@@ -2597,6 +2597,32 @@ func TestGetExchangeInstallAppPin(t *testing.T) {
 		}
 	})
 
+	t.Run("required pin rejects an unpinned policy", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, requireAppPin: true}
+		_, err := s.eligibleApps(pool, "org", compile(t, &TrustPolicy{}))
+		if status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("got %v, want FailedPrecondition", err)
+		}
+	})
+
+	t.Run("required pin accepts app and app_pattern", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}, requireAppPin: true}
+		for _, tp := range []*TrustPolicy{{App: "ci-a"}, {AppPattern: "ci-.*"}} {
+			eligible, err := s.eligibleApps(pool, "org", compile(t, tp))
+			if err != nil || len(eligible) == 0 {
+				t.Errorf("eligibleApps(%+v) = (%v, %v), want a non-empty set", tp, eligible, err)
+			}
+		}
+	})
+
+	t.Run("unpinned policy routes freely without the requirement", func(t *testing.T) {
+		s := &sts{apps: AppSet{Names: appNames, IDs: appIDs}}
+		eligible, err := s.eligibleApps(pool, "org", compile(t, &TrustPolicy{}))
+		if err != nil || eligible != nil {
+			t.Fatalf("eligibleApps() = (%v, %v), want (nil, nil)", eligible, err)
+		}
+	})
+
 	t.Run("pattern matches nothing", func(t *testing.T) {
 		_, err := exchange(t, &sts{apps: AppSet{Names: appNames, IDs: appIDs}}, pool, compile(t, &TrustPolicy{AppPattern: "nope-.*"}))
 		if status.Code(err) != codes.FailedPrecondition {
