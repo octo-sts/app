@@ -891,8 +891,8 @@ func TestWebhookPushNoSTSFiles(t *testing.T) {
 func TestWebhookPushBoundary19Commits(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
-	compareHit := false
 	mux := http.NewServeMux()
+	compares := handleCompare(mux, "foo/bar", "1234", "5678", "added:.github/chainguard/test.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
 		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
@@ -900,11 +900,6 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 			return
 		}
 		got = append(got, opt)
-	})
-	mux.HandleFunc("/api/v3/repos/foo/bar/compare/", func(w http.ResponseWriter, r *http.Request) {
-		compareHit = true
-		t.Error("Compare API should not be called for exactly 19 commits")
-		http.Error(w, "should not be called", http.StatusInternalServerError)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := filepath.Join("testdata", r.URL.Path)
@@ -934,7 +929,8 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 	srv := httptest.NewServer(v)
 	defer srv.Close()
 
-	// 19 commits — last one has an STS file. Should use payload, not Compare API.
+	// 19 commits — last one has an STS file. The payload is used to find it, and one
+	// Compare confirms what the push changed in net.
 	commits := make([]*github.HeadCommit, 19)
 	for i := range commits {
 		commits[i] = &github.HeadCommit{Added: []string{"README.md"}}
@@ -977,13 +973,13 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 		t.Fatalf("expected 200, got\n%s", string(out))
 	}
 	if len(got) != 1 {
-		t.Fatalf("expected 1 check run from payload path, got %d", len(got))
+		t.Fatalf("expected 1 check run, got %d", len(got))
 	}
 	if *got[0].Conclusion != "success" {
 		t.Fatalf("expected success, got %s", *got[0].Conclusion)
 	}
-	if compareHit {
-		t.Fatal("Compare API was called but should not have been for 19 commits")
+	if got := compares.Load(); got != 1 {
+		t.Fatalf("compared %d times, want 1: the payload named a policy", got)
 	}
 }
 
@@ -2199,6 +2195,11 @@ func TestWebhookPushPolicyRead403(t *testing.T) {
 			var checkRuns []github.CreateCheckRunOptions
 
 			mux := http.NewServeMux()
+			var listed []string
+			for _, f := range files {
+				listed = append(listed, "added:"+f)
+			}
+			handleCompare(mux, "foo/bar", "1234", "5678", listed...)
 			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 				var opts github.CreateCheckRunOptions
 				if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
@@ -3114,6 +3115,29 @@ func drainEvents(t *testing.T, p *PolicyEmitter, ce *fakeCEClient) []cloudevents
 	return ce.sent()
 }
 
+// handleCompare serves the Compare response a push of before..after would get
+// from GitHub, with files given as "status:path". It returns a counter of the
+// compare requests made.
+//
+// A push whose payload names a policy is confirmed against the compare, so a
+// test that wants the payload to hold has to say what the compare returns.
+func handleCompare(mux *http.ServeMux, repo, before, after string, files ...string) *atomic.Int64 {
+	var calls atomic.Int64
+	mux.HandleFunc("GET /api/v3/repos/"+repo+"/compare/"+before+"..."+after, func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		// Built by hand so an empty list is still sent as "files": [], which is
+		// what GitHub returns and is not the same as no list at all.
+		listed := make([]map[string]string, 0, len(files))
+		for _, f := range files {
+			status, path, _ := strings.Cut(f, ":")
+			listed = append(listed, map[string]string{"filename": path, "status": status})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"status": "ahead", "files": listed}) //nolint:errcheck // test server
+	})
+	return &calls
+}
+
 func TestPolicyChangesFromCompare(t *testing.T) {
 	v := &Validator{}
 	for _, tc := range []struct {
@@ -3254,10 +3278,18 @@ func githubTestServer(t *testing.T, onCheckRun func(*github.CreateCheckRunOption
 // is never read at the head SHA and so cannot be called valid.
 func TestPushEmitsPolicyEvents(t *testing.T) {
 	mux := http.NewServeMux()
+	handleCompare(mux, "foo/bar", "1234", "5678",
+		"added:.github/chainguard/test.sts.yaml", "added:.github/chainguard/missing.sts.yaml", "removed:.github/chainguard/gone.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// A 404 on a path named by the payload means the push deleted it, so the
+		// unreadable policy has to fail some other way.
+		if strings.HasSuffix(r.URL.Path, "/missing.sts.yaml") {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
@@ -3355,8 +3387,9 @@ func TestPushEmitsPolicyEvents(t *testing.T) {
 		if pe.ChangeCount != 3 {
 			t.Errorf("got ChangeCount %d, want 3", pe.ChangeCount)
 		}
-		if pe.Detection != DetectionCommits {
-			t.Errorf("got detection %q, want %q", pe.Detection, DetectionCommits)
+		// The payload named policies, so the compare confirmed them.
+		if pe.Detection != DetectionCompare {
+			t.Errorf("got detection %q, want %q", pe.Detection, DetectionCompare)
 		}
 		seenIndex[pe.ChangeIndex] = true
 		byPath[pe.Change.Path] = pe
@@ -4056,12 +4089,14 @@ func TestForcedPushDegradedEmitsMarker(t *testing.T) {
 // SHA. Validating it would 404 and fail the check run for a file the push
 // deliberately left absent, which is the same reasoning the old code already
 // applied to removals within a single diff — it just never applied it across
-// commits. The removal is still reported, because it is a real policy change.
+// commits. Net of the push nothing changed, so nothing is reported either.
 func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 	const ephemeral = ".github/chainguard/ephemeral.sts.yaml"
 
 	var checkRuns atomic.Int64
 	mux := http.NewServeMux()
+	// Absent before and after, so the net compare lists nothing.
+	handleCompare(mux, "foo/bar", "1234", "5678")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		checkRuns.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -4138,23 +4173,10 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 		t.Errorf("created %d check runs for a policy that does not exist at the head SHA, want 0", got)
 	}
 
-	// The deletion is still a policy change and still has to be reported.
-	events := drainEvents(t, emitter, ce)
-	if len(events) != 1 {
-		t.Fatalf("expected the deletion to be reported, got %d events", len(events))
-	}
-	var pe PolicyEvent
-	if err := json.Unmarshal(events[0].Data(), &pe); err != nil {
-		t.Fatal(err)
-	}
-	if pe.Change == nil || pe.Change.Action != PolicyDeleted {
-		t.Errorf("got %+v, want a deletion of %s", pe.Change, ephemeral)
-	}
-	if pe.Valid != nil {
-		t.Errorf("got Valid=%v, want nil — the path was never read", pe.Valid)
-	}
-	if pe.PushError != "" {
-		t.Errorf("nothing failed handling this push, got push_error %q", pe.PushError)
+	// Absent before and after, the push has no net policy change, so there is
+	// nothing to audit either.
+	if events := drainEvents(t, emitter, ce); len(events) != 0 {
+		t.Errorf("expected no policy events for a net no-op, got %d", len(events))
 	}
 }
 
@@ -4166,6 +4188,7 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 // is nil and PushError carries the reason the answer is missing.
 func TestRateLimitedPushReportsNoVerdict(t *testing.T) {
 	mux := http.NewServeMux()
+	handleCompare(mux, "foo/bar", "1234", "5678", "added:.github/chainguard/a.sts.yaml", "added:.github/chainguard/b.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("CheckRun should not be created when rate-limited")
 		http.Error(w, "should not be called", http.StatusInternalServerError)
@@ -4935,7 +4958,9 @@ func TestWebhookInstallationTokenRefusalStopsProcessing(t *testing.T) {
 		files    []string
 		degraded bool // a degraded audit marker precedes any policy events
 	}{
-		{name: "ordinary policy push", files: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"}},
+		// The payload names policies, so a compare is needed to confirm them. It is
+		// refused too, so the push is degraded and keeps the payload's changes.
+		{name: "ordinary policy push", files: []string{".github/chainguard/a.sts.yaml", ".github/chainguard/b.sts.yaml"}, degraded: true},
 		{name: "forced rewind", forced: true, degraded: true},
 		{name: "forced policy push", forced: true, files: []string{".github/chainguard/a.sts.yaml"}, degraded: true},
 		{name: "new ref", before: zeroHash, commits: 20, degraded: true},
@@ -5189,5 +5214,211 @@ func TestNoCommonAncestor(t *testing.T) {
 				t.Fatalf("status=%d checks=%d snapshot=%t, want status=%d checks=%d snapshot=%t; body: %s", rec.Code, checks, snapshots > 0, tc.wantStatus, tc.wantChecks, tc.wantSnapshot, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestPushMergeOfMainDoesNotReadNetDeletedPolicy covers a failing check run
+// seen when a branch that deletes a policy merges main back in.
+//
+// The push payload lists main's merge commit with the policy as added (main
+// still has it), while the final merge commit, diffed against its first parent
+// that already lacks the policy, lists nothing. Folding the payload per commit
+// therefore ends at "created" for a policy that does not exist at the head SHA,
+// and reading it 404s and fails the check run.
+//
+// The payload is only trusted to say that no policy was touched. Once it names
+// one, the compare gives the push's net change, which here is none.
+func TestPushMergeOfMainDoesNotReadNetDeletedPolicy(t *testing.T) {
+	// The branch the bug was seen on, and the default branch, which is also
+	// the only one that emits audit events.
+	t.Run("feature branch", func(t *testing.T) {
+		testNetDeletedPolicyPush(t, "refs/heads/feature/remove-policy")
+	})
+	t.Run("default branch", func(t *testing.T) {
+		testNetDeletedPolicyPush(t, "refs/heads/main")
+	})
+}
+
+func testNetDeletedPolicyPush(t *testing.T, ref string) {
+	t.Helper()
+	const deleted = ".github/chainguard/deleted_by_branch.sts.yaml"
+
+	var compares, policyReads atomic.Int64
+	var conclusions []string
+	var mu sync.Mutex
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
+		var opts github.CreateCheckRunOptions
+		if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		conclusions = append(conclusions, opts.GetConclusion())
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	})
+	// The policy was already deleted at before, so the push changes no policy.
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/1234...5678", func(w http.ResponseWriter, _ *http.Request) {
+		compares.Add(1)
+		fmt.Fprint(w, `{"status":"ahead","files":[{"filename":"README.md","status":"modified"}]}`)
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, deleted) {
+			// The branch deleted it, so it is absent at the head SHA.
+			policyReads.Add(1)
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		defer f.Close()
+		if _, err := io.Copy(w, f); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	ce := &fakeCEClient{}
+	emitter := newPolicyEmitter(ce, 1, 64)
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:    new(ref),
+		Before: new("1234"),
+		After:  new("5678"),
+		Sender: &github.User{Login: new("octocat"), ID: new(int64(1))},
+		Commits: []*github.HeadCommit{
+			// A merge of main into a topic branch seen from its first parent.
+			{Added: []string{deleted}},
+			// The final merge into the branch that deleted the policy: no
+			// difference from its first parent, so nothing is listed.
+			{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	if got := compares.Load(); got != 1 {
+		t.Errorf("compared %d times, want 1: the payload named a policy", got)
+	}
+	if got := policyReads.Load(); got != 0 {
+		t.Errorf("read the policy %d times, but it does not exist at the head SHA", got)
+	}
+	mu.Lock()
+	for _, c := range conclusions {
+		if c == "failure" {
+			t.Errorf("check run concluded %q for a policy that does not exist at the head SHA", c)
+		}
+	}
+	mu.Unlock()
+
+	// The push net-changed no policy, so there is nothing to audit either.
+	if events := drainEvents(t, emitter, ce); len(events) != 0 {
+		t.Errorf("expected no policy events, got %d", len(events))
+	}
+}
+
+// TestPushWithoutPolicyInPayloadDoesNotCompare keeps the saving the payload
+// path exists for: a push whose payload names no policy costs no Compare call.
+func TestPushWithoutPolicyInPayloadDoesNotCompare(t *testing.T) {
+	var apiCalls atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		apiCalls.Add(1)
+		http.Error(w, "unexpected "+r.URL.Path, http.StatusNotFound)
+	})
+	gh := httptest.NewServer(mux)
+	defer gh.Close()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+	tr.BaseURL = gh.URL
+
+	secret := []byte("hunter2")
+	v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}}
+	srv := httptest.NewServer(v)
+	defer srv.Close()
+
+	body, err := json.Marshal(github.PushEvent{
+		Installation: &github.Installation{ID: new(int64(1111))},
+		Repo: &github.PushEventRepository{
+			Owner:         &github.User{Login: new("foo")},
+			Name:          new("bar"),
+			FullName:      new("foo/bar"),
+			DefaultBranch: new("main"),
+		},
+		Ref:     new("refs/heads/main"),
+		Before:  new("1234"),
+		After:   new("5678"),
+		Sender:  &github.User{Login: new("octocat"), ID: new(int64(1))},
+		Commits: []*github.HeadCommit{{Modified: []string{"README.md"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Hub-Signature", signature(secret, body))
+	req.Header.Set("X-GitHub-Event", "push")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		out, _ := httputil.DumpResponse(resp, true)
+		t.Fatalf("expected 200, got\n%s", string(out))
+	}
+
+	// Only the installation token request is expected, not a compare.
+	if got := apiCalls.Load(); got != 0 {
+		t.Errorf("made %d GitHub API calls for a push that touches no policy, want 0", got)
 	}
 }

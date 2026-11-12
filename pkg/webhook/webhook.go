@@ -935,6 +935,18 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// compare reports its net effect.
 	isDefaultBranch := event.GetRef() == "refs/heads/"+event.GetRepo().GetDefaultBranch()
 
+	// The payload lists changes per commit against each commit's first parent,
+	// which does not describe the push's net effect once a merge is involved:
+	// main merged into a branch that deleted a policy lists the policy as added
+	// by main's merge commit and nothing in the final merge. So it is trusted
+	// only to say that no policy was touched, which costs no API call and is
+	// the common case. When it names a policy, the compare below gives the net
+	// change, and a policy the push net-deleted is not read at the head SHA.
+	var payloadChanges []PolicyChange
+	if len(event.Commits) < 20 {
+		payloadChanges = e.policyChangesFromPushEvent(repo, event)
+	}
+
 	var changes []PolicyChange
 	detection := DetectionCommits
 	var detectionErr string
@@ -943,6 +955,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// audit emit is registered, so the gap stays visible in the audit trail.
 	var tokenErr error
 
+	// The forced-push fallbacks below call policyChangesFromPushEvent directly,
+	// not payloadChanges: they run with any commit count, and a truncated commit
+	// list is still the best audit signal left once the snapshot has failed.
 	switch {
 	case event.GetForced() && isDefaultBranch:
 		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
@@ -981,8 +996,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		detection = DetectionSnapshot
 		changes = snapshot
 
-	case len(event.Commits) < 20:
-		changes = e.policyChangesFromPushEvent(repo, event)
+	case len(event.Commits) < 20 && (len(payloadChanges) == 0 || event.GetBefore() == zeroHash):
+		// Nothing to confirm, or no prior state to compare against.
+		changes = payloadChanges
 
 	case event.GetBefore() == zeroHash:
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
@@ -1005,10 +1021,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		if err != nil {
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				changes = payloadChanges
 				break
 			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
 				break
 			}
 			if !isNoCommonAncestor(err) {
@@ -1037,10 +1055,12 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		if err != nil {
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				changes = payloadChanges
 				break
 			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
 				break
 			}
 			return nil, err
