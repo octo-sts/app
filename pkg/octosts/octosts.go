@@ -63,7 +63,7 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		router:         router,
 		sticky:         sticky,
@@ -75,6 +75,7 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		orgPolicyRepo:  orgPolicyRepo,
 		policyDir:      policyDir,
 		allowedIssuers: allowedIssuers,
+		requireAppPin:  requireAppPin,
 	}
 }
 
@@ -178,6 +179,9 @@ type sts struct {
 	// allowedIssuers, when non-empty, confines OIDC discovery to these
 	// issuers. Empty means any issuer the trust policies allow.
 	allowedIssuers []string
+
+	// requireAppPin rejects trust policies without app or app_pattern.
+	requireAppPin bool
 
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
@@ -516,6 +520,9 @@ func (s *sts) eligibleApps(pool *ghinstall.OrgPool, owner string, tp *TrustPolic
 			return nil, status.Errorf(codes.FailedPrecondition, "trust policy app_pattern %q matches no configured apps for %q", tp.AppPattern, owner)
 		}
 		return eligible, nil
+	}
+	if s.requireAppPin {
+		return nil, status.Error(codes.FailedPrecondition, "trust policy must pin an app (app or app_pattern)")
 	}
 	return nil, nil
 }

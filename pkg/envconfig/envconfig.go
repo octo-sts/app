@@ -82,6 +82,9 @@ type EnvConfigApp struct {
 	// trust policies and the org trusted-issuer allowlist. Defaults to
 	// ".github/chainguard". The app and the webhook must agree on it.
 	PolicyDir string `envconfig:"OCTOSTS_POLICY_DIR" required:"false" default:".github/chainguard"`
+	// RequireAppPin rejects the exchange for a trust policy that sets neither
+	// app nor app_pattern, in every pool.
+	RequireAppPin bool `envconfig:"OCTOSTS_REQUIRE_APP_PIN" required:"false" default:"false"`
 }
 
 type EnvConfigWebhook struct {

@@ -114,3 +114,9 @@ variable "oidc_block_private_ips" {
   type        = bool
   default     = false
 }
+
+variable "require_app_pin" {
+  description = "Reject the exchange for a trust policy that sets neither app nor app_pattern (OCTOSTS_REQUIRE_APP_PIN), in every pool."
+  type        = bool
+  default     = false
+}
