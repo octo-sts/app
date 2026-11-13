@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -19,11 +20,13 @@ import (
 
 // newUnreadableRepoTransport is an installation that GitHub refuses a token for
 // the policy repository, as it does for an App installed on selected
-// repositories that do not include it.
-func newUnreadableRepoTransport(t *testing.T) *ghinstallation.AppsTransport {
+// repositories that do not include it, and for a repository that does not
+// exist. mints counts the refused mints.
+func newUnreadableRepoTransport(t *testing.T, mints *atomic.Int32) *ghinstallation.AppsTransport {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		mints.Add(1)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = w.Write([]byte(`{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`))
@@ -46,18 +49,38 @@ func newReadablePolicyTransport(t *testing.T) *ghinstallation.AppsTransport {
 	})
 }
 
-func TestPolicyReadTriesNextAppWhenRepoUnreadable(t *testing.T) {
-	key := freshTPKey(t, "unreadable-then-readable")
-	unreadable := newUnreadableRepoTransport(t)
-	pool := &ghinstall.OrgPool{
-		M: &sequentialInstallMgr{
-			transports: []*ghinstallation.AppsTransport{unreadable, newReadablePolicyTransport(t)},
-		},
-		AppCount: 2,
+// unreadableKey is a policy key on its own repository, so the per-repository
+// unreadablePolicyRepos cache cannot leak into tests sharing org/repo.
+func unreadableKey(t *testing.T, repo, identity string) cacheTrustPolicyKey {
+	t.Helper()
+	key := cacheTrustPolicyKey{owner: "org", repo: repo, identity: identity}
+	clear := func() {
+		trustPolicies.Remove(key)
+		staleTrustPolicies.Remove(key)
+		forbiddenPolicies.Remove(key)
+		unreadablePolicyRepos.Remove(policyRepoKey{owner: key.owner, repo: key.repo})
 	}
+	clear()
+	t.Cleanup(clear)
+	return key
+}
 
+func lookupWithPool(t *testing.T, key cacheTrustPolicyKey, transports ...*ghinstallation.AppsTransport) (int64, error) {
+	t.Helper()
+	pool := &ghinstall.OrgPool{
+		M:        &sequentialInstallMgr{transports: transports},
+		AppCount: len(transports),
+	}
 	s := &sts{}
-	_, id, err := s.lookupTrustPolicyWithRetry(t.Context(), pool, unreadable, 1234, key.owner, key.owner+"/"+key.repo, key.identity, key, &TrustPolicy{})
+	_, id, err := s.lookupTrustPolicyWithRetry(t.Context(), pool, transports[0], 1234, key.owner, key.owner+"/"+key.repo, key.identity, key, &TrustPolicy{})
+	return id, err
+}
+
+func TestPolicyReadTriesNextAppWhenRepoUnreadable(t *testing.T) {
+	key := unreadableKey(t, "unreadable-then-readable", "foo")
+	var mints atomic.Int32
+
+	id, err := lookupWithPool(t, key, newUnreadableRepoTransport(t, &mints), newReadablePolicyTransport(t))
 	if err != nil {
 		t.Fatalf("lookupTrustPolicyWithRetry: %v", err)
 	}
@@ -67,25 +90,53 @@ func TestPolicyReadTriesNextAppWhenRepoUnreadable(t *testing.T) {
 }
 
 func TestPolicyReadUnreadableEverywhere(t *testing.T) {
-	key := freshTPKey(t, "unreadable-everywhere")
-	first := newUnreadableRepoTransport(t)
-	pool := &ghinstall.OrgPool{
-		M: &sequentialInstallMgr{
-			transports: []*ghinstallation.AppsTransport{first, newUnreadableRepoTransport(t)},
-		},
-		AppCount: 2,
-	}
+	key := unreadableKey(t, "unreadable-everywhere", "foo")
+	var mints atomic.Int32
+	first, second := newUnreadableRepoTransport(t, &mints), newUnreadableRepoTransport(t, &mints)
 
-	s := &sts{}
-	_, _, err := s.lookupTrustPolicyWithRetry(t.Context(), pool, first, 1234, key.owner, key.owner+"/"+key.repo, key.identity, key, &TrustPolicy{})
-	if got := status.Code(err); got != codes.FailedPrecondition {
-		t.Fatalf("code = %v (%v), want FailedPrecondition", got, err)
+	_, err := lookupWithPool(t, key, first, second)
+	// The same answer as a missing policy, so callers cannot tell whether a
+	// private repository exists.
+	if got := status.Code(err); got != codes.NotFound {
+		t.Fatalf("code = %v (%v), want NotFound", got, err)
 	}
 	// The failure says nothing about the policy, so it must not be cached as
-	// absent: once an installation can read the repository, the next exchange
-	// has to read it.
+	// absent for the identity.
 	if _, ok := trustPolicies.Get(key); ok {
-		t.Error("an unreadable repository was cached for the policy")
+		t.Error("an unreadable repository was cached as a missing policy")
+	}
+	if got := mints.Load(); got != 2 {
+		t.Fatalf("%d mints, want one per installation", got)
+	}
+
+	// Every installation agreed, so the next request for the repository, even
+	// for another identity, mints nothing.
+	other := cacheTrustPolicyKey{owner: key.owner, repo: key.repo, identity: "bar"}
+	if _, err := lookupWithPool(t, other, first, second); status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v (%v), want NotFound", status.Code(err), err)
+	}
+	if got := mints.Load(); got != 2 {
+		t.Errorf("%d mints after the repository was known unreadable, want 2", got)
+	}
+}
+
+func TestPolicyReadRotationIsCapped(t *testing.T) {
+	key := unreadableKey(t, "unreadable-many-apps", "foo")
+	var mints atomic.Int32
+	transports := make([]*ghinstallation.AppsTransport, maxRetry+3)
+	for i := range transports {
+		transports[i] = newUnreadableRepoTransport(t, &mints)
+	}
+
+	if _, err := lookupWithPool(t, key, transports...); status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v (%v), want NotFound", status.Code(err), err)
+	}
+	if got, want := mints.Load(), int32(1+maxRetry); got != want {
+		t.Errorf("%d mints, want %d", got, want)
+	}
+	// Not every installation answered, so the repository is not cached.
+	if _, ok := unreadablePolicyRepos.Get(policyRepoKey{owner: key.owner, repo: key.repo}); ok {
+		t.Error("repository cached as unreadable without every installation agreeing")
 	}
 }
 

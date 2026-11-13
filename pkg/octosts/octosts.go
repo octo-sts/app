@@ -899,6 +899,11 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 // different installations from the pool if the first attempt is rate-limited
 // or the installation cannot see the policy repository.
 func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.OrgPool, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
+	if _, ok := unreadablePolicyRepos.Get(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}); ok {
+		clog.InfoContextf(ctx, "no installation could read %s/%s recently", tpKey.owner, tpKey.repo)
+		return atr, id, &policyRepoUnreadableError{identity: tpKey.identity}
+	}
+
 	tried := map[int64]bool{id: true}
 	err := s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
 	if pool.AppCount <= 1 {
@@ -937,31 +942,69 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 // pickByQuota is argmax(remaining) with no rotation, and an installation that
 // cannot read the repository keeps the most headroom exactly because every
 // read on it fails, so Get would keep returning it.
+//
+// GitHub answers a repository that does not exist with the same 422, so any
+// caller can make this walk run by naming one. It is capped at maxRetry reads,
+// as rate-limit rotation is, and when every installation agrees the repository
+// is unreadable, unreadablePolicyRepos answers the next requests for it.
 func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.OrgPool, owner string, tpKey cacheTrustPolicyKey, tp trustPolicy, tried map[int64]bool, atr *ghinstallation.AppsTransport, id int64, err error) (*ghinstallation.AppsTransport, int64, error) {
 	// A partial list is still worth trying; err stays the answer if it runs out.
 	installs, enumErr := pool.M.GetAll(ctx, owner)
 	if enumErr != nil {
 		clog.WarnContextf(ctx, "enumerating installations for %s failed: %v", owner, enumErr)
 	}
+	unreadable := map[int64]bool{id: true}
+	reads := 0
 	for _, in := range installs {
 		if tried[in.ID] {
 			continue
 		}
+		if reads == maxRetry {
+			break
+		}
+		reads++
 		tried[in.ID] = true
 		clog.InfoContextf(ctx, "installation %d cannot read %s/%s, trying installation %d", id, tpKey.owner, tpKey.repo, in.ID)
 		rerr := s.lookupTrustPolicy(ctx, in.Transport, in.ID, tpKey, tp)
 		if !isPolicyRepoUnreadable(rerr) {
 			return in.Transport, in.ID, rerr
 		}
+		unreadable[in.ID] = true
+	}
+
+	clog.WarnContextf(ctx, "no installation could read %s/%s for trust policy %q", tpKey.owner, tpKey.repo, tpKey.identity)
+	// Agreement needs a complete list in which every installation answered,
+	// not just one that ran out of reads or was cut short.
+	agreed := enumErr == nil && len(installs) > 0
+	for _, in := range installs {
+		agreed = agreed && unreadable[in.ID]
+	}
+	if agreed {
+		unreadablePolicyRepos.Add(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}, struct{}{})
 	}
 	return atr, id, err
 }
 
+// policyRepoKey identifies a policy repository regardless of identity, so a
+// caller cannot step around unreadablePolicyRepos by varying the identity.
+type policyRepoKey struct {
+	owner string
+	repo  string
+}
+
+// unreadablePolicyRepos holds repositories that no installation of the pool
+// could see. The TTL is short so a repository that is created, or added to an
+// installation's selection, is picked up within a minute.
+var unreadablePolicyRepos = expirablelru.NewLRU[policyRepoKey, struct{}](200, nil, time.Minute)
+
 // policyRepoUnreadableError reports that GitHub refused to mint the
 // contents:read token for the policy repository with a 422 that is not a rate
-// limit: the installation cannot see that repository. It describes the
-// installation, not the policy, so it seeds no cache, and the pool may still
-// read the policy through another App.
+// limit: the installation cannot see that repository, or it does not exist. It
+// describes the installation, not the policy, so it seeds no policy cache, and
+// the pool may still read the policy through another App.
+//
+// Callers get the same NotFound as for a missing policy: anything else would
+// tell them whether a private repository exists. The cause goes to the log.
 type policyRepoUnreadableError struct {
 	identity string
 }
@@ -971,7 +1014,7 @@ func (e *policyRepoUnreadableError) Error() string {
 }
 
 func (e *policyRepoUnreadableError) GRPCStatus() *status.Status {
-	return status.Newf(codes.FailedPrecondition, "no installation could read the trust policy repository for %q", e.identity)
+	return status.Newf(codes.NotFound, "unable to find trust policy for %q", e.identity)
 }
 
 func isPolicyRepoUnreadable(err error) bool {
