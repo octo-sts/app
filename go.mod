@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.21.0
-	chainguard.dev/sdk v0.1.484
+	chainguard.dev/sdk v0.1.490
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/bigquery v1.86.2
 	cloud.google.com/go/firestore v1.29.2
@@ -24,7 +24,7 @@ require (
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.1
-	github.com/chainguard-dev/terraform-infra-common v1.93.3
+	github.com/chainguard-dev/terraform-infra-common v1.93.4
 	github.com/cloudevents/sdk-go/v2 v2.16.2
 	github.com/coreos/go-oidc/v3 v3.21.0
 	github.com/go-jose/go-jose/v4 v4.1.9
