@@ -218,8 +218,9 @@ func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEv
 // policyChangesFromCompare derives policy changes from a CompareCommits (or
 // ListFiles) response.
 //
-// This is the path taken when the push payload's commit list is truncated, and
-// it is the only path that sees renames: GitHub reports a rename as a single
+// This is the path taken when the push payload's commit list is truncated or
+// names a policy that the compare must confirm, and it is the only path that
+// sees renames: GitHub reports a rename as a single
 // entry for the new path plus a PreviousFilename, so a policy renamed from a to
 // b is recorded as b created and a deleted.
 func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, files []*github.CommitFile) []PolicyChange {
