@@ -654,6 +654,12 @@ Routing semantics:
   an unknown name or ID, a pattern matching no configured app, or a pinned
   App not installed on the target org all reject the exchange. A newly
   installed App is picked up within about a minute.
+- With `OCTOSTS_REQUIRE_APP_PIN=true` on the exchange service, a policy that
+  sets neither `app` nor `app_pattern` is rejected with `FailedPrecondition`
+  too, in single-App pools as well, so a policy stays valid when an App is
+  added. Use it where each App stands for one automation identity and an
+  unpinned policy would be signed by a different App from one exchange to the
+  next. Off by default. The webhook check does not enforce it.
 
 Notes:
 
