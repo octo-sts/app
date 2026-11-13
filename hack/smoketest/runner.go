@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"chainguard.dev/sdk/sts"
 	"github.com/chainguard-dev/clog"
@@ -101,7 +103,12 @@ func runSingleTest(ctx context.Context, cfg *Config, tc TestCase) TestResult {
 // the GitHub check-run ownership constraint: only the app that created a
 // check run can update it. The test exchanges a token, creates a check run,
 // then exchanges again and updates the same check run. If the second token
-// came from a different app, the update fails with 403.
+// came from a different app, GitHub refuses the update, usually with 404.
+//
+// GitHub can also answer 404 for a second or two right after a token is
+// minted or a check run is created, so a 404 is retried briefly before it
+// counts as a routing failure. A different app keeps getting 404, so the
+// retry does not hide broken routing.
 func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	result := TestResult{Name: tc.Name}
 
@@ -168,7 +175,8 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 	}()
 
 	// Subsequent exchanges: update the same check run. Only the app that
-	// created it can update it — a 403 proves sticky routing is broken.
+	// created it can update it, so a refusal that outlasts the retries
+	// means sticky routing is broken.
 	for i := 1; i < tc.StickyRepeat; i++ {
 		tokenN, err := exchangeToken(ctx, domain, tc.Scope, tc.Identity)
 		if err != nil {
@@ -181,11 +189,11 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 			result.Error = fmt.Sprintf("creating GitHub client: %v", err)
 			return result
 		}
-		_, _, updateErr := ghcN.Checks.UpdateCheckRun(ctx, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
+		updateErr := updateCheckRunWithRetry(ctx, ghcN, owner, repo, checkRun.GetID(), github.UpdateCheckRunOptions{
 			Name:       "octo-sts-sticky-routing-test",
 			Status:     new("completed"),
 			Conclusion: new("success"),
-		})
+		}, checkRunUpdateAttempts, checkRunUpdateDelay)
 
 		if rErr := octosts.Revoke(ctx, tokenN, ""); rErr != nil {
 			clog.FromContext(ctx).Warnf("failed to revoke token %d for %q: %v", i+1, tc.Name, rErr)
@@ -193,7 +201,8 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 
 		if updateErr != nil {
 			var ghErr *github.ErrorResponse
-			if errors.As(updateErr, &ghErr) && ghErr.Response.StatusCode == 403 {
+			if errors.As(updateErr, &ghErr) && ghErr.Response != nil &&
+				(ghErr.Response.StatusCode == http.StatusForbidden || ghErr.Response.StatusCode == http.StatusNotFound) {
 				result.Error = fmt.Sprintf("exchange %d: sticky routing broken — different app cannot update check run %d", i+1, checkRun.GetID())
 			} else {
 				result.Error = fmt.Sprintf("exchange %d: updating check run %d failed: %v", i+1, checkRun.GetID(), updateErr)
@@ -205,6 +214,37 @@ func runStickyTest(ctx context.Context, domain string, tc TestCase) TestResult {
 
 	result.Passed = true
 	return result
+}
+
+// checkRunUpdateAttempts and checkRunUpdateDelay bound how long a 404 on a
+// check run update is retried: about 4 seconds, which covers the GitHub lag
+// seen right after a token mint or a check run create.
+const (
+	checkRunUpdateAttempts = 5
+	checkRunUpdateDelay    = time.Second
+)
+
+// updateCheckRunWithRetry updates a check run, retrying only on 404. Any
+// other error, or a 404 on the last attempt, is returned as is.
+func updateCheckRunWithRetry(ctx context.Context, ghc *github.Client, owner, repo string, id int64, opts github.UpdateCheckRunOptions, attempts int, delay time.Duration) error {
+	var err error
+	for attempt := 1; attempt <= attempts; attempt++ {
+		_, _, err = ghc.Checks.UpdateCheckRun(ctx, owner, repo, id, opts)
+		var ghErr *github.ErrorResponse
+		if err == nil || !errors.As(err, &ghErr) || ghErr.Response == nil || ghErr.Response.StatusCode != http.StatusNotFound {
+			return err
+		}
+		if attempt == attempts {
+			break
+		}
+		clog.FromContext(ctx).Infof("updating check run %d: 404 on attempt %d of %d, retrying", id, attempt, attempts)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(delay):
+		}
+	}
+	return err
 }
 
 func exchangeToken(ctx context.Context, domain, scope, identity string) (string, error) {
