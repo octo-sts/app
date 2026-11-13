@@ -496,6 +496,12 @@ The sticky store persists these `(scope, identity) -> installation` mappings so
 they survive process restarts and deploys. Without it, checks:write policies fall
 back to round-robin (non-sticky) routing which may break check-run updates.
 
+When the store is configured but a read fails, a checks:write exchange fails
+with `Unavailable` rather than picking an installation without the mapping, so
+callers retry instead of getting a token from a different App. A failed write
+only logs a warning, because the exchange already has its installation. Both are
+counted in `octosts_sticky_store_errors_total{op="get"|"put"}`.
+
 **Firestore backend** (recommended for GCP deployments):
 
 | Variable | Default | Description |

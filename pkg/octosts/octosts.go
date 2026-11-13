@@ -120,6 +120,14 @@ var notFoundRereadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "GitHub 404s for a trust policy, by the outcome of re-reading it and whether it was read within the last hour.",
 }, []string{"outcome", "known"})
 
+// stickyStoreErrorsTotal counts sticky store failures by operation ("get" or
+// "put"). A get error fails a checks:write exchange closed, and a put error
+// leaves the next exchange for that key with no mapping to follow.
+var stickyStoreErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+	Name: "octosts_sticky_store_errors_total",
+	Help: "Sticky store errors on checks:write exchanges, by operation.",
+}, []string{"op"})
+
 // A shared read can hit policyReadTimeout after minting its short-lived token.
 // Give revocation its own small budget instead of using the expired read context.
 const policyReadRevokeTimeout = 2 * time.Second
@@ -465,7 +473,11 @@ func (s *sts) getExchangeInstall(ctx context.Context, pool *ghinstall.OrgPool, o
 	}
 
 	key := routekey.Key(scope, identity, subject)
-	if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
+	cachedID, ok, err := s.sticky.Get(ctx, key)
+	if err != nil {
+		return nil, 0, stickyGetFailed(ctx, key, err)
+	}
+	if ok {
 		atr, id, err := pool.M.GetByInstallation(ctx, owner, cachedID)
 		if err == nil {
 			return atr, id, nil
@@ -483,10 +495,24 @@ func (s *sts) getExchangeInstall(ctx context.Context, pool *ghinstall.OrgPool, o
 }
 
 // putSticky persists a sticky mapping, warning instead of failing on error.
+// The exchange already has its installation, so failing it would not help;
+// the next exchange for key finds no mapping and picks again.
 func (s *sts) putSticky(ctx context.Context, key string, id int64, scope, identity, subject string) {
 	if err := s.sticky.Put(ctx, key, id, scope, identity, subject); err != nil {
+		stickyStoreErrorsTotal.WithLabelValues("put").Inc()
 		clog.FromContext(ctx).Warnf("stickystore: Put failed for key %s: %v", key, err)
 	}
+}
+
+// stickyGetFailed reports a sticky store read error on a checks:write
+// exchange. The exchange fails with Unavailable so the caller retries: any
+// installation picked without the mapping may belong to a different App than
+// the one that owns the caller's check runs, and persisting that pick would
+// move the key to it for good.
+func stickyGetFailed(ctx context.Context, key string, err error) error {
+	stickyStoreErrorsTotal.WithLabelValues("get").Inc()
+	clog.FromContext(ctx).Warnf("stickystore: Get failed for key %s: %v", key, err)
+	return status.Error(codes.Unavailable, "sticky routing store unavailable, retry the exchange")
 }
 
 // eligibleApps resolves the policy's app pin to configured app IDs in the
@@ -567,7 +593,11 @@ func (s *sts) getPinnedInstall(ctx context.Context, pool *ghinstall.OrgPool, own
 	key := routekey.Key(scope, identity, subject)
 	sticky := s.sticky != nil && checksWrite
 	if sticky {
-		if cachedID, ok, err := s.sticky.Get(ctx, key); err == nil && ok {
+		cachedID, ok, err := s.sticky.Get(ctx, key)
+		if err != nil {
+			return nil, 0, stickyGetFailed(ctx, key, err)
+		}
+		if ok {
 			inst, present, eligibleOK := locate(insts, eligible, cachedID)
 			if eligibleOK {
 				return inst.Transport, inst.ID, nil

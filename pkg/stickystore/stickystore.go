@@ -10,9 +10,10 @@ import (
 // Store persists sticky (scope, identity) -> installation ID mappings for
 // checks:write policies. Implementations must be safe for concurrent use.
 type Store interface {
-	// Get returns the installation ID for the given key. ok is false on
-	// cache miss or if the backend is unreachable (callers fall back to
-	// round-robin).
+	// Get returns the installation ID for the given key. ok is false on a
+	// cache miss. A backend failure must return a non-nil err, never a miss:
+	// callers fail the exchange on err, while a miss lets them assign and
+	// persist a new installation for the key.
 	Get(ctx context.Context, key string) (installationID int64, ok bool, err error)
 
 	// Put persists a mapping. scope, identity, and subject are stored by
