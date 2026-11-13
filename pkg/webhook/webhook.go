@@ -91,8 +91,10 @@ type DetectionMethod string
 const (
 	// DetectionCommits derived changes from the push payload's commit list.
 	DetectionCommits DetectionMethod = "commits"
-	// DetectionCompare derived changes directly from the Compare API, used
-	// when the payload's commit list is truncated and the response is complete.
+	// DetectionCompare derived changes directly from the Compare API. Used
+	// whenever the payload names a policy, to confirm what the push actually
+	// changed, and when the payload's commit list is truncated. The response
+	// is complete, so this is full assurance.
 	DetectionCompare DetectionMethod = "compare"
 	// DetectionSnapshot derived changes by diffing the policy directory at the
 	// pushed SHA against the ref's previous SHA. Used for forced pushes and
@@ -125,8 +127,8 @@ type PolicyEvent struct {
 	Change *PolicyChange `json:"change,omitempty"`
 	// Detection records how Change was derived, and DetectionError explains a
 	// DetectionDegraded result. A consumer treating this stream as an audit
-	// trail should surface anything that is not DetectionSnapshot or
-	// DetectionCommits as reduced assurance.
+	// trail should surface DetectionDegraded as reduced assurance;
+	// DetectionSnapshot, DetectionCompare and DetectionCommits are complete.
 	Detection      DetectionMethod `json:"detection"`
 	DetectionError string          `json:"detection_error,omitempty"`
 	// ChangeIndex and ChangeCount locate this event within its push. Delivery
@@ -1030,7 +1032,14 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 				break
 			}
 			if !isNoCommonAncestor(err) {
-				return nil, err
+				// Any other failure (5xx, a plain 404, a permission 403, a tree
+				// failure past the file cap) must not drop the audit record:
+				// GitHub does not redeliver, so fall back to the payload and
+				// record the gap, as the cases above do.
+				log.Warnf("compare failed for %s/%s@%s, falling back to payload: %v", owner, repo, sha, err)
+				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
+				break
 			}
 			// Without shared history the push's net change is unknown, so
 			// validate every policy live at the head and record the gap,
@@ -1063,7 +1072,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 				changes = payloadChanges
 				break
 			}
-			return nil, err
+			log.Warnf("completing compare failed for %s/%s@%s, falling back to payload: %v", owner, repo, sha, err)
+			detection, detectionErr = DetectionDegraded, err.Error()
+			changes = payloadChanges
+			break
 		}
 	}
 

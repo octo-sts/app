@@ -892,7 +892,7 @@ func TestWebhookPushBoundary19Commits(t *testing.T) {
 	got := []*github.CreateCheckRunOptions{}
 
 	mux := http.NewServeMux()
-	compares := handleCompare(mux, "foo/bar", "1234", "5678", "added:.github/chainguard/test.sts.yaml")
+	compares := handleCompare(mux, "added:.github/chainguard/test.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		opt := new(github.CreateCheckRunOptions)
 		if err := json.NewDecoder(r.Body).Decode(opt); err != nil {
@@ -2195,11 +2195,11 @@ func TestWebhookPushPolicyRead403(t *testing.T) {
 			var checkRuns []github.CreateCheckRunOptions
 
 			mux := http.NewServeMux()
-			var listed []string
+			listed := make([]string, 0, len(files))
 			for _, f := range files {
 				listed = append(listed, "added:"+f)
 			}
-			handleCompare(mux, "foo/bar", "1234", "5678", listed...)
+			handleCompare(mux, listed...)
 			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 				var opts github.CreateCheckRunOptions
 				if err := json.NewDecoder(r.Body).Decode(&opts); err != nil {
@@ -3121,9 +3121,9 @@ func drainEvents(t *testing.T, p *PolicyEmitter, ce *fakeCEClient) []cloudevents
 //
 // A push whose payload names a policy is confirmed against the compare, so a
 // test that wants the payload to hold has to say what the compare returns.
-func handleCompare(mux *http.ServeMux, repo, before, after string, files ...string) *atomic.Int64 {
+func handleCompare(mux *http.ServeMux, files ...string) *atomic.Int64 {
 	var calls atomic.Int64
-	mux.HandleFunc("GET /api/v3/repos/"+repo+"/compare/"+before+"..."+after, func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/1234...5678", func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		// Built by hand so an empty list is still sent as "files": [], which is
 		// what GitHub returns and is not the same as no list at all.
@@ -3278,7 +3278,7 @@ func githubTestServer(t *testing.T, onCheckRun func(*github.CreateCheckRunOption
 // is never read at the head SHA and so cannot be called valid.
 func TestPushEmitsPolicyEvents(t *testing.T) {
 	mux := http.NewServeMux()
-	handleCompare(mux, "foo/bar", "1234", "5678",
+	handleCompare(mux,
 		"added:.github/chainguard/test.sts.yaml", "added:.github/chainguard/missing.sts.yaml", "removed:.github/chainguard/gone.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -4096,7 +4096,7 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 	var checkRuns atomic.Int64
 	mux := http.NewServeMux()
 	// Absent before and after, so the net compare lists nothing.
-	handleCompare(mux, "foo/bar", "1234", "5678")
+	handleCompare(mux)
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		checkRuns.Add(1)
 		w.WriteHeader(http.StatusOK)
@@ -4180,6 +4180,107 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 	}
 }
 
+// TestPushCompareFailureDegradesInsteadOfDroppingAudit pins that a compare
+// failing for any reason other than a token 403, a rate limit or a missing
+// common ancestor still leaves an audit trail. GitHub does not redeliver a
+// failed webhook, so a bare 500 here would lose the record for good. The push
+// falls back to what the payload names and is marked degraded.
+func TestPushCompareFailureDegradesInsteadOfDroppingAudit(t *testing.T) {
+	for _, status := range []int{http.StatusInternalServerError, http.StatusNotFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("GET /api/v3/repos/foo/bar/compare/1234...5678", func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				json.NewEncoder(w).Encode(map[string]string{"message": "boom"}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(github.CheckRun{ID: new(int64(1))}) //nolint:errcheck // test server
+			})
+			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+				f, err := os.Open(filepath.Join("testdata", r.URL.Path))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				defer f.Close()
+				io.Copy(w, f) //nolint:errcheck // test server
+			})
+			gh := httptest.NewServer(mux)
+			defer gh.Close()
+
+			key, err := rsa.GenerateKey(rand.Reader, 2048)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tr := ghinstallation.NewAppsTransportFromPrivateKey(gh.Client().Transport, 1234, key)
+			tr.BaseURL = gh.URL
+
+			ce := &fakeCEClient{}
+			emitter := newPolicyEmitter(ce, 1, 64)
+			secret := []byte("hunter2")
+			v := &Validator{Transport: tr, WebhookSecret: [][]byte{secret}, Emitter: emitter}
+			srv := httptest.NewServer(v)
+			defer srv.Close()
+
+			body, err := json.Marshal(github.PushEvent{
+				Installation: &github.Installation{ID: new(int64(1111))},
+				Repo: &github.PushEventRepository{
+					Owner:         &github.User{Login: new("foo")},
+					Name:          new("bar"),
+					FullName:      new("foo/bar"),
+					DefaultBranch: new("main"),
+				},
+				Ref:     new("refs/heads/main"),
+				Before:  new("1234"),
+				After:   new("5678"),
+				Sender:  &github.User{Login: new("octocat"), ID: new(int64(1))},
+				Commits: []*github.HeadCommit{{Added: []string{".github/chainguard/test.sts.yaml"}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			req, err := http.NewRequest(http.MethodPost, srv.URL, bytes.NewBuffer(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("X-Hub-Signature", signature(secret, body))
+			req.Header.Set("X-GitHub-Event", "push")
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := srv.Client().Do(req.WithContext(slogtest.Context(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				out, _ := httputil.DumpResponse(resp, true)
+				t.Fatalf("expected 200, got\n%s", string(out))
+			}
+
+			events := drainEvents(t, emitter, ce)
+			if len(events) != 2 {
+				t.Fatalf("expected a degraded marker and a policy record, got %d events", len(events))
+			}
+			var marker, record PolicyEvent
+			if err := json.Unmarshal(events[0].Data(), &marker); err != nil {
+				t.Fatal(err)
+			}
+			if err := json.Unmarshal(events[1].Data(), &record); err != nil {
+				t.Fatal(err)
+			}
+			if marker.Change != nil || marker.Detection != DetectionDegraded || marker.DetectionError == "" {
+				t.Errorf("expected a degraded marker explaining the failure, got %+v", marker)
+			}
+			if record.Change == nil || record.Change.Path != ".github/chainguard/test.sts.yaml" {
+				t.Fatalf("expected a record for the payload's policy, got %+v", record.Change)
+			}
+			if record.Detection != DetectionDegraded {
+				t.Errorf("got detection %q, want %q", record.Detection, DetectionDegraded)
+			}
+		})
+	}
+}
+
 // TestRateLimitedPushReportsNoVerdict covers the distinction PushError draws.
 //
 // A rate limit aborts validation partway, so the policies it never reached have
@@ -4188,7 +4289,7 @@ func TestPushAddThenDeleteCreatesNoCheckRun(t *testing.T) {
 // is nil and PushError carries the reason the answer is missing.
 func TestRateLimitedPushReportsNoVerdict(t *testing.T) {
 	mux := http.NewServeMux()
-	handleCompare(mux, "foo/bar", "1234", "5678", "added:.github/chainguard/a.sts.yaml", "added:.github/chainguard/b.sts.yaml")
+	handleCompare(mux, "added:.github/chainguard/a.sts.yaml", "added:.github/chainguard/b.sts.yaml")
 	mux.HandleFunc("POST /api/v3/repos/foo/bar/check-runs", func(w http.ResponseWriter, _ *http.Request) {
 		t.Error("CheckRun should not be created when rate-limited")
 		http.Error(w, "should not be called", http.StatusInternalServerError)
