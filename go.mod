@@ -14,13 +14,13 @@ require (
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.15.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azkeys v1.5.0
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.5.1
-	github.com/aws/aws-sdk-go-v2 v1.47.8
+	github.com/aws/aws-sdk-go-v2 v1.48.0
 	github.com/aws/aws-sdk-go-v2/config v1.33.17
 	github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue v1.21.20
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.73.2
 	github.com/aws/aws-sdk-go-v2/service/kms v1.62.5
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.50.11
-	github.com/aws/smithy-go v1.28.8
+	github.com/aws/smithy-go v1.28.9
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.1
