@@ -91,8 +91,10 @@ type DetectionMethod string
 const (
 	// DetectionCommits derived changes from the push payload's commit list.
 	DetectionCommits DetectionMethod = "commits"
-	// DetectionCompare derived changes directly from the Compare API, used
-	// when the payload's commit list is truncated and the response is complete.
+	// DetectionCompare derived changes directly from the Compare API. Used
+	// whenever the payload names a policy, to confirm what the push actually
+	// changed, and when the payload's commit list is truncated. The response
+	// is complete, so this is full assurance.
 	DetectionCompare DetectionMethod = "compare"
 	// DetectionSnapshot derived changes by diffing the policy directory at the
 	// pushed SHA against the ref's previous SHA. Used for forced pushes and
@@ -125,8 +127,8 @@ type PolicyEvent struct {
 	Change *PolicyChange `json:"change,omitempty"`
 	// Detection records how Change was derived, and DetectionError explains a
 	// DetectionDegraded result. A consumer treating this stream as an audit
-	// trail should surface anything that is not DetectionSnapshot or
-	// DetectionCommits as reduced assurance.
+	// trail should surface DetectionDegraded as reduced assurance;
+	// DetectionSnapshot, DetectionCompare and DetectionCommits are complete.
 	Detection      DetectionMethod `json:"detection"`
 	DetectionError string          `json:"detection_error,omitempty"`
 	// ChangeIndex and ChangeCount locate this event within its push. Delivery
@@ -216,8 +218,9 @@ func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEv
 // policyChangesFromCompare derives policy changes from a CompareCommits (or
 // ListFiles) response.
 //
-// This is the path taken when the push payload's commit list is truncated, and
-// it is the only path that sees renames: GitHub reports a rename as a single
+// This is the path taken when the push payload's commit list is truncated or
+// names a policy that the compare must confirm, and it is the only path that
+// sees renames: GitHub reports a rename as a single
 // entry for the new path plus a PreviousFilename, so a policy renamed from a to
 // b is recorded as b created and a deleted.
 func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, files []*github.CommitFile) []PolicyChange {
@@ -935,6 +938,18 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// compare reports its net effect.
 	isDefaultBranch := event.GetRef() == "refs/heads/"+event.GetRepo().GetDefaultBranch()
 
+	// The payload lists changes per commit against each commit's first parent,
+	// which does not describe the push's net effect once a merge is involved:
+	// main merged into a branch that deleted a policy lists the policy as added
+	// by main's merge commit and nothing in the final merge. So it is trusted
+	// only to say that no policy was touched, which costs no API call and is
+	// the common case. When it names a policy, the compare below gives the net
+	// change, and a policy the push net-deleted is not read at the head SHA.
+	var payloadChanges []PolicyChange
+	if len(event.Commits) < 20 {
+		payloadChanges = e.policyChangesFromPushEvent(repo, event)
+	}
+
 	var changes []PolicyChange
 	detection := DetectionCommits
 	var detectionErr string
@@ -943,6 +958,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// audit emit is registered, so the gap stays visible in the audit trail.
 	var tokenErr error
 
+	// The forced-push fallbacks below call policyChangesFromPushEvent directly,
+	// not payloadChanges: they run with any commit count, and a truncated commit
+	// list is still the best audit signal left once the snapshot has failed.
 	switch {
 	case event.GetForced() && isDefaultBranch:
 		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
@@ -981,8 +999,9 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		detection = DetectionSnapshot
 		changes = snapshot
 
-	case len(event.Commits) < 20:
-		changes = e.policyChangesFromPushEvent(repo, event)
+	case len(event.Commits) < 20 && (len(payloadChanges) == 0 || event.GetBefore() == zeroHash):
+		// Nothing to confirm, or no prior state to compare against.
+		changes = payloadChanges
 
 	case event.GetBefore() == zeroHash:
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
@@ -1005,14 +1024,23 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		if err != nil {
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				changes = payloadChanges
 				break
 			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
 				break
 			}
 			if !isNoCommonAncestor(err) {
-				return nil, err
+				// Any other failure (5xx, a plain 404, a permission 403, a tree
+				// failure past the file cap) must not drop the audit record:
+				// GitHub does not redeliver, so fall back to the payload and
+				// record the gap, as the cases above do.
+				log.Warnf("compare failed for %s/%s@%s, falling back to payload: %v", owner, repo, sha, err)
+				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
+				break
 			}
 			// Without shared history the push's net change is unknown, so
 			// validate every policy live at the head and record the gap,
@@ -1037,13 +1065,18 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 		if err != nil {
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
+				changes = payloadChanges
 				break
 			}
 			if isProvenWebhookRateLimit(err) {
 				detection, detectionErr = DetectionDegraded, err.Error()
+				changes = payloadChanges
 				break
 			}
-			return nil, err
+			log.Warnf("completing compare failed for %s/%s@%s, falling back to payload: %v", owner, repo, sha, err)
+			detection, detectionErr = DetectionDegraded, err.Error()
+			changes = payloadChanges
+			break
 		}
 	}
 
