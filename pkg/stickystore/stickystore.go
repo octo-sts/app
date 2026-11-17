@@ -20,8 +20,4 @@ type Store interface {
 	// backends that support operator debuggability (e.g. Firestore);
 	// backends that do not need them may ignore them.
 	Put(ctx context.Context, key string, installationID int64, scope, identity, subject string) error
-
-	// Delete removes the mapping for key. A key without a mapping is not an
-	// error.
-	Delete(ctx context.Context, key string) error
 }

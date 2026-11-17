@@ -120,10 +120,9 @@ var notFoundRereadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "GitHub 404s for a trust policy, by the outcome of re-reading it and whether it was read within the last hour.",
 }, []string{"outcome", "known"})
 
-// stickyStoreErrorsTotal counts sticky store failures by operation ("get",
-// "put" or "delete"). A get error fails a checks:write exchange closed, a put
-// error leaves the next exchange for that key with no mapping to follow, and
-// a delete error leaves it following a refused installation.
+// stickyStoreErrorsTotal counts sticky store failures by operation ("get" or
+// "put"). A get error fails a checks:write exchange closed, and a put error
+// leaves the next exchange for that key with no mapping to follow.
 var stickyStoreErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "octosts_sticky_store_errors_total",
 	Help: "Sticky store errors on checks:write exchanges, by operation.",
@@ -397,16 +396,23 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 
 	// Synthesize a token for the requested scope and permissions based on the
 	// trust policy.
-	atr := ghtransport.ForInstallation(base, e.InstallationID)
-	atr.InstallationTokenOptions = &github.InstallationTokenOptions{
-		Repositories:  e.TrustPolicy.Repositories,
-		RepositoryIDs: e.TrustPolicy.RepositoryIDs,
-		Permissions:   &e.TrustPolicy.Permissions,
+	mint := func(base *ghinstallation.AppsTransport, install int64) (string, error) {
+		atr := ghtransport.ForInstallation(base, install)
+		atr.InstallationTokenOptions = &github.InstallationTokenOptions{
+			Repositories:  e.TrustPolicy.Repositories,
+			RepositoryIDs: e.TrustPolicy.RepositoryIDs,
+			Permissions:   &e.TrustPolicy.Permissions,
+		}
+		// Enrich context so the httpmetrics transport labels the token exchange
+		// rate limit metrics with the specific installation consuming quota.
+		return atr.Token(ghtransport.EnrichContext(ctx, base.AppID(), install))
 	}
-	// Enrich context so the httpmetrics transport labels the token exchange
-	// rate limit metrics with the specific installation consuming quota.
-	ctx = ghtransport.EnrichContext(ctx, base.AppID(), e.InstallationID)
-	token, err := atr.Token(ctx)
+	token, err := mint(base, e.InstallationID)
+	if isRefusedMint(err) {
+		if id, rToken, ok := s.repointSticky(ctx, requestScope, request.GetIdentity(), tok.Subject, &e.TrustPolicy.TrustPolicy, e.InstallationID, mint); ok {
+			e.InstallationID, token, err = id, rToken, nil
+		}
+	}
 	if err != nil {
 		owner := path.Dir(requestScope)
 		if owner == "." {
@@ -422,9 +428,6 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			// actually has a pretty reasonable error message in the response
 			// body typically, so extract that.
 			if herr.Response.StatusCode == http.StatusUnprocessableEntity {
-				if !isMintRateLimit(herr.Response) {
-					s.dropSticky(ctx, requestScope, request.GetIdentity(), tok.Subject, hasChecksWrite(e.TrustPolicy.Permissions), e.InstallationID)
-				}
 				if body, err := io.ReadAll(herr.Response.Body); err == nil {
 					clog.FromContext(ctx).Debugf("token exchange failure (StatusUnprocessableEntity): %s", body)
 					return nil, status.Error(codes.PermissionDenied, "token exchange failure (StatusUnprocessableEntity)")
@@ -508,34 +511,73 @@ func (s *sts) putSticky(ctx context.Context, key string, id int64, scope, identi
 	}
 }
 
-// dropSticky forgets the sticky mapping for a checks:write exchange whose
-// installation GitHub refused a token for (422): the installation cannot see
-// the repositories the token is for, and the mapping would send every later
-// exchange for the key to the same refusal. Only a mapping to that
-// installation is dropped, so a concurrent reassignment is kept. The next
-// exchange for the key picks again, and the pool's round-robin moves it on:
-// pickByQuota declines a pool with an installation lacking quota data, which
-// one whose mints fail never gets.
-func (s *sts) dropSticky(ctx context.Context, scope, identity, subject string, checksWrite bool, install int64) {
-	if s.sticky == nil || !checksWrite {
-		return
+// isRefusedMint reports whether GitHub refused the installation token with a
+// 422 that is not a rate limit: the installation cannot see a repository the
+// token is for, or the repository does not exist. The two are
+// indistinguishable in the response.
+func isRefusedMint(err error) bool {
+	var herr *ghinstallation.HTTPError
+	return errors.As(err, &herr) && herr.Response != nil &&
+		herr.Response.StatusCode == http.StatusUnprocessableEntity && !isMintRateLimit(herr.Response)
+}
+
+// repointSticky handles a checks:write exchange whose sticky installation was
+// refused a token: left alone, the mapping sends every later exchange for the
+// key into the same refusal. It mints on the pool's other installations and
+// moves the mapping to the first that succeeds. The walk is not capped: only
+// a caller the trust policy authorized gets here, and a cap would leave an
+// installation late in a large pool out of reach.
+//
+// The mapping is not dropped for a fresh pick instead, because the pick can
+// return the refused installation again: it has quota data from its other
+// requests, and the round-robin counter advances by a fixed step per exchange.
+// When no installation mints, the refusal is not specific to one (a
+// repository that does not exist), and the mapping stays.
+//
+// Pinned policies are left out: their checks:write pick is a hash of the
+// route key, with or without a mapping.
+func (s *sts) repointSticky(ctx context.Context, scope, identity, subject string, tp *TrustPolicy, refused int64, mint func(*ghinstallation.AppsTransport, int64) (string, error)) (int64, string, bool) {
+	if s.sticky == nil || !hasChecksWrite(tp.Permissions) || tp.App != "" || tp.appPattern != nil {
+		return 0, "", false
+	}
+	owner := path.Dir(scope)
+	if owner == "." {
+		owner = path.Base(scope)
+	}
+	pool, err := s.router.GetPool(owner)
+	if err != nil {
+		return 0, "", false
 	}
 	key := routekey.Key(scope, identity, subject)
-	id, ok, err := s.sticky.Get(ctx, key)
-	if err != nil {
+	// A mapping another exchange has moved in the meantime is left alone.
+	if id, ok, err := s.sticky.Get(ctx, key); err != nil {
 		stickyStoreErrorsTotal.WithLabelValues("get").Inc()
 		clog.FromContext(ctx).Warnf("stickystore: Get failed for key %s: %v", key, err)
-		return
+		return 0, "", false
+	} else if ok && id != refused {
+		return 0, "", false
 	}
-	if !ok || id != install {
-		return
+
+	// A partial list is still worth trying. GetAll's order is the configured
+	// one, so concurrent exchanges for the key settle on the same installation.
+	installs, err := pool.M.GetAll(ctx, owner)
+	if err != nil {
+		clog.FromContext(ctx).Warnf("enumerating installations for %s failed: %v", owner, err)
 	}
-	if err := s.sticky.Delete(ctx, key); err != nil {
-		stickyStoreErrorsTotal.WithLabelValues("delete").Inc()
-		clog.FromContext(ctx).Warnf("stickystore: Delete failed for key %s: %v", key, err)
-		return
+	for _, in := range installs {
+		if in.ID == refused {
+			continue
+		}
+		token, err := mint(in.Transport, in.ID)
+		if err != nil {
+			clog.FromContext(ctx).Infof("installation %d was refused a token, as was %d: %v", in.ID, refused, err)
+			continue
+		}
+		clog.FromContext(ctx).Infof("stickystore: installation %d was refused a token, moving key %s to installation %d", refused, key, in.ID)
+		s.putSticky(ctx, key, in.ID, scope, identity, subject)
+		return in.ID, token, true
 	}
-	clog.FromContext(ctx).Infof("stickystore: dropped mapping for key %s, installation %d was refused a token", key, install)
+	return 0, "", false
 }
 
 // stickyGetFailed reports a sticky store read error on a checks:write

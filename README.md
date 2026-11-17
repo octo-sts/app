@@ -499,11 +499,13 @@ back to round-robin (non-sticky) routing which may break check-run updates.
 When the store is configured but a read fails, a checks:write exchange fails
 with `Unavailable` rather than picking an installation without the mapping, so
 callers retry instead of getting a token from a different App. A failed write
-only logs a warning, because the exchange already has its installation. A
-mapping whose installation GitHub refuses a token for (422, the installation
-cannot see the repositories the token is for) is dropped, so the next exchange
-for the key picks again instead of following it into the same refusal. All
-three are counted in `octosts_sticky_store_errors_total{op="get"|"put"|"delete"}`.
+only logs a warning, because the exchange already has its installation. Both are
+counted in `octosts_sticky_store_errors_total{op="get"|"put"}`.
+
+When GitHub refuses the mapped installation a token (422: it cannot see the
+repositories the token is for), the exchange tries the pool's other
+installations and moves the mapping to the first that mints. Policies with an
+`app` or `app_pattern` pin are not moved.
 
 **Firestore backend** (recommended for GCP deployments):
 

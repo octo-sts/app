@@ -22,14 +22,6 @@ type fakeClient struct {
 	getItem    func(*dynamodb.GetItemInput) (*dynamodb.GetItemOutput, error)
 	putItem    func(*dynamodb.PutItemInput) (*dynamodb.PutItemOutput, error)
 	updateItem func(*dynamodb.UpdateItemInput) (*dynamodb.UpdateItemOutput, error)
-	deleteItem func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error)
-}
-
-func (f *fakeClient) DeleteItem(_ context.Context, in *dynamodb.DeleteItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error) {
-	if f.deleteItem == nil {
-		return &dynamodb.DeleteItemOutput{}, nil
-	}
-	return f.deleteItem(in)
 }
 
 func (f *fakeClient) GetItem(_ context.Context, in *dynamodb.GetItemInput, _ ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error) {
@@ -270,42 +262,6 @@ func TestPut(t *testing.T) {
 	}
 	if d.CreatedAt.IsZero() {
 		t.Error("stored doc CreatedAt is zero")
-	}
-}
-
-func TestDelete(t *testing.T) {
-	var got *dynamodb.DeleteItemInput
-	s := New(&fakeClient{
-		deleteItem: func(in *dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			got = in
-			return &dynamodb.DeleteItemOutput{}, nil
-		},
-	}, "sticky", time.Hour)
-
-	if err := s.Delete(context.Background(), "42"); err != nil {
-		t.Fatalf("Delete() = %v", err)
-	}
-	if got == nil {
-		t.Fatal("DeleteItem not called")
-	}
-	if table := aws.ToString(got.TableName); table != "sticky" {
-		t.Errorf("TableName = %q, want sticky", table)
-	}
-	if id, ok := got.Key["id"].(*types.AttributeValueMemberS); !ok || id.Value != "42" {
-		t.Errorf("Key = %#v, want id 42", got.Key)
-	}
-}
-
-func TestDeleteError(t *testing.T) {
-	boom := errors.New("boom")
-	s := New(&fakeClient{
-		deleteItem: func(*dynamodb.DeleteItemInput) (*dynamodb.DeleteItemOutput, error) {
-			return nil, boom
-		},
-	}, "sticky", time.Hour)
-
-	if err := s.Delete(context.Background(), "42"); !errors.Is(err, boom) {
-		t.Errorf("Delete() = %v, want boom", err)
 	}
 }
 

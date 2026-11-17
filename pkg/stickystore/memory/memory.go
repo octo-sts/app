@@ -34,11 +34,3 @@ func (s *Store) Put(_ context.Context, key string, installationID int64, _, _, _
 	s.mu.Unlock()
 	return nil
 }
-
-// Delete removes the mapping for key.
-func (s *Store) Delete(_ context.Context, key string) error {
-	s.mu.Lock()
-	delete(s.m, key)
-	s.mu.Unlock()
-	return nil
-}

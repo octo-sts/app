@@ -22,7 +22,6 @@ type API interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
 	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
-	DeleteItem(ctx context.Context, params *dynamodb.DeleteItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.DeleteItemOutput, error)
 }
 
 type Store struct {
@@ -127,16 +126,6 @@ func (s *Store) Put(ctx context.Context, key string, installationID int64, scope
 	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
 		TableName: aws.String(s.table),
 		Item:      item,
-	})
-	return err
-}
-
-// Delete removes the item for key. DynamoDB reports no error for an item
-// that does not exist.
-func (s *Store) Delete(ctx context.Context, key string) error {
-	_, err := s.client.DeleteItem(ctx, &dynamodb.DeleteItemInput{
-		TableName: aws.String(s.table),
-		Key:       itemKey(key),
 	})
 	return err
 }
