@@ -120,9 +120,10 @@ var notFoundRereadTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Help: "GitHub 404s for a trust policy, by the outcome of re-reading it and whether it was read within the last hour.",
 }, []string{"outcome", "known"})
 
-// stickyStoreErrorsTotal counts sticky store failures by operation ("get" or
-// "put"). A get error fails a checks:write exchange closed, and a put error
-// leaves the next exchange for that key with no mapping to follow.
+// stickyStoreErrorsTotal counts sticky store failures by operation ("get",
+// "put" or "delete"). A get error fails a checks:write exchange closed, a put
+// error leaves the next exchange for that key with no mapping to follow, and
+// a delete error leaves it following a refused installation.
 var stickyStoreErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
 	Name: "octosts_sticky_store_errors_total",
 	Help: "Sticky store errors on checks:write exchanges, by operation.",
@@ -421,6 +422,9 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 			// actually has a pretty reasonable error message in the response
 			// body typically, so extract that.
 			if herr.Response.StatusCode == http.StatusUnprocessableEntity {
+				if !isMintRateLimit(herr.Response) {
+					s.dropSticky(ctx, requestScope, request.GetIdentity(), tok.Subject, hasChecksWrite(e.TrustPolicy.Permissions), e.InstallationID)
+				}
 				if body, err := io.ReadAll(herr.Response.Body); err == nil {
 					clog.FromContext(ctx).Debugf("token exchange failure (StatusUnprocessableEntity): %s", body)
 					return nil, status.Error(codes.PermissionDenied, "token exchange failure (StatusUnprocessableEntity)")
@@ -502,6 +506,36 @@ func (s *sts) putSticky(ctx context.Context, key string, id int64, scope, identi
 		stickyStoreErrorsTotal.WithLabelValues("put").Inc()
 		clog.FromContext(ctx).Warnf("stickystore: Put failed for key %s: %v", key, err)
 	}
+}
+
+// dropSticky forgets the sticky mapping for a checks:write exchange whose
+// installation GitHub refused a token for (422): the installation cannot see
+// the repositories the token is for, and the mapping would send every later
+// exchange for the key to the same refusal. Only a mapping to that
+// installation is dropped, so a concurrent reassignment is kept. The next
+// exchange for the key picks again, and the pool's round-robin moves it on:
+// pickByQuota declines a pool with an installation lacking quota data, which
+// one whose mints fail never gets.
+func (s *sts) dropSticky(ctx context.Context, scope, identity, subject string, checksWrite bool, install int64) {
+	if s.sticky == nil || !checksWrite {
+		return
+	}
+	key := routekey.Key(scope, identity, subject)
+	id, ok, err := s.sticky.Get(ctx, key)
+	if err != nil {
+		stickyStoreErrorsTotal.WithLabelValues("get").Inc()
+		clog.FromContext(ctx).Warnf("stickystore: Get failed for key %s: %v", key, err)
+		return
+	}
+	if !ok || id != install {
+		return
+	}
+	if err := s.sticky.Delete(ctx, key); err != nil {
+		stickyStoreErrorsTotal.WithLabelValues("delete").Inc()
+		clog.FromContext(ctx).Warnf("stickystore: Delete failed for key %s: %v", key, err)
+		return
+	}
+	clog.FromContext(ctx).Infof("stickystore: dropped mapping for key %s, installation %d was refused a token", key, install)
 }
 
 // stickyGetFailed reports a sticky store read error on a checks:write

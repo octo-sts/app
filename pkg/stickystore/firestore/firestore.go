@@ -80,3 +80,10 @@ func (s *Store) Put(ctx context.Context, key string, installationID int64, scope
 	})
 	return err
 }
+
+// Delete removes the document for key. Firestore reports no error for a
+// document that does not exist.
+func (s *Store) Delete(ctx context.Context, key string) error {
+	_, err := s.client.Collection(s.collection).Doc(key).Delete(ctx)
+	return err
+}

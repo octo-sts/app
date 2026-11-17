@@ -19,6 +19,23 @@ func TestGetMissReturnsNotOk(t *testing.T) {
 	}
 }
 
+func TestDeleteThenGetMisses(t *testing.T) {
+	s := New()
+	ctx := context.Background()
+	if err := s.Put(ctx, "k1", 42, "scope", "id", "sub"); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if err := s.Delete(ctx, "k1"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, ok, err := s.Get(ctx, "k1"); err != nil || ok {
+		t.Fatalf("Get after Delete = (ok %v, err %v), want a miss", ok, err)
+	}
+	if err := s.Delete(ctx, "k1"); err != nil {
+		t.Fatalf("Delete of a missing key: %v", err)
+	}
+}
+
 func TestPutThenGet(t *testing.T) {
 	s := New()
 	ctx := context.Background()
