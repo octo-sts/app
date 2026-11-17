@@ -906,13 +906,23 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 // different installations from the pool if the first attempt is rate-limited
 // or the installation cannot see the policy repository.
 func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.OrgPool, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
-	if _, ok := unreadablePolicyRepos.Get(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}); ok {
+	known := unreadablePolicyRepos.Get(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo})
+	if known.all {
 		clog.InfoContextf(ctx, "no installation could read %s/%s recently", tpKey.owner, tpKey.repo)
 		return atr, id, &policyRepoUnreadableError{identity: tpKey.identity}
 	}
 
-	tried := map[int64]bool{id: true}
-	err := s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
+	tried := maps.Clone(known.installs)
+	if tried == nil {
+		tried = map[int64]bool{}
+	}
+	// An installation known not to see the repository is not asked again,
+	// unless the policy is cached and the read costs no mint.
+	var err error = &policyRepoUnreadableError{identity: tpKey.identity}
+	if _, cached := trustPolicies.Get(tpKey); cached || !tried[id] {
+		err = s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
+	}
+	tried[id] = true
 	if pool.AppCount <= 1 {
 		return atr, id, err
 	}
@@ -952,15 +962,19 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 //
 // GitHub answers a repository that does not exist with the same 422, so any
 // caller can make this walk run by naming one. It is capped at maxRetry reads,
-// as rate-limit rotation is, and when every installation agrees the repository
-// is unreadable, unreadablePolicyRepos answers the next requests for it.
+// as rate-limit rotation is. Each installation's 422 is remembered in
+// unreadablePolicyRepos, so the next request for the repository goes on with
+// the installations not yet asked, and once every installation has answered,
+// the repository is answered without a mint.
 func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.OrgPool, owner string, tpKey cacheTrustPolicyKey, tp trustPolicy, tried map[int64]bool, atr *ghinstallation.AppsTransport, id int64, err error) (*ghinstallation.AppsTransport, int64, error) {
+	repoKey := policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}
+	unreadablePolicyRepos.Record(repoKey, id)
+
 	// A partial list is still worth trying; err stays the answer if it runs out.
 	installs, enumErr := pool.M.GetAll(ctx, owner)
 	if enumErr != nil {
 		clog.WarnContextf(ctx, "enumerating installations for %s failed: %v", owner, enumErr)
 	}
-	unreadable := map[int64]bool{id: true}
 	reads := 0
 	for _, in := range installs {
 		if tried[in.ID] {
@@ -976,18 +990,21 @@ func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.Or
 		if !isPolicyRepoUnreadable(rerr) {
 			return in.Transport, in.ID, rerr
 		}
-		unreadable[in.ID] = true
+		unreadablePolicyRepos.Record(repoKey, in.ID)
 	}
 
 	clog.WarnContextf(ctx, "no installation could read %s/%s for trust policy %q", tpKey.owner, tpKey.repo, tpKey.identity)
 	// Agreement needs a complete list in which every installation answered,
-	// not just one that ran out of reads or was cut short.
-	agreed := enumErr == nil && len(installs) > 0
-	for _, in := range installs {
-		agreed = agreed && unreadable[in.ID]
-	}
-	if agreed {
-		unreadablePolicyRepos.Add(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}, struct{}{})
+	// over this and earlier requests, not one that ran out of reads.
+	if enumErr == nil && len(installs) > 0 {
+		known := unreadablePolicyRepos.Get(repoKey)
+		agreed := true
+		for _, in := range installs {
+			agreed = agreed && known.installs[in.ID]
+		}
+		if agreed {
+			unreadablePolicyRepos.Settle(repoKey)
+		}
 	}
 	return atr, id, err
 }
@@ -999,10 +1016,63 @@ type policyRepoKey struct {
 	repo  string
 }
 
-// unreadablePolicyRepos holds repositories that no installation of the pool
-// could see. The TTL is short so a repository that is created, or added to an
-// installation's selection, is picked up within a minute.
-var unreadablePolicyRepos = expirablelru.NewLRU[policyRepoKey, struct{}](200, nil, time.Minute)
+// unreadableRepo is what the pool knows about a policy repository it could
+// not read: the installations GitHub refused a token for, and whether that is
+// every installation of the pool.
+type unreadableRepo struct {
+	installs map[int64]bool
+	all      bool
+}
+
+// unreadableRepos remembers, per policy repository, which installations could
+// not see it. Entries live a minute past the last refusal, so a repository that
+// is created, or added to an installation's selection, is picked up quickly.
+// The LRU is behind a mutex because an entry is read, extended and written
+// back; the LRU's own lock covers only one of those.
+type unreadableRepos struct {
+	mu  sync.Mutex
+	lru *expirablelru.LRU[policyRepoKey, unreadableRepo]
+}
+
+var unreadablePolicyRepos = &unreadableRepos{
+	lru: expirablelru.NewLRU[policyRepoKey, unreadableRepo](200, nil, time.Minute),
+}
+
+// Get returns a copy of what is known about key; the zero value when nothing is.
+func (r *unreadableRepos) Get(key policyRepoKey) unreadableRepo {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known, _ := r.lru.Get(key)
+	return unreadableRepo{installs: maps.Clone(known.installs), all: known.all}
+}
+
+// Record remembers that installation install could not see key's repository.
+func (r *unreadableRepos) Record(key policyRepoKey, install int64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known, _ := r.lru.Get(key)
+	installs := maps.Clone(known.installs)
+	if installs == nil {
+		installs = map[int64]bool{}
+	}
+	installs[install] = true
+	r.lru.Add(key, unreadableRepo{installs: installs, all: known.all})
+}
+
+// Settle marks key's repository as unreadable by every installation.
+func (r *unreadableRepos) Settle(key policyRepoKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	known, _ := r.lru.Get(key)
+	r.lru.Add(key, unreadableRepo{installs: known.installs, all: true})
+}
+
+// Remove forgets key's repository.
+func (r *unreadableRepos) Remove(key policyRepoKey) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lru.Remove(key)
+}
 
 // policyRepoUnreadableError reports that GitHub refused to mint the
 // contents:read token for the policy repository with a 422 that is not a rate

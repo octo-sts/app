@@ -51,9 +51,9 @@ func newReadablePolicyTransport(t *testing.T) *ghinstallation.AppsTransport {
 
 // unreadableKey is a policy key on its own repository, so the per-repository
 // unreadablePolicyRepos cache cannot leak into tests sharing org/repo.
-func unreadableKey(t *testing.T, repo, identity string) cacheTrustPolicyKey {
+func unreadableKey(t *testing.T, repo string) cacheTrustPolicyKey {
 	t.Helper()
-	key := cacheTrustPolicyKey{owner: "org", repo: repo, identity: identity}
+	key := cacheTrustPolicyKey{owner: "org", repo: repo, identity: "foo"}
 	clear := func() {
 		trustPolicies.Remove(key)
 		staleTrustPolicies.Remove(key)
@@ -77,7 +77,7 @@ func lookupWithPool(t *testing.T, key cacheTrustPolicyKey, transports ...*ghinst
 }
 
 func TestPolicyReadTriesNextAppWhenRepoUnreadable(t *testing.T) {
-	key := unreadableKey(t, "unreadable-then-readable", "foo")
+	key := unreadableKey(t, "unreadable-then-readable")
 	var mints atomic.Int32
 
 	id, err := lookupWithPool(t, key, newUnreadableRepoTransport(t, &mints), newReadablePolicyTransport(t))
@@ -90,7 +90,7 @@ func TestPolicyReadTriesNextAppWhenRepoUnreadable(t *testing.T) {
 }
 
 func TestPolicyReadUnreadableEverywhere(t *testing.T) {
-	key := unreadableKey(t, "unreadable-everywhere", "foo")
+	key := unreadableKey(t, "unreadable-everywhere")
 	var mints atomic.Int32
 	first, second := newUnreadableRepoTransport(t, &mints), newUnreadableRepoTransport(t, &mints)
 
@@ -120,10 +120,15 @@ func TestPolicyReadUnreadableEverywhere(t *testing.T) {
 	}
 }
 
+// TestPolicyReadRotationIsCapped covers a pool larger than one request may
+// walk: each request asks at most maxRetry further installations, the next
+// request goes on with the ones not asked yet, and the repository is settled
+// once every installation has answered.
 func TestPolicyReadRotationIsCapped(t *testing.T) {
-	key := unreadableKey(t, "unreadable-many-apps", "foo")
+	key := unreadableKey(t, "unreadable-many-apps")
+	repoKey := policyRepoKey{owner: key.owner, repo: key.repo}
 	var mints atomic.Int32
-	transports := make([]*ghinstallation.AppsTransport, maxRetry+3)
+	transports := make([]*ghinstallation.AppsTransport, 2*maxRetry)
 	for i := range transports {
 		transports[i] = newUnreadableRepoTransport(t, &mints)
 	}
@@ -134,9 +139,54 @@ func TestPolicyReadRotationIsCapped(t *testing.T) {
 	if got, want := mints.Load(), int32(1+maxRetry); got != want {
 		t.Errorf("%d mints, want %d", got, want)
 	}
-	// Not every installation answered, so the repository is not cached.
-	if _, ok := unreadablePolicyRepos.Get(policyRepoKey{owner: key.owner, repo: key.repo}); ok {
-		t.Error("repository cached as unreadable without every installation agreeing")
+	known := unreadablePolicyRepos.Get(repoKey)
+	if known.all || len(known.installs) != 1+maxRetry {
+		t.Fatalf("known = %+v, want %d installations and not settled", known, 1+maxRetry)
+	}
+
+	// The next request skips the installations that already answered and
+	// asks the remaining ones, after which every installation has agreed.
+	if _, err := lookupWithPool(t, key, transports...); status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v (%v), want NotFound", status.Code(err), err)
+	}
+	if got, want := mints.Load(), int32(len(transports)); got != want {
+		t.Errorf("%d mints after the second request, want %d", got, want)
+	}
+	if !unreadablePolicyRepos.Get(repoKey).all {
+		t.Fatal("repository not settled although every installation answered")
+	}
+
+	if _, err := lookupWithPool(t, key, transports...); status.Code(err) != codes.NotFound {
+		t.Fatalf("code = %v (%v), want NotFound", status.Code(err), err)
+	}
+	if got, want := mints.Load(), int32(len(transports)); got != want {
+		t.Errorf("%d mints after the repository was settled, want %d", got, want)
+	}
+}
+
+// TestPolicyReadReachesLaterAppOnNextRequest: a repository that only the last
+// App of a large pool can see is read by the request that reaches it.
+func TestPolicyReadReachesLaterAppOnNextRequest(t *testing.T) {
+	key := unreadableKey(t, "readable-by-last-app")
+	var mints atomic.Int32
+	transports := make([]*ghinstallation.AppsTransport, 2*maxRetry)
+	for i := range transports[:len(transports)-1] {
+		transports[i] = newUnreadableRepoTransport(t, &mints)
+	}
+	transports[len(transports)-1] = newReadablePolicyTransport(t)
+
+	if _, err := lookupWithPool(t, key, transports...); status.Code(err) != codes.NotFound {
+		t.Fatalf("first request: code = %v (%v), want NotFound", status.Code(err), err)
+	}
+	id, err := lookupWithPool(t, key, transports...)
+	if err != nil {
+		t.Fatalf("second request: %v", err)
+	}
+	if want := int64(1234 + len(transports) - 1); id != want {
+		t.Errorf("policy read by installation %d, want %d", id, want)
+	}
+	if got, want := mints.Load(), int32(len(transports)-1); got != want {
+		t.Errorf("%d refused mints, want one per blind installation (%d)", got, want)
 	}
 }
 
