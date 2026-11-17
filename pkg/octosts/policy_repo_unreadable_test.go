@@ -9,9 +9,11 @@ import (
 	"net/http"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v88/github"
+	expirablelru "github.com/hashicorp/golang-lru/v2/expirable"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -187,6 +189,37 @@ func TestPolicyReadReachesLaterAppOnNextRequest(t *testing.T) {
 	}
 	if got, want := mints.Load(), int32(len(transports)-1); got != want {
 		t.Errorf("%d refused mints, want one per blind installation (%d)", got, want)
+	}
+}
+
+// TestPolicyReadSkippedInstallIsNotRecordedAgain: a request that skips an
+// installation already recorded must not extend the entry, or steady traffic
+// would keep the installation skipped after the repository became visible.
+func TestPolicyReadSkippedInstallIsNotRecordedAgain(t *testing.T) {
+	key := unreadableKey(t, "skipped-not-rerecorded")
+	repoKey := policyRepoKey{owner: key.owner, repo: key.repo}
+	// Transports first: their key generation must not eat into the TTL.
+	var mints atomic.Int32
+	blind, readable := newUnreadableRepoTransport(t, &mints), newReadablePolicyTransport(t)
+	const ttl = 500 * time.Millisecond
+	saved := unreadablePolicyRepos
+	unreadablePolicyRepos = &unreadableRepos{lru: expirablelru.NewLRU[policyRepoKey, unreadableRepo](200, nil, ttl)}
+	t.Cleanup(func() { unreadablePolicyRepos = saved })
+	unreadablePolicyRepos.Record(repoKey, 1234)
+	recorded := time.Now()
+
+	time.Sleep(ttl / 2)
+	id, err := lookupWithPool(t, key, blind, readable)
+	if err != nil || id != 1235 {
+		t.Fatalf("lookup = (%d, %v), want read by 1235", id, err)
+	}
+	if got := mints.Load(); got != 0 {
+		t.Errorf("%d mints, want 0: the recorded installation must be skipped", got)
+	}
+
+	time.Sleep(time.Until(recorded.Add(ttl + ttl/4)))
+	if known := unreadablePolicyRepos.Get(repoKey); len(known.installs) != 0 {
+		t.Errorf("known = %+v after the TTL, want the entry expired: the skipped installation was recorded again", known)
 	}
 }
 

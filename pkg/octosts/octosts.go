@@ -919,8 +919,10 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 	// An installation known not to see the repository is not asked again,
 	// unless the policy is cached and the read costs no mint.
 	var err error = &policyRepoUnreadableError{identity: tpKey.identity}
+	read := false
 	if _, cached := trustPolicies.Get(tpKey); cached || !tried[id] {
 		err = s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
+		read = true
 	}
 	tried[id] = true
 	if pool.AppCount <= 1 {
@@ -938,13 +940,18 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 			tried[rId] = true
 			err = s.lookupTrustPolicy(ctx, rAtr, rId, tpKey, tp)
 			if !isRateLimit(err) {
-				atr, id = rAtr, rId
+				atr, id, read = rAtr, rId, true
 				break
 			}
 		}
 	}
 
 	if isPolicyRepoUnreadable(err) {
+		// Only a refusal just received is recorded: re-adding a skipped
+		// installation would push the entry's expiry out on every request.
+		if read {
+			unreadablePolicyRepos.Record(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}, id)
+		}
 		return s.lookupTrustPolicyOnUntried(ctx, pool, owner, tpKey, tp, tried, atr, id, err)
 	}
 	return atr, id, err
@@ -968,7 +975,6 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 // the repository is answered without a mint.
 func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.OrgPool, owner string, tpKey cacheTrustPolicyKey, tp trustPolicy, tried map[int64]bool, atr *ghinstallation.AppsTransport, id int64, err error) (*ghinstallation.AppsTransport, int64, error) {
 	repoKey := policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}
-	unreadablePolicyRepos.Record(repoKey, id)
 
 	// A partial list is still worth trying; err stays the answer if it runs out.
 	installs, enumErr := pool.M.GetAll(ctx, owner)
