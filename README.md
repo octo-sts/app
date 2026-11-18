@@ -504,6 +504,11 @@ callers retry instead of getting a token from a different App. A failed write
 only logs a warning, because the exchange already has its installation. Both are
 counted in `octosts_sticky_store_errors_total{op="get"|"put"}`.
 
+When GitHub refuses the mapped installation a token (422: it cannot see the
+repositories the token is for), the exchange tries the pool's other
+installations and moves the mapping to the first that mints. Policies with an
+`app` or `app_pattern` pin are not moved.
+
 **Firestore backend** (recommended for GCP deployments):
 
 | Variable | Default | Description |
