@@ -532,6 +532,25 @@ func isRefusedMint(err error) bool {
 	return bytes.Contains(body, []byte("not accessible")) && !isSecondaryLimitBody(body)
 }
 
+// isTransientMint reports whether a failed mint might succeed on retry: no
+// response, a 5xx, or a rate limit. Any other 4xx is specific to that
+// installation (suspended, a permission its App lacks).
+func isTransientMint(err error) bool {
+	var herr *ghinstallation.HTTPError
+	if !errors.As(err, &herr) || herr.Response == nil {
+		return true
+	}
+	resp := herr.Response
+	if resp.StatusCode >= 500 || isMintRateLimit(resp) {
+		return true
+	}
+	if resp.Body == nil {
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	return isSecondaryLimitBody(body)
+}
+
 // closeMintBody closes the response body of a failed mint, which
 // ghinstallation leaves open on non-2xx responses.
 func closeMintBody(err error) {
@@ -541,7 +560,7 @@ func closeMintBody(err error) {
 	}
 }
 
-// repointMisses remembers route keys for which every installation refused the
+// repointMisses remembers route keys for which no installation could mint the
 // token, so a caller retrying in a loop does not repeat the walk each time.
 var repointMisses = expirablelru.NewLRU[string, struct{}](4096, nil, time.Minute)
 
@@ -550,7 +569,9 @@ var repointMisses = expirablelru.NewLRU[string, struct{}](4096, nil, time.Minute
 // key into the same refusal. It mints on the pool's other installations and
 // moves the mapping to the first that succeeds. The walk is not capped, since
 // a cap would leave an installation late in a large pool out of reach; a walk
-// in which every installation refused is not repeated for a minute instead.
+// in which no installation minted is not repeated for a minute instead. An
+// installation that fails for good is passed over; one a retry might mint on
+// ends the walk.
 //
 // The mapping is not dropped for a fresh pick instead, because the pick can
 // return the refused installation again: it has quota data from its other
@@ -601,23 +622,22 @@ func (s *sts) repointSticky(ctx context.Context, scope, identity, subject string
 		}
 		token, err := mint(in.Transport, in.ID)
 		if err != nil {
-			refusedToo := isRefusedMint(err)
+			transient := isTransientMint(err)
 			closeMintBody(err)
-			if !refusedToo {
-				// A transient failure says nothing about whether this
-				// installation can see the repositories. Moving past it
-				// would send the key to an App a retry might not choose.
+			if transient {
+				// A retry might mint here. Moving past it would send the
+				// key to an App a retry might not choose.
 				clog.FromContext(ctx).Warnf("stickystore: minting on installation %d failed, keeping key %s: %v", in.ID, key, err)
 				return 0, "", false
 			}
-			clog.FromContext(ctx).Infof("installation %d was refused a token, as was %d: %v", in.ID, refused, err)
+			clog.FromContext(ctx).Infof("installation %d could not mint a token either (refused: %d): %v", in.ID, refused, err)
 			continue
 		}
 		clog.FromContext(ctx).Infof("stickystore: installation %d was refused a token, moving key %s to installation %d", refused, key, in.ID)
 		s.putSticky(ctx, key, in.ID, scope, identity, subject)
 		return in.ID, token, true
 	}
-	// Only a complete list in which every installation refused is conclusive.
+	// Only a complete list in which no installation could mint is conclusive.
 	if enumErr == nil {
 		repointMisses.Add(key, struct{}{})
 	}

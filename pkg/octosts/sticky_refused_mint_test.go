@@ -73,6 +73,8 @@ func TestExchangeRefusedMintRepointsSticky(t *testing.T) {
 		rateLimited = "rate-limited"
 		otherReason = "other 422"
 		failing     = "500"
+		suspended   = "403"
+		secondary   = "secondary rate limit"
 	)
 	for _, tc := range []struct {
 		name string
@@ -102,6 +104,30 @@ func TestExchangeRefusedMintRepointsSticky(t *testing.T) {
 		wantCode:  codes.PermissionDenied,
 		wantMap:   1234,
 		wantMints: []int{2, 2, 0},
+	}, {
+		name:      "a secondary rate limit without headers ends the walk",
+		installs:  []string{refused, secondary, ""},
+		wantCode:  codes.PermissionDenied,
+		wantMap:   1234,
+		wantMints: []int{2, 2, 0},
+	}, {
+		name:      "a suspended installation is passed over",
+		installs:  []string{refused, suspended, ""},
+		wantCode:  codes.OK,
+		wantMap:   1236,
+		wantMints: []int{1, 1, 2},
+	}, {
+		name:      "an installation lacking the permission is passed over",
+		installs:  []string{refused, otherReason, ""},
+		wantCode:  codes.OK,
+		wantMap:   1236,
+		wantMints: []int{1, 1, 2},
+	}, {
+		name:      "keeps the mapping when the others fail for good, and does not walk again",
+		installs:  []string{refused, suspended},
+		wantCode:  codes.PermissionDenied,
+		wantMap:   1234,
+		wantMints: []int{2, 1},
 	}, {
 		name:      "a rate-limited 422 is not a refusal",
 		installs:  []string{rateLimited, ""},
@@ -152,6 +178,12 @@ func TestExchangeRefusedMintRepointsSticky(t *testing.T) {
 						_, _ = w.Write([]byte(`{"message":"The permissions requested are not granted to this installation."}`))
 					case failing:
 						w.WriteHeader(http.StatusInternalServerError)
+					case suspended:
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"message":"This installation has been suspended"}`))
+					case secondary:
+						w.WriteHeader(http.StatusForbidden)
+						_, _ = w.Write([]byte(`{"message":"You have exceeded a secondary rate limit.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api#about-secondary-rate-limits"}`))
 					default:
 						_ = json.NewEncoder(w).Encode(github.InstallationToken{
 							Token:     new("token-" + r.PathValue("id")),
