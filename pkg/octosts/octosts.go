@@ -4,6 +4,7 @@
 package octosts
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/sha256"
@@ -410,6 +411,7 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	token, err := mint(base, e.InstallationID)
 	if isRefusedMint(err) {
 		if id, rToken, ok := s.repointSticky(ctx, requestScope, request.GetIdentity(), tok.Subject, &e.TrustPolicy.TrustPolicy, e.InstallationID, mint); ok {
+			closeMintBody(err)
 			e.InstallationID, token, err = id, rToken, nil
 		}
 	}
@@ -511,22 +513,44 @@ func (s *sts) putSticky(ctx context.Context, key string, id int64, scope, identi
 	}
 }
 
-// isRefusedMint reports whether GitHub refused the installation token with a
-// 422 that is not a rate limit: the installation cannot see a repository the
-// token is for, or the repository does not exist. The two are
-// indistinguishable in the response.
+// isRefusedMint reports whether GitHub refused the installation token because
+// the installation cannot see a repository the token is for. A repository that
+// does not exist gets the same answer. Other 422s (a permission the App lacks)
+// do not count, and neither does a rate limit.
+//
+// The message is the only thing that tells these 422s apart, so the body is
+// read here and put back for the caller's own error handling.
 func isRefusedMint(err error) bool {
 	var herr *ghinstallation.HTTPError
-	return errors.As(err, &herr) && herr.Response != nil &&
-		herr.Response.StatusCode == http.StatusUnprocessableEntity && !isMintRateLimit(herr.Response)
+	if !errors.As(err, &herr) || herr.Response == nil || herr.Response.Body == nil ||
+		herr.Response.StatusCode != http.StatusUnprocessableEntity || isMintRateLimit(herr.Response) {
+		return false
+	}
+	body, _ := io.ReadAll(io.LimitReader(herr.Response.Body, 4096))
+	_ = herr.Response.Body.Close()
+	herr.Response.Body = io.NopCloser(bytes.NewReader(body))
+	return bytes.Contains(body, []byte("not accessible")) && !isSecondaryLimitBody(body)
 }
+
+// closeMintBody closes the response body of a failed mint, which
+// ghinstallation leaves open on non-2xx responses.
+func closeMintBody(err error) {
+	var herr *ghinstallation.HTTPError
+	if errors.As(err, &herr) && herr.Response != nil && herr.Response.Body != nil {
+		_ = herr.Response.Body.Close()
+	}
+}
+
+// repointMisses remembers route keys for which every installation refused the
+// token, so a caller retrying in a loop does not repeat the walk each time.
+var repointMisses = expirablelru.NewLRU[string, struct{}](4096, nil, time.Minute)
 
 // repointSticky handles a checks:write exchange whose sticky installation was
 // refused a token: left alone, the mapping sends every later exchange for the
 // key into the same refusal. It mints on the pool's other installations and
-// moves the mapping to the first that succeeds. The walk is not capped: only
-// a caller the trust policy authorized gets here, and a cap would leave an
-// installation late in a large pool out of reach.
+// moves the mapping to the first that succeeds. The walk is not capped, since
+// a cap would leave an installation late in a large pool out of reach; a walk
+// in which every installation refused is not repeated for a minute instead.
 //
 // The mapping is not dropped for a fresh pick instead, because the pick can
 // return the refused installation again: it has quota data from its other
@@ -549,6 +573,9 @@ func (s *sts) repointSticky(ctx context.Context, scope, identity, subject string
 		return 0, "", false
 	}
 	key := routekey.Key(scope, identity, subject)
+	if _, ok := repointMisses.Get(key); ok {
+		return 0, "", false
+	}
 	// A mapping another exchange has moved in the meantime is left alone.
 	if id, ok, err := s.sticky.Get(ctx, key); err != nil {
 		stickyStoreErrorsTotal.WithLabelValues("get").Inc()
@@ -558,24 +585,41 @@ func (s *sts) repointSticky(ctx context.Context, scope, identity, subject string
 		return 0, "", false
 	}
 
-	// A partial list is still worth trying. GetAll's order is the configured
-	// one, so concurrent exchanges for the key settle on the same installation.
-	installs, err := pool.M.GetAll(ctx, owner)
-	if err != nil {
-		clog.FromContext(ctx).Warnf("enumerating installations for %s failed: %v", owner, err)
+	// A partial list is still worth trying.
+	installs, enumErr := pool.M.GetAll(ctx, owner)
+	if enumErr != nil {
+		clog.FromContext(ctx).Warnf("enumerating installations for %s failed: %v", owner, enumErr)
 	}
+	// A fixed order, so concurrent exchanges for the key settle on the same
+	// installation. installs is not sorted in place: it may be a cache entry.
+	installs = slices.SortedFunc(slices.Values(installs), func(a, b ghinstall.Installation) int {
+		return cmp.Or(cmp.Compare(a.AppID, b.AppID), cmp.Compare(a.ID, b.ID))
+	})
 	for _, in := range installs {
 		if in.ID == refused {
 			continue
 		}
 		token, err := mint(in.Transport, in.ID)
 		if err != nil {
+			refusedToo := isRefusedMint(err)
+			closeMintBody(err)
+			if !refusedToo {
+				// A transient failure says nothing about whether this
+				// installation can see the repositories. Moving past it
+				// would send the key to an App a retry might not choose.
+				clog.FromContext(ctx).Warnf("stickystore: minting on installation %d failed, keeping key %s: %v", in.ID, key, err)
+				return 0, "", false
+			}
 			clog.FromContext(ctx).Infof("installation %d was refused a token, as was %d: %v", in.ID, refused, err)
 			continue
 		}
 		clog.FromContext(ctx).Infof("stickystore: installation %d was refused a token, moving key %s to installation %d", refused, key, in.ID)
 		s.putSticky(ctx, key, in.ID, scope, identity, subject)
 		return in.ID, token, true
+	}
+	// Only a complete list in which every installation refused is conclusive.
+	if enumErr == nil {
+		repointMisses.Add(key, struct{}{})
 	}
 	return 0, "", false
 }

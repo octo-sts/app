@@ -12,8 +12,9 @@ import (
 	"errors"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
-	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,31 +34,30 @@ import (
 	"github.com/octo-sts/app/pkg/stickystore/memory"
 )
 
-// stickyPoolMgr is a pool of installations on one fake GitHub. Get always
-// returns the first, as a quota pick or an unlucky round-robin step can.
+// stickyPoolMgr is a pool of installations, each on its own fake GitHub. Get
+// always returns the first, as a quota pick or an unlucky round-robin step can.
 type stickyPoolMgr struct {
-	atr *ghinstallation.AppsTransport
-	ids []int64
+	installs []ghinstall.Installation
 }
 
 func (m *stickyPoolMgr) Get(context.Context, string, string, string) (*ghinstallation.AppsTransport, int64, error) {
-	return m.atr, m.ids[0], nil
+	return m.installs[0].Transport, m.installs[0].ID, nil
 }
 
 func (m *stickyPoolMgr) GetByInstallation(_ context.Context, _ string, id int64) (*ghinstallation.AppsTransport, int64, error) {
-	for _, known := range m.ids {
-		if known == id {
-			return m.atr, id, nil
+	for _, in := range m.installs {
+		if in.ID == id {
+			return in.Transport, id, nil
 		}
 	}
 	return nil, 0, status.Errorf(codes.NotFound, "not found")
 }
 
+// GetAll lists the pool back to front, so the walk's own ordering is what
+// the tests see.
 func (m *stickyPoolMgr) GetAll(context.Context, string) ([]ghinstall.Installation, error) {
-	out := make([]ghinstall.Installation, 0, len(m.ids))
-	for _, id := range m.ids {
-		out = append(out, ghinstall.Installation{Transport: m.atr, ID: id, AppID: m.atr.AppID()})
-	}
+	out := slices.Clone(m.installs)
+	slices.Reverse(out)
 	return out, nil
 }
 
@@ -71,97 +71,127 @@ func TestExchangeRefusedMintRepointsSticky(t *testing.T) {
 	const (
 		refused     = "refused"
 		rateLimited = "rate-limited"
+		otherReason = "other 422"
+		failing     = "500"
 	)
 	for _, tc := range []struct {
 		name string
-		// installs answers the mint per installation; the mapping starts at 1234.
-		installs map[int64]string
+		// installs answers the mint per installation, 1234 upwards; the
+		// mapping starts at 1234.
+		installs []string
 		wantCode codes.Code
 		wantMap  int64
-		// wantMints is how many installations were asked for a token.
-		wantMints int
+		// wantMints is the mint requests per installation, in order, after
+		// the exchange is sent twice.
+		wantMints []int
 	}{{
 		name:      "moves the mapping to an installation that mints",
-		installs:  map[int64]string{1234: refused, 1235: refused, 1236: ""},
+		installs:  []string{refused, refused, ""},
 		wantCode:  codes.OK,
 		wantMap:   1236,
-		wantMints: 3,
+		wantMints: []int{1, 1, 2},
 	}, {
-		name:      "keeps the mapping when every installation refuses",
-		installs:  map[int64]string{1234: refused, 1235: refused},
+		name:      "keeps the mapping when every installation refuses, and does not walk again",
+		installs:  []string{refused, refused},
 		wantCode:  codes.PermissionDenied,
 		wantMap:   1234,
-		wantMints: 2,
+		wantMints: []int{2, 1},
+	}, {
+		name:      "a failing installation ends the walk",
+		installs:  []string{refused, failing, ""},
+		wantCode:  codes.PermissionDenied,
+		wantMap:   1234,
+		wantMints: []int{2, 2, 0},
 	}, {
 		name:      "a rate-limited 422 is not a refusal",
-		installs:  map[int64]string{1234: rateLimited, 1235: ""},
+		installs:  []string{rateLimited, ""},
 		wantCode:  codes.PermissionDenied,
 		wantMap:   1234,
-		wantMints: 1,
+		wantMints: []int{2, 0},
+	}, {
+		name:      "a 422 for another reason is not a refusal",
+		installs:  []string{otherReason, ""},
+		wantCode:  codes.PermissionDenied,
+		wantMap:   1234,
+		wantMints: []int{2, 0},
 	}} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := freshTPKey(t, "sticky-refused")
 			// Cached, so the read costs no mint and every mint is the exchange's.
 			trustPolicies.Add(key, "issuer: https://token.actions.githubusercontent.com\nsubject: foo\naudience: octosts\npermissions:\n  checks: write\n")
 			orgIssuers.Add("org", absentOrgIssuerEntry())
+			stickyKey := routekey.Key("org/repo", key.identity, "foo")
 			t.Cleanup(func() {
 				orgIssuers.Remove("org")
 				staleOrgIssuers.Remove("org")
+				repointMisses.Remove(stickyKey)
 			})
 
-			var mu sync.Mutex
-			asked := map[int64]bool{}
-			mux := http.NewServeMux()
-			mux.HandleFunc("/app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
-				id, _ := strconv.ParseInt(r.PathValue("id"), 10, 64)
-				mu.Lock()
-				asked[id] = true
-				mu.Unlock()
-				w.Header().Set("Content-Type", "application/json")
-				switch tc.installs[id] {
-				case rateLimited:
-					w.Header().Set("Retry-After", "60")
-					fallthrough
-				case refused:
-					w.WriteHeader(http.StatusUnprocessableEntity)
-					_, _ = w.Write([]byte(`{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`))
-				default:
-					_ = json.NewEncoder(w).Encode(github.InstallationToken{
-						Token:     new("token-" + r.PathValue("id")),
-						ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
-					})
-				}
-			})
-			atr := newAppsTransport(t, &fakeGitHub{mux: mux})
-
-			ids := make([]int64, 0, len(tc.installs))
-			for id := int64(1234); len(ids) < len(tc.installs); id++ {
-				ids = append(ids, id)
+			mints := make([]atomic.Int32, len(tc.installs))
+			pool := make([]ghinstall.Installation, len(tc.installs))
+			for i, answer := range tc.installs {
+				id := int64(1234 + i)
+				mux := http.NewServeMux()
+				mux.HandleFunc("/app/installations/{id}/access_tokens", func(w http.ResponseWriter, r *http.Request) {
+					// Each installation has its own GitHub, so a mint through
+					// another installation's transport shows up here.
+					if got := r.PathValue("id"); got != strconv.FormatInt(id, 10) {
+						t.Errorf("installation %s minted on the transport of %d", got, id)
+					}
+					mints[i].Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					switch answer {
+					case rateLimited:
+						w.Header().Set("Retry-After", "60")
+						fallthrough
+					case refused:
+						w.WriteHeader(http.StatusUnprocessableEntity)
+						_, _ = w.Write([]byte(`{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`))
+					case otherReason:
+						w.WriteHeader(http.StatusUnprocessableEntity)
+						_, _ = w.Write([]byte(`{"message":"The permissions requested are not granted to this installation."}`))
+					case failing:
+						w.WriteHeader(http.StatusInternalServerError)
+					default:
+						_ = json.NewEncoder(w).Encode(github.InstallationToken{
+							Token:     new("token-" + r.PathValue("id")),
+							ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+						})
+					}
+				})
+				pool[i] = ghinstall.Installation{Transport: newAppsTransport(t, &fakeGitHub{mux: mux}), ID: id, AppID: id}
 			}
+
 			store := memory.New()
 			ctx := exchangeContext(t, "foo")
-			stickyKey := routekey.Key("org/repo", key.identity, "foo")
 			if err := store.Put(ctx, stickyKey, 1234, "org/repo", key.identity, "foo"); err != nil {
 				t.Fatal(err)
 			}
-			pool := &ghinstall.OrgPool{M: &stickyPoolMgr{atr: atr, ids: ids}, AppCount: len(ids)}
 			s := &sts{
-				router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool}),
+				router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
+					"org": {M: &stickyPoolMgr{installs: pool}, AppCount: len(pool)},
+				}),
 				sticky: store,
 			}
 
-			tok, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: key.identity, Scopes: []string{"org/repo"}})
-			if status.Code(err) != tc.wantCode {
-				t.Fatalf("Exchange = %v, want %v", err, tc.wantCode)
+			for range 2 {
+				tok, err := s.Exchange(ctx, &v1.ExchangeRequest{Identity: key.identity, Scopes: []string{"org/repo"}})
+				if status.Code(err) != tc.wantCode {
+					t.Fatalf("Exchange = %v, want %v", err, tc.wantCode)
+				}
+				if want := "token-" + strconv.FormatInt(tc.wantMap, 10); err == nil && tok.Token != want {
+					t.Errorf("token = %q, want %q", tok.Token, want)
+				}
+				if id, ok, err := store.Get(ctx, stickyKey); err != nil || !ok || id != tc.wantMap {
+					t.Errorf("sticky mapping = (%d, %v, %v), want %d", id, ok, err, tc.wantMap)
+				}
 			}
-			if want := "token-" + strconv.FormatInt(tc.wantMap, 10); err == nil && tok.Token != want {
-				t.Errorf("token = %q, want %q", tok.Token, want)
+			got := make([]int, len(mints))
+			for i := range mints {
+				got[i] = int(mints[i].Load())
 			}
-			if id, ok, err := store.Get(ctx, stickyKey); err != nil || !ok || id != tc.wantMap {
-				t.Errorf("sticky mapping = (%d, %v, %v), want %d", id, ok, err, tc.wantMap)
-			}
-			if len(asked) != tc.wantMints {
-				t.Errorf("installations asked for a token = %v, want %d", asked, tc.wantMints)
+			if !slices.Equal(got, tc.wantMints) {
+				t.Errorf("mints per installation after two exchanges = %v, want %v", got, tc.wantMints)
 			}
 		})
 	}
@@ -204,7 +234,7 @@ func TestRepointStickyLeavesAlone(t *testing.T) {
 		minted = true
 		return "", errors.New("refused")
 	}
-	pool := &ghinstall.OrgPool{M: &stickyPoolMgr{ids: []int64{1234, 1235}}, AppCount: 2}
+	pool := &ghinstall.OrgPool{M: &stickyPoolMgr{installs: []ghinstall.Installation{{ID: 1234}, {ID: 1235}}}, AppCount: 2}
 	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
 
 	for _, tc := range []struct {
