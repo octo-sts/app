@@ -80,11 +80,9 @@ func TestExchangeMintForbidden(t *testing.T) {
 						s.orgPolicyRepo = key.repo
 					}
 					denied := tc.header == nil && tc.docURL == ""
-					wantCode := codes.NotFound
-					wantMessage := `unable to find trust policy for "foo"`
-					if finalMint {
-						wantCode, wantMessage = codes.Internal, "failed to get token"
-					}
+					// A rate-limited policy mint serves the stale copy (#1890),
+					// so both stages end at the final mint, which is limited too.
+					wantCode, wantMessage := codes.Internal, "failed to get token"
 					if denied {
 						wantCode, wantMessage = codes.PermissionDenied, diagnostic
 					}
@@ -95,8 +93,14 @@ func TestExchangeMintForbidden(t *testing.T) {
 						}
 					}
 					wantMints := int32(2)
-					if denied && !finalMint {
+					switch {
+					case denied && !finalMint:
+						// The forbidden cooldown answers the second exchange.
 						wantMints = 1
+					case !finalMint:
+						// The policy mint once, then the primary cache seeded
+						// from the stale copy; the final mint on both exchanges.
+						wantMints = 3
 					}
 					if got := mintCalls.Load(); got != wantMints {
 						t.Errorf("mint calls = %d, want %d", got, wantMints)
@@ -111,8 +115,12 @@ func TestExchangeMintForbidden(t *testing.T) {
 						t.Errorf("stale policy = (%q, %t), want present = %t", raw, ok, !denied || finalMint)
 					}
 					if !finalMint {
-						if _, ok := trustPolicies.Get(key); ok {
-							t.Error("failed mint populated the primary policy cache")
+						raw, ok := trustPolicies.Get(key)
+						if denied && ok {
+							t.Error("forbidden mint populated the primary policy cache")
+						}
+						if !denied && (!ok || raw != policy) {
+							t.Errorf("primary cache = (%q, %t), want it seeded with the stale copy", raw, ok)
 						}
 					}
 				})

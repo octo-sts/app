@@ -779,7 +779,7 @@ func (s *sequentialInstallMgr) Get(_ context.Context, _, _, _ string) (*ghinstal
 	if i >= len(s.transports) {
 		return nil, 0, fmt.Errorf("no more transports")
 	}
-	return s.transports[i], 1234, nil
+	return s.transports[i], int64(1234 + i), nil
 }
 
 func (s *sequentialInstallMgr) GetByInstallation(ctx context.Context, owner string, id int64) (*ghinstallation.AppsTransport, int64, error) {
