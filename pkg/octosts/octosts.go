@@ -960,12 +960,41 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 	}
 
 	if isRateLimit(err) {
+		// A quota-based pick can hand back an App already tried: a secondary
+		// limit leaves its remaining quota high. Reading it again would only
+		// spend another mint on a limited App, so the next untried
+		// installation is read instead. GetAll serves from the installation
+		// cache, and is called at most once per request.
+		var installs []ghinstall.Installation
+		enumerated := false
+		nextUntried := func() (*ghinstallation.AppsTransport, int64, bool) {
+			if !enumerated {
+				enumerated = true
+				var enumErr error
+				if installs, enumErr = pool.M.GetAll(ctx, owner); enumErr != nil {
+					clog.WarnContextf(ctx, "enumerating installations for %s failed: %v", owner, enumErr)
+				}
+			}
+			for _, in := range installs {
+				if !tried[in.ID] {
+					return in.Transport, in.ID, true
+				}
+			}
+			return nil, 0, false
+		}
+
 		retries := min(maxRetry, pool.AppCount-1)
 		for i := range retries {
 			clog.InfoContextf(ctx, "policy read rate-limited, trying next app (%d/%d)", i+1, retries)
 			rAtr, rId, rErr := pool.M.Get(ctx, owner, scope, identity)
 			if rErr != nil {
 				continue
+			}
+			if tried[rId] {
+				var ok bool
+				if rAtr, rId, ok = nextUntried(); !ok {
+					break
+				}
 			}
 			tried[rId] = true
 			err = s.lookupTrustPolicy(ctx, rAtr, rId, tpKey, tp)
@@ -1202,6 +1231,18 @@ func isForbidden(err error) bool {
 	var errResp *github.ErrorResponse
 	return errors.As(err, &errResp) && errResp.Response != nil &&
 		errResp.Response.StatusCode == http.StatusForbidden
+}
+
+// isRateLimitedMint recognizes a rate limit from the token endpoint: a 429, a
+// Retry-After or exhausted-quota header on any status, or a secondary-limit
+// body on a 403. These surface as *ghinstallation.HTTPError, which
+// isProvenRateLimit cannot see. classifyMintError reads a bounded body and
+// closes it; isForbiddenMint, which runs after this, needs no body for the
+// verdicts left once a secondary-limit body has been ruled out here.
+func isRateLimitedMint(ctx context.Context, owner string, err error) bool {
+	var mintErr *ghinstallation.HTTPError
+	return errors.As(err, &mintErr) && mintErr.Response != nil &&
+		classifyMintError(ctx, owner, err).kind == fetchRateLimited
 }
 
 // isForbiddenMint recognizes permission denials from the token endpoint, where
@@ -1443,8 +1484,10 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		}
 		// Rate limits FIRST, and only PROVEN ones: a typed rate-limit error or a
 		// 429. A bare 403 is handled below as permission-denied, not here, so it
-		// no longer masquerades as a rate limit (see isProvenRateLimit).
-		if isProvenRateLimit(err) {
+		// no longer masquerades as a rate limit (see isProvenRateLimit). A mint
+		// that GitHub rate-limited never reaches go-github's types, so it is
+		// checked separately (#1890).
+		if isProvenRateLimit(err) || isRateLimitedMint(ctx, tpKey.owner, err) {
 			if sawNotFound {
 				// GitHub answered 404 earlier in this fetch and the re-reads
 				// couldn't show otherwise, so treat that 404 as final, as a 404
@@ -1495,7 +1538,8 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		// A terminal token-mint 404 means the installation's access is
 		// gone or revoked. Drop the stale copy for the same reason as the 403
 		// branch above; the error stays NotFound as before. A rate-limited
-		// mint is not terminal, so it keeps the stale copy.
+		// mint never gets here: the rate-limit branch above serves the stale
+		// copy or returns ResourceExhausted.
 		var mintErr *ghinstallation.HTTPError
 		if errors.As(err, &mintErr) && mintErr.Response != nil && !isMintRateLimit(mintErr.Response) &&
 			mintErr.Response.StatusCode == http.StatusNotFound {

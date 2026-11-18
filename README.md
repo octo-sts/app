@@ -59,7 +59,9 @@ and token exchanges fail with a 403 and
 This diagnostic also covers token minting for trust policy reads and the final
 exchange token when the organization trusted-issuer lookup is cached. Trust
 policy permission denials are cached for up to one minute to avoid repeated
-requests. Responses carrying rate-limit markers keep their existing handling.
+requests. Responses carrying rate-limit markers are not permission denials: a
+rate-limited trust policy read serves the last known copy if there is one, and
+otherwise tries another App before returning a 429.
 
 These organizations should self-host octo-sts with their own GitHub App and a
 static egress IP, then add that IP to the allow list. The Terraform module in

@@ -545,7 +545,8 @@ func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 }
 
 // TestRateLimitedMintKeepsStalePolicy checks that a rate-limited token-mint 403
-// is not treated as revoked access: the stale copy must survive it.
+// is not treated as revoked access: the stale copy must survive it, and is
+// served for the rate-limit window (#1890).
 func TestRateLimitedMintKeepsStalePolicy(t *testing.T) {
 	key := freshTPKey(t, "mint-rate-limited")
 	const policy = "issuer: https://example.com\nsubject: sub\n"
@@ -560,8 +561,8 @@ func TestRateLimitedMintKeepsStalePolicy(t *testing.T) {
 	mux.Handle("/", base.mux)
 
 	s := &sts{}
-	if _, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, mux), 1234, key); err == nil {
-		t.Fatal("rate-limited mint unexpectedly succeeded")
+	if raw, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, mux), 1234, key); err != nil || raw != policy {
+		t.Fatalf("fetchTrustPolicyRaw = (%q, %v), want the stale copy", raw, err)
 	}
 	if got, ok := staleTrustPolicies.Get(key); !ok || got != policy {
 		t.Errorf("stale policy dropped on a rate-limited mint: got (%q, %v)", got, ok)
