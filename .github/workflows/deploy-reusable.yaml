@@ -86,7 +86,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: "${{ github.workspace }}/.go-version"
           check-latest: true
@@ -130,7 +130,7 @@ jobs:
           password: "${{ steps.auth.outputs.access_token }}"
           registry: "gcr.io"
 
-      - uses: chainguard-dev/actions/setup-terraform@a25ce483d875a46f4c837e85e32e0fda602693f5 # v1.8.1
+      - uses: chainguard-dev/actions/setup-terraform@d496b2ab65497cac13d77ccd5038b8aae7e8c43b # v1.8.2
         with:
           terraform-version-file: "${{ github.workspace }}/.terraform-version"
           terraform-wrapper: false
