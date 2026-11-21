@@ -63,9 +63,11 @@ const (
 // NewSecurityTokenServiceServer creates an STS that exchanges OIDC tokens for
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
-// pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool, orgPolicyOnly bool) pboidc.SecurityTokenServiceServer {
-	return &sts{
+// pools (installation IDs are globally unique within GitHub). Trust policies
+// and org allowlists are read from GitHub unless WithPolicySource says
+// otherwise.
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool, orgPolicyOnly bool, opts ...Option) pboidc.SecurityTokenServiceServer {
+	s := &sts{
 		router:         router,
 		sticky:         sticky,
 		apps:           apps,
@@ -79,6 +81,10 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		requireAppPin:  requireAppPin,
 		orgPolicyOnly:  orgPolicyOnly,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
@@ -195,6 +201,10 @@ type sts struct {
 
 	// orgPolicyOnly refuses scopes that would read a repository trust policy.
 	orgPolicyOnly bool
+
+	// policies is where trust policies and org allowlists are read from.
+	// nil means GitHub; use policySource rather than reading it directly.
+	policies PolicySource
 
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
@@ -1030,9 +1040,10 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 
 	tpKey := cacheTrustPolicyKey{owner: owner, repo: repo, identity: identity}
 
-	if cached, ok := trustPolicies.Get(tpKey); ok && cached == negativeCacheConst {
-		clog.InfoContextf(ctx, "negative cache hit for %s", tpKey)
-		return nil, 0, nil, nil, status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+	// A source that remembers missing policies answers them before routing
+	// spends an installation lookup on them.
+	if mc, ok := s.policySource().(missingPolicyCache); ok && mc.knownMissing(ctx, tpKey) {
+		return nil, 0, nil, nil, TrustPolicyNotFound(tpKey.identity)
 	}
 
 	// Read the trust policy using any available installation in this org's pool.
@@ -1053,8 +1064,23 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, decision, err
 	}
 
-	readAtr, readID, err = s.lookupTrustPolicyWithRetry(ctx, pool, readAtr, readID, owner, scope, identity, tpKey, tp)
+	res, err := s.policySource().TrustPolicy(ctx, TrustPolicyRequest{
+		Owner:    owner,
+		Repo:     repo,
+		Identity: identity,
+		Scope:    scope,
+		Pool:     pool,
+		Install:  installation(readAtr, readID),
+	})
 	if err != nil {
+		return nil, 0, nil, decision, err
+	}
+	// A source that read through another installation mints with it, as it
+	// is the one known to answer for this org right now.
+	if res.Install.Transport != nil {
+		readAtr, readID = res.Install.Transport, res.Install.ID
+	}
+	if err := parseTrustPolicy(ctx, res.Raw, identity, tp); err != nil {
 		return nil, 0, nil, decision, err
 	}
 
@@ -1079,14 +1105,15 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	return atr, id, otp, decision, nil
 }
 
-// lookupTrustPolicyWithRetry fetches the trust policy, retrying with
+// lookupTrustPolicyWithRetry fetches the raw trust policy, retrying with
 // different installations from the pool if the first attempt is rate-limited
-// or the installation cannot see the policy repository.
-func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.OrgPool, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey, tp trustPolicy) (*ghinstallation.AppsTransport, int64, error) {
+// or the installation cannot see the policy repository. It returns the
+// installation that answered, which the exchange mints with by default.
+func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.OrgPool, atr *ghinstallation.AppsTransport, id int64, owner, scope, identity string, tpKey cacheTrustPolicyKey) (*ghinstallation.AppsTransport, int64, string, error) {
 	known := unreadablePolicyRepos.Get(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo})
 	if known.all {
 		clog.InfoContextf(ctx, "no installation could read %s/%s recently", tpKey.owner, tpKey.repo)
-		return atr, id, &policyRepoUnreadableError{identity: tpKey.identity}
+		return atr, id, "", &policyRepoUnreadableError{identity: tpKey.identity}
 	}
 
 	tried := maps.Clone(known.installs)
@@ -1095,15 +1122,16 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 	}
 	// An installation known not to see the repository is not asked again,
 	// unless the policy is cached and the read costs no mint.
+	var raw string
 	var err error = &policyRepoUnreadableError{identity: tpKey.identity}
 	read := false
 	if _, cached := trustPolicies.Get(tpKey); cached || !tried[id] {
-		err = s.lookupTrustPolicy(ctx, atr, id, tpKey, tp)
+		raw, err = s.readTrustPolicy(ctx, atr, id, tpKey)
 		read = true
 	}
 	tried[id] = true
 	if pool.AppCount <= 1 {
-		return atr, id, err
+		return atr, id, raw, err
 	}
 
 	if isRateLimit(err) {
@@ -1144,7 +1172,7 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 				}
 			}
 			tried[rId] = true
-			err = s.lookupTrustPolicy(ctx, rAtr, rId, tpKey, tp)
+			raw, err = s.readTrustPolicy(ctx, rAtr, rId, tpKey)
 			if !isRateLimit(err) {
 				atr, id, read = rAtr, rId, true
 				break
@@ -1158,9 +1186,9 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 		if read {
 			unreadablePolicyRepos.Record(policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}, id)
 		}
-		return s.lookupTrustPolicyOnUntried(ctx, pool, owner, tpKey, tp, tried, atr, id, err)
+		return s.lookupTrustPolicyOnUntried(ctx, pool, owner, tpKey, tried, atr, id, err)
 	}
-	return atr, id, err
+	return atr, id, raw, err
 }
 
 // lookupTrustPolicyOnUntried reads the trust policy with each installation of
@@ -1179,7 +1207,7 @@ func (s *sts) lookupTrustPolicyWithRetry(ctx context.Context, pool *ghinstall.Or
 // unreadablePolicyRepos, so the next request for the repository goes on with
 // the installations not yet asked, and once every installation has answered,
 // the repository is answered without a mint.
-func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.OrgPool, owner string, tpKey cacheTrustPolicyKey, tp trustPolicy, tried map[int64]bool, atr *ghinstallation.AppsTransport, id int64, err error) (*ghinstallation.AppsTransport, int64, error) {
+func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.OrgPool, owner string, tpKey cacheTrustPolicyKey, tried map[int64]bool, atr *ghinstallation.AppsTransport, id int64, err error) (*ghinstallation.AppsTransport, int64, string, error) {
 	repoKey := policyRepoKey{owner: tpKey.owner, repo: tpKey.repo}
 
 	// A partial list is still worth trying; err stays the answer if it runs out.
@@ -1198,9 +1226,9 @@ func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.Or
 		reads++
 		tried[in.ID] = true
 		clog.InfoContextf(ctx, "installation %d cannot read %s/%s, trying installation %d", id, tpKey.owner, tpKey.repo, in.ID)
-		rerr := s.lookupTrustPolicy(ctx, in.Transport, in.ID, tpKey, tp)
+		raw, rerr := s.readTrustPolicy(ctx, in.Transport, in.ID, tpKey)
 		if !isPolicyRepoUnreadable(rerr) {
-			return in.Transport, in.ID, rerr
+			return in.Transport, in.ID, raw, rerr
 		}
 		unreadablePolicyRepos.Record(repoKey, in.ID)
 	}
@@ -1218,7 +1246,7 @@ func (s *sts) lookupTrustPolicyOnUntried(ctx context.Context, pool *ghinstall.Or
 			unreadablePolicyRepos.Settle(repoKey)
 		}
 	}
-	return atr, id, err
+	return atr, id, "", err
 }
 
 // policyRepoKey identifies a policy repository regardless of identity, so a
@@ -1407,25 +1435,26 @@ type trustPolicy interface {
 	Compile() error
 }
 
-// lookupTrustPolicy fetches, parses, and compiles a trust policy into tp.
-// The raw YAML is served from the LRU cache when available; on a miss
-// it is read from GitHub via a short-lived contents:read token that is
-// revoked after the read.
-func (s *sts) lookupTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey, tp trustPolicy) error {
+// readTrustPolicy returns the raw trust policy read with one installation,
+// labelling the request context with it for the rate-limit metrics. The raw
+// YAML is served from the LRU cache when available; on a miss it is read from
+// GitHub via a short-lived contents:read token that is revoked after the read.
+func (s *sts) readTrustPolicy(ctx context.Context, base *ghinstallation.AppsTransport, install int64, tpKey cacheTrustPolicyKey) (string, error) {
 	ctx = ghtransport.EnrichContext(ctx, base.AppID(), install)
+	return s.fetchTrustPolicyRaw(ctx, base, install, tpKey)
+}
 
-	raw, err := s.fetchTrustPolicyRaw(ctx, base, install, tpKey)
-	if err != nil {
-		return err
-	}
-
-	if err := yaml.UnmarshalStrict([]byte(raw), tp); err != nil {
+// parseTrustPolicy parses and compiles raw into tp. Whatever the source, a
+// policy that does not parse or compile is reported exactly like a missing
+// one, so a caller cannot probe which policies exist.
+func parseTrustPolicy(ctx context.Context, raw []byte, identity string, tp trustPolicy) error {
+	if err := yaml.UnmarshalStrict(raw, tp); err != nil {
 		clog.InfoContextf(ctx, "failed to parse trust policy: %v", err)
-		return status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+		return TrustPolicyNotFound(identity)
 	}
 	if err := tp.Compile(); err != nil {
 		clog.InfoContextf(ctx, "failed to compile trust policy: %v", err)
-		return status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity)
+		return TrustPolicyNotFound(identity)
 	}
 	return nil
 }

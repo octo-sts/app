@@ -5,8 +5,29 @@ every cache it touches, for both a single-App deployment and a multi-App
 deployment (several GitHub Apps sharing load behind a round-robin manager).
 
 The diagrams reflect the exchange path in `pkg/octosts` (`Exchange` →
-`lookupInstallAndTrustPolicy` → `checkOrgTrustedIssuers` → `lookupTrustPolicy` →
+`lookupInstallAndTrustPolicy` → `checkOrgTrustedIssuers` → `lookupTrustPolicyWithRetry` →
 `getExchangeInstall` → mint) and the installation manager in `pkg/ghinstall`.
+
+## Policy sources
+
+Trust policies and org trusted-issuer allowlists are read through a
+`PolicySource` (`pkg/octosts/policy_source.go`). The default, and the one these
+diagrams show, reads them from the org's repositories through its GitHub App
+installations, with the caches, rate-limit rotation and 404/403 handling below.
+`WithPolicySource` replaces it with another store.
+
+Only the reads move behind the interface. Routing to an installation, the
+negative install cache, parsing and compiling the policy, `CheckToken`, the
+allowlist decision (audit or enforce, failing closed), app pins, sticky
+routing and the mint stay in the STS, so every source gets the same checks. A
+policy that does not parse is answered exactly like a missing one,
+whichever source it came from.
+
+A source returns the policy and, optionally, the installation to mint with.
+The GitHub source returns the installation that read the policy, so a read that
+moved off a rate-limited App mints on the App that answered. Other sources keep
+the installation the STS picked. The trust-policy and org-issuer caches in the
+table below belong to the GitHub source. Another source decides its own caching.
 
 ## Caches
 
@@ -62,7 +83,7 @@ sequenceDiagram
     end
     Note over S: absent→allow · listed→allow · enforce+unlisted→DENY
 
-    S->>TP: lookupTrustPolicy(key)
+    S->>TP: lookupTrustPolicyWithRetry(key)
     alt cache hit
         TP-->>S: policy YAML
     else miss
@@ -129,7 +150,7 @@ sequenceDiagram
     Note over S: fail CLOSED if the allowlist cannot be established
 
     Note over S,AN: Trust-policy read, retry across Apps on rate limit
-    S->>TP: lookupTrustPolicy(key)
+    S->>TP: lookupTrustPolicyWithRetry(key)
     alt cache miss
         S->>A1: mint contents:read + read <identity>.sts.yaml
         A1-->>S: 403/429 rate-limited

@@ -74,7 +74,7 @@ func lookupWithPool(t *testing.T, key cacheTrustPolicyKey, transports ...*ghinst
 		AppCount: len(transports),
 	}
 	s := &sts{}
-	_, id, err := s.lookupTrustPolicyWithRetry(t.Context(), pool, transports[0], 1234, key.owner, key.owner+"/"+key.repo, key.identity, key, &TrustPolicy{})
+	_, id, _, err := s.lookupTrustPolicyWithRetry(t.Context(), pool, transports[0], 1234, key.owner, key.owner+"/"+key.repo, key.identity, key)
 	return id, err
 }
 

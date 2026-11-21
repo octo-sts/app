@@ -1157,15 +1157,12 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	gh, counter := newFakeGitHubNotFoundCounter()
 	atr := newAppsTransport(t, gh)
 
-	// lookupTrustPolicy doesn't consult the router, but populate it for safety.
+	// readTrustPolicy doesn't consult the router, but populate it for safety.
 	pool := &ghinstall.OrgPool{M: &fakeInstallMgr{atr: atr}, AppCount: 1}
 	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
-	otp := &OrgTrustPolicy{}
-	otp.Repositories = []string{"repo"}
-
 	// First call: should hit GitHub, get a 404 and re-read it, all 404.
-	err := s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	_, err := s.readTrustPolicy(context.Background(), atr, 1234, key)
 	if err == nil {
 		t.Fatal("expected NotFound error on first call, got nil")
 	}
@@ -1179,7 +1176,7 @@ func TestNegativeCachePreventsRepeatedGitHubCalls(t *testing.T) {
 	}
 
 	// Second call: should be served from negative cache, no GitHub API call.
-	err = s.lookupTrustPolicy(context.Background(), atr, 1234, key, &otp.TrustPolicy)
+	_, err = s.readTrustPolicy(context.Background(), atr, 1234, key)
 	if err == nil {
 		t.Fatal("expected NotFound error on second call, got nil")
 	}
@@ -1457,7 +1454,7 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 	defer cancel()
 	results := make(chan error, 2)
 	go func() {
-		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		_, _, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key)
 		results <- err
 	}()
 	select {
@@ -1467,7 +1464,7 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 	}
 	waiterCtx := newFlightJoinObserver(ctx)
 	go func() {
-		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		_, _, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key)
 		results <- err
 	}()
 	select {
@@ -1617,7 +1614,7 @@ func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) 
 
 	leaderDone := make(chan error, 1)
 	go func() {
-		_, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		_, _, _, err := s.lookupTrustPolicyWithRetry(ctx, pool, limited, 100, "org", "org/repo", key.identity, key)
 		leaderDone <- err
 	}()
 	select {
@@ -1629,7 +1626,7 @@ func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) 
 	waiterCtx := newFlightJoinObserver(ctx)
 	waiterDone := make(chan error, 1)
 	go func() {
-		_, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key, &TrustPolicy{})
+		_, _, _, err := s.lookupTrustPolicyWithRetry(waiterCtx, pool, healthy, 200, "org", "org/repo", key.identity, key)
 		waiterDone <- err
 	}()
 	select {
@@ -1975,9 +1972,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	s := &sts{router: ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})}
 
 	// First call: populates both caches.
-	otp := &OrgTrustPolicy{}
-	otp.Repositories = []string{"repo"}
-	err := s.lookupTrustPolicy(ctx, workingAtr, 1234, key, &otp.TrustPolicy)
+	_, err := s.readTrustPolicy(ctx, workingAtr, 1234, key)
 	if err != nil {
 		t.Fatalf("first lookup failed: %v", err)
 	}
@@ -1995,9 +1990,7 @@ func TestRateLimitServesStaleCache(t *testing.T) {
 	pool.M = &fakeInstallMgr{atr: rateLimitedAtr}
 
 	// Second call: primary cache miss, GitHub 403, should fall back to stale cache.
-	otp2 := &OrgTrustPolicy{}
-	otp2.Repositories = []string{"repo"}
-	err = s.lookupTrustPolicy(ctx, rateLimitedAtr, 1234, key, &otp2.TrustPolicy)
+	_, err = s.readTrustPolicy(ctx, rateLimitedAtr, 1234, key)
 	if err != nil {
 		t.Fatalf("expected stale cache fallback on rate limit, got error: %v", err)
 	}
