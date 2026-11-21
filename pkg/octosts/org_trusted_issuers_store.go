@@ -606,30 +606,21 @@ func (s *sts) settleOrgIssuerEntry(ctx context.Context, owner string, entry orgI
 // to record on the Event (nil when no allowlist applied or the issuer was permitted)
 // and a terminal error when the exchange must be denied.
 func (s *sts) checkOrgTrustedIssuers(ctx context.Context, owner, issuer string) (*IssuerDecision, error) {
-	entry, err := s.orgIssuerLookup(ctx, owner)
+	allow, err := s.policySource().OrgTrustedIssuers(ctx, owner)
 	if err != nil {
 		// Fail closed: an allowlist we could not establish is not allow-all.
 		return nil, err
 	}
-
-	switch entry.state {
-	case orgIssuerAbsent:
+	if allow == nil {
 		return nil, nil
-	case orgIssuerInvalid:
-		return nil, entry.err
-	case orgIssuerPresent:
-	default:
-		// orgIssuerUnknown. A zero value must never be a pass.
-		clog.ErrorContextf(ctx, "org issuer cache returned an unknown state for %s", owner)
-		return nil, status.Error(codes.Internal, msgIssuerUnavailable)
 	}
 
-	if entry.allow.Allows(issuer) {
+	if allow.Allows(issuer) {
 		return nil, nil
 	}
 
 	// Reached only once Allows has said no, so the outcome follows from the mode.
-	mode := entry.allow.Mode()
+	mode := allow.Mode()
 	d := &IssuerDecision{Mode: mode, Issuer: issuer, Allowed: mode == ModeAudit}
 	if mode == ModeAudit {
 		clog.WarnContextf(ctx, "org issuer audit: %s would deny issuer %q", owner, issuer)
