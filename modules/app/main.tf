@@ -194,6 +194,10 @@ module "this" {
           name  = "OCTOSTS_REQUIRE_APP_PIN"
           value = tostring(var.require_app_pin)
         },
+        {
+          name  = "OCTOSTS_ORG_POLICY_ONLY"
+          value = tostring(var.org_policy_only)
+        },
       ])
       regional-env = [{
         name  = "EVENT_INGRESS_URI"
