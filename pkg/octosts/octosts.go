@@ -80,8 +80,28 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 	}
 }
 
-var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Minute*5)
-var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](200, nil, time.Hour)
+// defaultPolicyCacheSize is the trust-policy LRU capacity when
+// OCTOSTS_POLICY_CACHE_SIZE is unset. The stale companion uses the same
+// size so a rate-limited re-read can still fall back to a policy the hot
+// cache held. The TTL stays 5 minutes; other caches are defined relative
+// to it.
+const defaultPolicyCacheSize = 200
+
+var trustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](defaultPolicyCacheSize, nil, time.Minute*5)
+var staleTrustPolicies = expirablelru.NewLRU[cacheTrustPolicyKey, string](defaultPolicyCacheSize, nil, time.Hour)
+
+// ConfigurePolicyCache resizes the trust-policy cache and its stale
+// companion. Their TTLs are unchanged. size must be positive. Call once
+// at startup, before serving; it is not safe to call concurrently with
+// exchanges.
+func ConfigurePolicyCache(size int) error {
+	if size <= 0 {
+		return fmt.Errorf("policy cache size must be positive, got %d", size)
+	}
+	trustPolicies.Resize(size)
+	staleTrustPolicies.Resize(size)
+	return nil
+}
 
 // policyReadFlight collapses concurrent cache misses for the same policy key
 // into one GitHub read. The caches above are package-level, so the flight is

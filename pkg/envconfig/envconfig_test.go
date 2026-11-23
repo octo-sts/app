@@ -522,3 +522,26 @@ func TestValidatePolicyDir(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyCacheSize(t *testing.T) {
+	t.Setenv("PORT", "8080")
+	t.Setenv("GITHUB_APP_IDS", "12345678")
+	t.Setenv("APP_SECRET_CERTIFICATE_FILE", "some-file-path")
+
+	cfg, err := BaseConfig()
+	assert.NoError(t, err)
+	assert.Equal(t, 200, cfg.PolicyCacheSize)
+
+	t.Setenv("OCTOSTS_POLICY_CACHE_SIZE", "500")
+	cfg, err = BaseConfig()
+	assert.NoError(t, err)
+	assert.Equal(t, 500, cfg.PolicyCacheSize)
+
+	t.Setenv("OCTOSTS_POLICY_CACHE_SIZE", "0")
+	_, err = BaseConfig()
+	assert.Error(t, err)
+
+	t.Setenv("OCTOSTS_POLICY_CACHE_SIZE", "-5")
+	_, err = BaseConfig()
+	assert.Error(t, err)
+}
