@@ -70,6 +70,9 @@ locals {
   # crashing the server at startup when appconfig.Validate rejects the
   # generated YAML.
   org_names = distinct([for app in var.github_apps : lower(app.org_name) if app.org_name != ""])
+  org_policy_only_overrides = {
+    for org, enabled in var.org_policy_only_overrides : lower(org) => enabled
+  }
   apps_by_org = {
     for org in local.org_names : org => [
       for app in var.github_apps : {
@@ -82,7 +85,7 @@ locals {
 
   # YAML config for multi-org routing.
   app_config_yaml = local.multi_org_enabled ? yamlencode({
-    orgs = [for org in local.org_names : {
+    orgs = [for org in local.org_names : merge({
       name = org
       apps = [for app in local.apps_by_org[org] : merge(
         {
@@ -91,7 +94,9 @@ locals {
         },
         app.app_name != "" ? { app_name = app.app_name } : {}
       ) if app.kms_key != ""]
-    }]
+      }, lookup(local.org_policy_only_overrides, org, null) != null ? {
+      org_policy_only = local.org_policy_only_overrides[org]
+    } : {})]
   }) : ""
 
   # Env vars shared by both config modes. The sticky-store settings apply

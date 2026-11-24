@@ -18,12 +18,14 @@ func TestLoad(t *testing.T) {
 	if err := os.WriteFile(cfgPath, []byte(`
 orgs:
   - name: my-org
+    org_policy_only: true
     apps:
       - app_id: 111
         kms_key: projects/p/locations/global/keyRings/kr/cryptoKeys/k/cryptoKeyVersions/1
       - app_id: 222
         kms_key: projects/p/locations/global/keyRings/kr/cryptoKeys/k/cryptoKeyVersions/2
   - name: other-org
+    org_policy_only: false
     apps:
       - app_id: 333
         private_key_file: /etc/secrets/key.pem
@@ -40,6 +42,12 @@ orgs:
 	}
 	if cfg.Orgs[0].Name != "my-org" {
 		t.Errorf("expected org name my-org, got %q", cfg.Orgs[0].Name)
+	}
+	if cfg.Orgs[0].OrgPolicyOnly == nil || !*cfg.Orgs[0].OrgPolicyOnly {
+		t.Error("expected my-org restriction enabled")
+	}
+	if cfg.Orgs[1].OrgPolicyOnly == nil || *cfg.Orgs[1].OrgPolicyOnly {
+		t.Error("expected other-org restriction disabled")
 	}
 	if len(cfg.Orgs[0].Apps) != 2 {
 		t.Errorf("expected 2 apps for my-org, got %d", len(cfg.Orgs[0].Apps))

@@ -1011,7 +1011,12 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	if !scopedToRepo {
 		owner, repo = repo, s.policyRepo()
 	}
-	if s.orgPolicyOnly && repo != s.policyRepo() {
+	pool, err := s.router.GetPool(owner)
+	orgPolicyOnly := s.orgPolicyOnly
+	if err == nil && pool.OrgPolicyOnly != nil {
+		orgPolicyOnly = *pool.OrgPolicyOnly
+	}
+	if orgPolicyOnly && repo != s.policyRepo() {
 		return nil, 0, nil, nil, status.Error(codes.PermissionDenied, "repository trust policies are disabled")
 	}
 
@@ -1023,7 +1028,6 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	}
 
 	// Look up the org's app pool.
-	pool, err := s.router.GetPool(owner)
 	if err != nil {
 		return nil, 0, nil, nil, err
 	}

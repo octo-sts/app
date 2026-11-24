@@ -19,6 +19,8 @@ const WildcardOrg = "*"
 type OrgPool struct {
 	M        Manager
 	AppCount int
+	// OrgPolicyOnly overrides the global restriction when set.
+	OrgPolicyOnly *bool
 	// AppIDs identifies the configured apps in this pool, including apps
 	// whose installation lookup currently fails. Callers must not modify it.
 	// A nil or empty map means the pool has no configured apps, so app pins

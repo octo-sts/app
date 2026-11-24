@@ -563,6 +563,7 @@ organizations — e.g. to use different credential types per org — point
 orgs:
   # A dedicated pool for org-a (two Apps, KMS credentials).
   - name: org-a
+  org_policy_only: true
     apps:
       - app_id: 111
         kms_key: projects/p/locations/l/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1
@@ -571,6 +572,7 @@ orgs:
 
   # A dedicated pool for org-b using an injected PEM instead of KMS.
   - name: org-b
+  org_policy_only: false
     apps:
       - app_id: 222
         private_key: ${ORG_B_APP_PEM}
@@ -673,6 +675,12 @@ Routing semantics:
   added. Use it where each App stands for one automation identity and an
   unpinned policy would be signed by a different App from one exchange to the
   next. Off by default. The webhook check does not enforce it.
+
+In multi-org routing, an optional `org_policy_only` on each org overrides
+`OCTOSTS_ORG_POLICY_ONLY`. An omitted value inherits the global default.
+For Terraform deployments, `org_policy_only_overrides` maps configured org
+names to explicit boolean overrides. The wildcard pool applies to orgs without
+a dedicated pool.
 - In a pool whose Apps are installed on different repositories, pin every
   policy, or set `OCTOSTS_REQUIRE_APP_PIN` to enforce it. A policy read moves
   on to another App when one cannot see the policy repository, but an unpinned

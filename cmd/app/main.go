@@ -196,7 +196,9 @@ func buildRouterFromYAML(ctx context.Context, baseCfg *envConfig.EnvConfig, quot
 			managers = append(managers, m)
 			appIDs[app.AppID] = true
 		}
-		pools[org.Name] = buildPool(managers, appIDs, quotaCfg)
+		pool := buildPool(managers, appIDs, quotaCfg)
+		pool.OrgPolicyOnly = org.OrgPolicyOnly
+		pools[org.Name] = pool
 		totalApps += len(managers)
 	}
 
