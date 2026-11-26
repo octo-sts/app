@@ -2060,6 +2060,41 @@ func TestNegativeCacheSkipsInstallationTokenCreation(t *testing.T) {
 	}
 }
 
+func TestOrgPolicyOnly(t *testing.T) {
+	// Negative cache entries stop every lookup that passes the check before
+	// any GitHub call, so NotFound means the scope was accepted.
+	for _, repo := range []string{"repo", ".github"} {
+		key := cacheTrustPolicyKey{owner: "org", repo: repo, identity: "id"}
+		trustPolicies.Add(key, negativeCacheConst)
+		t.Cleanup(func() { trustPolicies.Remove(key) })
+	}
+	pool := &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1}
+	router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{"org": pool})
+
+	for _, tc := range []struct {
+		scope         string
+		orgPolicyOnly bool
+		want          codes.Code
+	}{
+		{"org/repo", true, codes.PermissionDenied},
+		{"org/.GITHUB", true, codes.PermissionDenied},
+		{"org", true, codes.NotFound},
+		{"org/.github", true, codes.NotFound},
+		{"org/repo", false, codes.NotFound},
+	} {
+		t.Run(fmt.Sprintf("%s orgPolicyOnly=%t", tc.scope, tc.orgPolicyOnly), func(t *testing.T) {
+			s := &sts{router: router, orgPolicyOnly: tc.orgPolicyOnly}
+			_, _, _, _, err := s.lookupInstallAndTrustPolicy(context.Background(), tc.scope, "id", "some-subject", testGitHubIssuer, func(*OrgTrustPolicy) error {
+				t.Fatal("authorize called")
+				return nil
+			})
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("got %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestRateLimitServesStaleCache(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)
