@@ -195,6 +195,10 @@ module "this" {
           value = tostring(var.require_app_pin)
         },
         {
+          name  = "OCTOSTS_POLICY_CACHE_SIZE"
+          value = tostring(var.policy_cache_size)
+        },
+        {
           name  = "OCTOSTS_ORG_POLICY_ONLY"
           value = tostring(var.org_policy_only)
         },

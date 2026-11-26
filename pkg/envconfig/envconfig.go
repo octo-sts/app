@@ -68,6 +68,12 @@ type EnvConfig struct {
 	// refused. Leave it off if any trusted issuer is on a private address,
 	// such as an in-cluster Kubernetes issuer.
 	OIDCBlockPrivateIPs bool `envconfig:"OCTOSTS_OIDC_BLOCK_PRIVATE_IPS" required:"false" default:"false"`
+
+	// PolicyCacheSize is the number of trust policies kept in memory, and
+	// the size of the stale companion used when GitHub rate-limits a
+	// re-read. A deployment whose organizations hold more policies than
+	// this evicts on every miss. Must be positive.
+	PolicyCacheSize int `envconfig:"OCTOSTS_POLICY_CACHE_SIZE" required:"false" default:"200"`
 }
 
 type EnvConfigApp struct {
@@ -207,6 +213,9 @@ func BaseConfig() (*EnvConfig, error) {
 	}
 	if cfg.QuotaStaleAfter <= 0 {
 		return nil, fmt.Errorf("OCTOSTS_QUOTA_STALE (%s) must be positive", cfg.QuotaStaleAfter)
+	}
+	if cfg.PolicyCacheSize <= 0 {
+		return nil, fmt.Errorf("OCTOSTS_POLICY_CACHE_SIZE (%d) must be positive", cfg.PolicyCacheSize)
 	}
 
 	switch cfg.StickyStore {

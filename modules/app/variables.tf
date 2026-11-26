@@ -121,6 +121,17 @@ variable "require_app_pin" {
   default     = false
 }
 
+variable "policy_cache_size" {
+  description = "Number of trust policies cached in memory per exchange process (OCTOSTS_POLICY_CACHE_SIZE). A deployment serving more distinct policies than this evicts and re-reads. Set only on the exchange service; the webhook does not read policies."
+  type        = number
+  default     = 200
+
+  validation {
+    condition     = var.policy_cache_size == floor(var.policy_cache_size) && var.policy_cache_size > 0
+    error_message = "policy_cache_size must be a positive integer."
+  }
+}
+
 variable "org_policy_only" {
   description = "Reject the exchange for a scope that would read a per-repository trust policy, that is any repository other than ORG_POLICY_REPO (OCTOSTS_ORG_POLICY_ONLY)."
   type        = bool

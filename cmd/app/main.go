@@ -48,6 +48,9 @@ func main() {
 		log.Panicf("failed to process env var: %s", err)
 	}
 	provider.BlockPrivateIPs(baseCfg.OIDCBlockPrivateIPs)
+	if err := octosts.ConfigurePolicyCache(baseCfg.PolicyCacheSize); err != nil {
+		log.Panicf("failed to configure policy cache: %s", err)
+	}
 
 	if baseCfg.Metrics {
 		go metrics.ServeMetrics()

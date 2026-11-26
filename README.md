@@ -746,6 +746,29 @@ should each use their own directory, so each reads, validates and
 > own deployment config. Set it on both, or the webhook validates a different
 > directory than the exchange reads.
 
+### Trust policy cache (`OCTOSTS_POLICY_CACHE_SIZE`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_POLICY_CACHE_SIZE` | `200` | Number of trust policies cached in memory per process. |
+
+Each exchange process caches the raw trust-policy YAML it has read, so a
+repeat exchange does not mint a contents token, read the file and revoke
+the token again. The cache is an LRU with a 5-minute TTL. A deployment
+that serves more distinct policies than this evicts entries and pays that
+cost on the next exchange for each evicted identity.
+
+```sh
+OCTOSTS_POLICY_CACHE_SIZE=500
+```
+
+The value must be a positive integer. The process refuses to start
+otherwise. The 5-minute TTL, and the 1-hour stale fallback used when
+GitHub rate-limits a re-read, are not configurable. The stale fallback
+uses the same size. The webhook does not read policies, so the variable
+only affects the exchange service; an invalid value still fails startup
+of any process that loads the shared configuration.
+
 ### Org-level policies only (`OCTOSTS_ORG_POLICY_ONLY`)
 
 | Variable | Default | Description |
