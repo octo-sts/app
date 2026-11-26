@@ -23,11 +23,22 @@ routing and the mint stay in the STS, so every source gets the same checks. A
 policy that does not parse is answered exactly like a missing one,
 whichever source it came from.
 
-A source returns the policy and, optionally, the installation to mint with.
-The GitHub source returns the installation that read the policy, so a read that
-moved off a rate-limited App mints on the App that answered. Other sources keep
-the installation the STS picked. The trust-policy and org-issuer caches in the
-table below belong to the GitHub source. Another source decides its own caching.
+A configured source sees only owner, repo and identity, never the App pool or
+installations, which can mint tokens. The STS lowercases owner and repo before
+asking it, because GitHub names are case-insensitive and a missed allowlist
+would permit every issuer. It also replaces any error that is not a gRPC
+status, so a store's internals never reach the caller. The exchange then mints
+with the installation the STS picked.
+
+The GitHub source is internal and gets more. It receives the pool and the
+picked installation, and returns the installation that read the policy, so a
+read that moved off a rate-limited App mints on the App that answered. It keeps
+the owner as the caller wrote it, because installation lookup matches GitHub
+logins exactly. The trust-policy and org-issuer caches in the table below
+belong to the GitHub source. Another source decides its own caching.
+
+The webhook check is not part of the policy source. It still validates the
+policy files in the org's repositories, which a configured source ignores.
 
 ## Caches
 

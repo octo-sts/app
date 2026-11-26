@@ -859,7 +859,7 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 		//
 		// Parse AND compile, as for the allowlist above: only compiling catches an
 		// uncompilable pattern, which would otherwise pass this check and fail at
-		// token exchange. lookupTrustPolicy on the exchange path does the same.
+		// token exchange. parseTrustPolicy on the exchange path does the same.
 		case strings.EqualFold(file.repo, orgPolicyRepo):
 			if err := parseAndCompile(raw, &octosts.OrgTrustPolicy{}); err != nil {
 				log.Infof("failed to validate org trust policy: %v", err)

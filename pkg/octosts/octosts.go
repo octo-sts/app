@@ -1064,23 +1064,22 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 		return nil, 0, nil, decision, err
 	}
 
-	res, err := s.policySource().TrustPolicy(ctx, TrustPolicyRequest{
-		Owner:    owner,
-		Repo:     repo,
-		Identity: identity,
-		Scope:    scope,
-		Pool:     pool,
-		Install:  installation(readAtr, readID),
-	})
+	// A source that reads through the installations mints with the one that
+	// answered, as it is known to work for this org right now. Any other
+	// source sees only owner, repo and identity, and the exchange mints with
+	// the installation picked above.
+	var raw []byte
+	if src, ok := s.policySource().(installationSource); ok {
+		raw, readAtr, readID, err = src.trustPolicyVia(ctx, tpKey, scope, pool, readAtr, readID)
+	} else {
+		var res TrustPolicyResult
+		res, err = s.policySource().TrustPolicy(ctx, TrustPolicyRequest{Owner: owner, Repo: repo, Identity: identity})
+		raw = res.Raw
+	}
 	if err != nil {
 		return nil, 0, nil, decision, err
 	}
-	// A source that read through another installation mints with it, as it
-	// is the one known to answer for this org right now.
-	if res.Install.Transport != nil {
-		readAtr, readID = res.Install.Transport, res.Install.ID
-	}
-	if err := parseTrustPolicy(ctx, res.Raw, identity, tp); err != nil {
+	if err := parseTrustPolicy(ctx, raw, identity, tp); err != nil {
 		return nil, 0, nil, decision, err
 	}
 
