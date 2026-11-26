@@ -22,12 +22,18 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// newFakeGitHubContents returns a fake GitHub whose contents endpoint responds
-// with statuses[i] on the i-th call, clamping to the last entry once exhausted.
-// A 200 serves policy; any other code is returned as a github.ErrorResponse so
-// go-github surfaces it the way real GitHub does. The counter records contents
-// calls so a test can assert how many attempts fetchTrustPolicyRaw made.
+// newFakeGitHubContents counts root tree reads, one per policy attempt. A 404
+// represents a missing path in a complete tree, not a missing Git object.
 func newFakeGitHubContents(policy string, statuses ...int) (*fakeGitHub, *atomic.Int32) {
+	return newFakeGitHubPolicy("reread-recovers", policy, statuses...)
+}
+
+func newFakeGitHubPolicy(identity, policy string, statuses ...int) (*fakeGitHub, *atomic.Int32) {
+	const commit = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	const root = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	const githubDir = "cccccccccccccccccccccccccccccccccccccccc"
+	const policyDir = "dddddddddddddddddddddddddddddddddddddddd"
+	blob := gitBlobID([]byte(policy), 40)
 	var counter atomic.Int32
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
@@ -47,15 +53,26 @@ func newFakeGitHubContents(policy string, statuses ...int) (*fakeGitHub, *atomic
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"default_branch":"main"}`)
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/commits/{ref}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("ref") != "heads/main" {
+			http.Error(w, "unexpected ref", http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"sha":%q,"commit":{"tree":{"sha":%q}}}`, commit, root)
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/git/trees/"+root, func(w http.ResponseWriter, _ *http.Request) {
 		n := int(counter.Add(1)) - 1
 		code := statuses[min(n, len(statuses)-1)]
-		if code == http.StatusOK {
-			json.NewEncoder(w).Encode(github.RepositoryContent{
-				Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
-				Type:     new("file"),
-				Encoding: new("base64"),
-			})
+		if code == http.StatusOK || code == http.StatusNotFound {
+			if code == http.StatusNotFound {
+				fmt.Fprintf(w, `{"sha":%q,"truncated":false,"tree":[]}`, root)
+				return
+			}
+			entries := []*github.TreeEntry{{Path: new(".github"), Mode: new("040000"), Type: new("tree"), SHA: new(githubDir)}}
+			json.NewEncoder(w).Encode(github.Tree{SHA: new(root), Truncated: new(false), Entries: entries})
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -64,6 +81,16 @@ func newFakeGitHubContents(policy string, statuses ...int) (*fakeGitHub, *atomic
 			Response: &http.Response{StatusCode: code},
 			Message:  http.StatusText(code),
 		})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/git/trees/"+githubDir, func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(github.Tree{SHA: new(githubDir), Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Mode: new("040000"), Type: new("tree"), SHA: new(policyDir)}}})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/git/trees/"+policyDir, func(w http.ResponseWriter, _ *http.Request) {
+		entries := []*github.TreeEntry{{Path: new(identity + ".sts.yaml"), Mode: new("100644"), Type: new("blob"), SHA: new(blob), Size: new(len(policy))}}
+		json.NewEncoder(w).Encode(github.Tree{SHA: new(policyDir), Truncated: new(false), Entries: entries})
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/git/blobs/"+blob, func(w http.ResponseWriter, _ *http.Request) {
+		json.NewEncoder(w).Encode(github.Blob{SHA: new(blob), Size: new(len(policy)), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(policy)))})
 	})
 	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -137,7 +164,7 @@ func TestFetchTrustPolicyRawTransientHidesCause(t *testing.T) {
 func TestFetchTrustPolicyRawRecoversAfterTransient(t *testing.T) {
 	key := freshTPKey(t, "flaky")
 	const policy = "issuer: https://example.com\nsubject: sub\n"
-	gh, counter := newFakeGitHubContents(policy, http.StatusBadGateway, http.StatusOK)
+	gh, counter := newFakeGitHubPolicy(key.identity, policy, http.StatusBadGateway, http.StatusOK)
 	atr := newAppsTransport(t, gh)
 	s := &sts{}
 
@@ -469,19 +496,17 @@ func TestFetchTrustPolicyRawMintWithoutResponse(t *testing.T) {
 	}
 }
 
-// TestDeletedPolicyNotServedOnRateLimit covers every definitive not-found
-// path, including a terminal token-mint 404: after one, a proven rate limit must
-// not serve the stale copy of the deleted policy or write it back into the
-// primary cache. TestExchangeMintForbidden covers token-mint 403s separately.
+// TestDeletedPolicyNotServedOnRateLimit covers missing and unsafe policy paths,
+// including a terminal token-mint 404. A later rate limit must not serve stale
+// policy or write it back into the primary cache.
 func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	const policy = "issuer: https://example.com\nsubject: sub\n"
 
-	// contentsOverride answers the policy read itself and leaves the rest of
-	// the fake GitHub (installations, tokens) untouched.
-	contentsOverride := func(h http.HandlerFunc) http.Handler {
-		base, _ := newFakeGitHubContents("", http.StatusOK)
+	// gitOverride replaces one Git object response and leaves the rest intact.
+	gitOverride := func(pattern string, h http.HandlerFunc) http.Handler {
+		base, _ := newFakeGitHubPolicy("deleted-policy", "", http.StatusOK)
 		mux := http.NewServeMux()
-		mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", h)
+		mux.HandleFunc(pattern, h)
 		mux.Handle("/", base.mux)
 		return mux
 	}
@@ -499,36 +524,46 @@ func TestDeletedPolicyNotServedOnRateLimit(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name    string
-		handler func() http.Handler
+		name     string
+		handler  func() http.Handler
+		wantCode codes.Code
 	}{
 		{"404", func() http.Handler {
 			h, _ := newFakeGitHubContents("", http.StatusNotFound)
 			return h.mux
-		}},
+		}, codes.NotFound},
 		{"path is a directory", func() http.Handler {
-			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
-				json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
+			return gitOverride("/repos/{org}/{repo}/git/trees/dddddddddddddddddddddddddddddddddddddddd", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(github.Tree{SHA: new("dddddddddddddddddddddddddddddddddddddddd"), Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("deleted-policy.sts.yaml"), Mode: new("040000"), Type: new("tree"), SHA: new("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee")}}})
 			})
-		}},
-		{"token mint 404", func() http.Handler { return mintOverride(http.StatusNotFound) }},
+		}, codes.Unavailable},
+		{"token mint 404", func() http.Handler { return mintOverride(http.StatusNotFound) }, codes.NotFound},
 		{"content undecodable", func() http.Handler {
-			return contentsOverride(func(w http.ResponseWriter, _ *http.Request) {
-				json.NewEncoder(w).Encode(github.RepositoryContent{
+			return gitOverride("/repos/{org}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, _ *http.Request) {
+				json.NewEncoder(w).Encode(github.Blob{
+					SHA:      new(gitBlobID(nil, 40)),
+					Size:     new(0),
 					Content:  new("!!not base64!!"),
-					Type:     new("file"),
 					Encoding: new("base64"),
 				})
 			})
-		}},
+		}, codes.Unavailable},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key := freshTPKey(t, "deleted-policy")
 			staleTrustPolicies.Add(key, policy)
 			s := &sts{}
 
-			if _, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, tc.handler()), 1234, key); status.Code(err) != codes.NotFound {
-				t.Fatalf("first read: code = %v, want NotFound", status.Code(err))
+			if _, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, tc.handler()), 1234, key); status.Code(err) != tc.wantCode {
+				t.Fatalf("first read: code = %v, want %v; err = %v", status.Code(err), tc.wantCode, err)
+			}
+			if _, ok := staleTrustPolicies.Get(key); ok {
+				t.Error("first read retained stale policy")
+			}
+			if tc.wantCode == codes.Unavailable {
+				if _, ok := trustPolicies.Get(key); ok {
+					t.Error("unsafe policy seeded primary cache")
+				}
 			}
 			trustPolicies.Remove(key)
 

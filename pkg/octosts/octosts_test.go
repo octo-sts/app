@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -81,7 +82,33 @@ type fakeGitHub struct {
 }
 
 func newFakeGitHub() *fakeGitHub {
+	return newFakeGitHubWithExtraFiles(nil)
+}
+
+func newFakeGitHubWithExtraFiles(extra func(owner, repo string) map[string]string) *fakeGitHub {
 	mux := http.NewServeMux()
+	fakePolicyGit(mux, func(owner, repo string) map[string]string {
+		files := map[string]string{}
+		root := filepath.Join("testdata", owner, repo)
+		_ = filepath.WalkDir(root, func(filename string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			content, err := os.ReadFile(filename)
+			if err == nil {
+				rel, _ := filepath.Rel(root, filename)
+				files[path.Join(DefaultPolicyDir, filepath.ToSlash(rel))] = string(content)
+			}
+			return nil
+		})
+		if owner == "orgdir" {
+			files[path.Join(DefaultPolicyDir, "trusted-token-issuers.yaml", "placeholder")] = "placeholder"
+		}
+		if extra != nil {
+			maps.Copy(files, extra(owner, repo))
+		}
+		return files
+	}, nil)
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID: new(int64(1234)),
@@ -102,7 +129,7 @@ func newFakeGitHub() *fakeGitHub {
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity...}", func(w http.ResponseWriter, r *http.Request) {
 		// Sentinel: owner "orgdir" always resolves the trusted-issuers path to
 		// a directory rather than a file. go-github distinguishes the two by
 		// response shape — a single JSON object is a file, a JSON array is a
@@ -180,6 +207,7 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Used to isolate orgs in the multi-org routing tests.
 func newFakeGitHubNoContents() *fakeGitHub {
 	mux := http.NewServeMux()
+	fakePolicyGit(mux, func(_, _ string) map[string]string { return nil }, nil)
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID:      new(int64(1234)),
@@ -253,6 +281,19 @@ func TestExchange(t *testing.T) {
 			name: "repo",
 			req: &v1.ExchangeRequest{
 				Identity: "foo",
+				Scopes:   []string{"org/repo"},
+			},
+			want: &github.InstallationTokenOptions{
+				Repositories: []string{"repo"},
+				Permissions: &github.InstallationPermissions{
+					PullRequests: new("write"),
+				},
+			},
+		},
+		{
+			name: "nested repo policy",
+			req: &v1.ExchangeRequest{
+				Identity: "1/service/deploy",
 				Scopes:   []string{"org/repo"},
 			},
 			want: &github.InstallationTokenOptions{
@@ -565,9 +606,9 @@ func TestExchangeValidation(t *testing.T) {
 			},
 		},
 		{
-			name: "nested identity",
+			name: "nested traversal identity",
 			req: &v1.ExchangeRequest{
-				Identity: "sub/foo",
+				Identity: "sub/../foo",
 				Scopes:   []string{"org/repo"},
 			},
 		},
@@ -610,6 +651,14 @@ func TestExchangeValidation(t *testing.T) {
 
 func newFakeGitHubRateLimit(statusCode int) *fakeGitHub {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-RateLimit-Remaining", "0")
+		w.Header().Set("X-RateLimit-Limit", "5000")
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(time.Minute).Unix()))
+		w.WriteHeader(statusCode)
+		json.NewEncoder(w).Encode(github.ErrorResponse{Message: "API rate limit exceeded"})
+	})
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID: new(int64(1234)),
@@ -1000,6 +1049,11 @@ func TestPolicyReadAllRateLimitedReturnsError(t *testing.T) {
 // permission-denied case of issue #1320, distinct from newFakeGitHubRateLimit.
 func newFakeGitHubForbidden() *fakeGitHub {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		json.NewEncoder(w).Encode(github.ErrorResponse{Message: "Resource not accessible by integration"})
+	})
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID:      new(int64(1234)),
@@ -1113,6 +1167,14 @@ func TestPolicyReadForbiddenDoesNotRotate(t *testing.T) {
 func newFakeGitHubNotFoundCounter() (*fakeGitHub, *atomic.Int32) {
 	var counter atomic.Int32
 	mux := http.NewServeMux()
+	gitMux := http.NewServeMux()
+	fakePolicyGit(gitMux, func(_, _ string) map[string]string { return nil }, nil)
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		counter.Add(1)
+		gitMux.ServeHTTP(w, r)
+	})
+	mux.Handle("/repos/{org}/{repo}/commits/{ref}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/git/trees/{sha}", gitMux)
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID:      new(int64(1234)),
@@ -1226,7 +1288,7 @@ func TestPolicyReadRechecksCachesAfterJoiningFlight(t *testing.T) {
 	}
 }
 
-func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation.AppsTransport {
+func newPolicyReadTransport(t *testing.T, files map[string]string, read http.HandlerFunc) *ghinstallation.AppsTransport {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
@@ -1235,7 +1297,39 @@ func newPolicyReadTransport(t *testing.T, read http.HandlerFunc) *ghinstallation
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", read)
+	gitMux := http.NewServeMux()
+	fakePolicyGit(gitMux, func(_, repo string) map[string]string {
+		if repo == ".github" {
+			return nil
+		}
+		out := make(map[string]string, len(files))
+		for identity, content := range files {
+			out[path.Join(DefaultPolicyDir, identity+".sts.yaml")] = content
+		}
+		return out
+	}, nil)
+	mux.Handle("/repos/{org}/{repo}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/commits/{ref}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/git/trees/{sha}", gitMux)
+	mux.HandleFunc("/repos/{org}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, r *http.Request) {
+		for identity, content := range files {
+			if gitBlobID([]byte(content), 40) == r.PathValue("sha") {
+				r.SetPathValue("identity", identity+".sts.yaml")
+				break
+			}
+		}
+		recorder := httptest.NewRecorder()
+		read(recorder, r)
+		if recorder.Code != http.StatusOK {
+			for key, values := range recorder.Header() {
+				w.Header()[key] = values
+			}
+			w.WriteHeader(recorder.Code)
+			_, _ = w.Write(recorder.Body.Bytes())
+			return
+		}
+		gitMux.ServeHTTP(w, r)
+	})
 	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
@@ -1264,16 +1358,12 @@ func TestFetchTrustPolicyRawUncachedReadsCustomPolicyDir(t *testing.T) {
 		writeGitHubNotFound(w)
 	})
 	var reads atomic.Int32
+	fakePolicyGit(mux, func(_, _ string) map[string]string {
+		return map[string]string{path.Join("infra/github/octo-sts", key.identity+".sts.yaml"): policy}
+	}, func() { reads.Add(1) })
 	mux.HandleFunc("/repos/{org}/{repo}/contents/infra/github/octo-sts/{identity}", func(w http.ResponseWriter, r *http.Request) {
-		reads.Add(1)
-		if got, want := r.PathValue("identity"), key.identity+".sts.yaml"; got != want {
-			t.Errorf("policy read file = %q, want %q", got, want)
-		}
-		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
-			Type:     new("file"),
-			Encoding: new("base64"),
-		})
+		t.Errorf("unexpected Contents API read: %s", r.URL.Path)
+		writeGitHubNotFound(w)
 	})
 	atr := newAppsTransport(t, &fakeGitHub{mux: mux})
 
@@ -1290,6 +1380,38 @@ func TestFetchTrustPolicyRawUncachedReadsCustomPolicyDir(t *testing.T) {
 	}
 }
 
+func TestFetchTrustPolicyRawUncachedEncodesNestedIdentity(t *testing.T) {
+	const policy = "issuer: https://example.com\nsubject: example\n"
+	key := freshTPKey(t, "encoded-nested-policy")
+	key.identity = "team/a+b#c%25?x&y"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token: new("test-installation-token"), ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
+		})
+	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	var reads atomic.Int32
+	fakePolicyGit(mux, func(_, _ string) map[string]string {
+		return map[string]string{path.Join(DefaultPolicyDir, key.identity+".sts.yaml"): policy}
+	}, func() { reads.Add(1) })
+	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity...}", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected Contents API read: %s", r.URL.Path)
+		writeGitHubNotFound(w)
+	})
+	s := &sts{}
+	transport := newAppsTransport(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.RawQuery != "" {
+			t.Errorf("unexpected query: %q", r.URL.RawQuery)
+		}
+		mux.ServeHTTP(w, r)
+	}))
+	raw, err := s.fetchTrustPolicyRawUncached(t.Context(), transport, 1234, key)
+	if err != nil || raw != policy || reads.Load() != 1 {
+		t.Fatalf("fetch = (%q, %v), reads = %d", raw, err, reads.Load())
+	}
+}
+
 func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	key := freshTPKey(t, "concurrent-policy-read")
 
@@ -1302,23 +1424,32 @@ func TestConcurrentPolicyReadCannotCacheLate404OverSuccess(t *testing.T) {
 	defer close404()
 	var contentReads atomic.Int32
 	const policy = "issuer: https://example.com\nsubject: example\n"
-
-	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		if contentReads.Add(1) == 1 {
-			close(firstStarted)
-			<-releaseSuccess
-			_ = json.NewEncoder(w).Encode(github.RepositoryContent{
-				Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
-				Type:     new("file"),
-				Encoding: new("base64"),
-			})
-			return
-		}
-		// Before single-flight, a concurrent response from an earlier snapshot
-		// could arrive after the 200 and replace it with a five-minute 404.
-		<-release404
-		writeGitHubNotFound(w)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{Token: new("test-installation-token"), ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)}})
 	})
+	gitMux := http.NewServeMux()
+	fakePolicyGit(gitMux, func(_, _ string) map[string]string {
+		if contentReads.Load() > 1 {
+			return nil
+		}
+		return map[string]string{path.Join(DefaultPolicyDir, key.identity+".sts.yaml"): policy}
+	}, nil)
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, r *http.Request) {
+		if contentReads.Add(1) > 1 {
+			// A second read sees a missing path only after the success completes.
+			<-release404
+		}
+		gitMux.ServeHTTP(w, r)
+	})
+	mux.Handle("/repos/{org}/{repo}/commits/{ref}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/git/trees/{sha}", gitMux)
+	mux.HandleFunc("/repos/{org}/{repo}/git/blobs/{sha}", func(w http.ResponseWriter, _ *http.Request) {
+		close(firstStarted)
+		<-releaseSuccess
+		_ = json.NewEncoder(w).Encode(github.Blob{SHA: new(gitBlobID([]byte(policy), 40)), Size: new(len(policy)), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(policy)))})
+	})
+	atr := newAppsTransport(t, mux)
 	s := &sts{}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -1393,7 +1524,7 @@ func TestConcurrentPolicyReadsForDifferentIdentitiesDoNotShareFlight(t *testing.
 		err error
 	}
 	results := make(map[string]chan result)
-	atr := newPolicyReadTransport(t, read)
+	atr := newPolicyReadTransport(t, map[string]string{keyA.identity: policyFor(keyA.identity), keyB.identity: policyFor(keyB.identity)}, read)
 	for _, key := range []cacheTrustPolicyKey{keyA, keyB} {
 		ch := make(chan result, 1)
 		results[key.identity] = ch
@@ -1434,7 +1565,7 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 		}
 	}()
 	var limitedReads, healthyReads atomic.Int32
-	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	limited := newPolicyReadTransport(t, map[string]string{key.identity: "issuer: https://example.com\nsubject: example\n"}, func(w http.ResponseWriter, _ *http.Request) {
 		limitedReads.Add(1)
 		signalStarted()
 		<-release
@@ -1443,7 +1574,7 @@ func TestConcurrentPolicyReadRateLimitStillRotates(t *testing.T) {
 		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 	})
 	const policy = "issuer: https://example.com\nsubject: example\n"
-	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	healthy := newPolicyReadTransport(t, map[string]string{key.identity: policy}, func(w http.ResponseWriter, _ *http.Request) {
 		healthyReads.Add(1)
 		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
 			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
@@ -1504,7 +1635,7 @@ func TestConcurrentCallersShareOneFlightButAuthorizeSeparately(t *testing.T) {
 	const allowed = "repo:org/repo:ref:refs/heads/main"
 	const policy = "issuer: https://example.com\nsubject: " + allowed + "\n"
 	var reads atomic.Int32
-	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, r *http.Request) {
+	atr := newPolicyReadTransport(t, map[string]string{key.identity: policy}, func(w http.ResponseWriter, r *http.Request) {
 		// The helper routes the org allowlist path here too; no allowlist applies.
 		if strings.HasSuffix(r.URL.Path, OrgTrustedIssuersPath(DefaultPolicyDir)) {
 			w.WriteHeader(http.StatusNotFound)
@@ -1591,7 +1722,7 @@ func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) 
 	closeRelease := sync.OnceFunc(func() { close(release) })
 	defer closeRelease()
 	var limitedReads, healthyReads atomic.Int32
-	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	limited := newPolicyReadTransport(t, map[string]string{key.identity: "issuer: https://example.com\nsubject: example\n"}, func(w http.ResponseWriter, _ *http.Request) {
 		limitedReads.Add(1)
 		signalStarted()
 		<-release
@@ -1600,7 +1731,7 @@ func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) 
 		_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
 	})
 	const policy = "issuer: https://example.com\nsubject: example\n"
-	healthy := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	healthy := newPolicyReadTransport(t, map[string]string{key.identity: policy}, func(w http.ResponseWriter, _ *http.Request) {
 		healthyReads.Add(1)
 		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
 			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
@@ -1654,7 +1785,7 @@ func TestPolicyReadWaiterRereadsOnOwnInstallAfterForeignRateLimit(t *testing.T) 
 func TestPolicyReadLeaderKeepsItsOwnRateLimit(t *testing.T) {
 	key := freshTPKey(t, "own-rate-limit")
 	var reads atomic.Int32
-	limited := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	limited := newPolicyReadTransport(t, map[string]string{key.identity: "policy"}, func(w http.ResponseWriter, _ *http.Request) {
 		reads.Add(1)
 		w.Header().Set("X-RateLimit-Remaining", "0")
 		w.WriteHeader(http.StatusForbidden)
@@ -1677,7 +1808,7 @@ func TestPolicyReadFlightSurvivesFirstCallerCancellation(t *testing.T) {
 	defer closeRelease()
 	var reads atomic.Int32
 	const policy = "issuer: https://example.com\nsubject: example\n"
-	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	atr := newPolicyReadTransport(t, map[string]string{key.identity: policy}, func(w http.ResponseWriter, _ *http.Request) {
 		if reads.Add(1) == 1 {
 			close(started)
 		}
@@ -1731,7 +1862,7 @@ func TestPolicyReadTimeoutIsUnavailableNotCallerDeadline(t *testing.T) {
 	t.Cleanup(func() { policyReadTimeout = orig })
 
 	var reads atomic.Int32
-	atr := newPolicyReadTransport(t, func(_ http.ResponseWriter, r *http.Request) {
+	atr := newPolicyReadTransport(t, map[string]string{key.identity: "policy"}, func(_ http.ResponseWriter, r *http.Request) {
 		reads.Add(1)
 		<-r.Context().Done()
 	})
@@ -1771,7 +1902,7 @@ func TestPolicyReadTimeoutRevokesMintedToken(t *testing.T) {
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
-	mux.HandleFunc("/api/v3/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(_ http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/v3/repos/{org}/{repo}", func(_ http.ResponseWriter, r *http.Request) {
 		contentsCalls.Add(1)
 		<-r.Context().Done()
 	})
@@ -1815,7 +1946,7 @@ func TestPolicyReadFailedMintDoesNotMintForRevocation(t *testing.T) {
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = w.Write([]byte(`{"message":"invalid installation"}`))
 	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, _ *http.Request) {
 		contentsCalls.Add(1)
 		w.WriteHeader(http.StatusInternalServerError)
 	})
@@ -1849,19 +1980,28 @@ func TestPolicyReadFirst404IsRereadOncePerFlight(t *testing.T) {
 		}
 	}()
 	var reads atomic.Int32
-	atr := newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{Token: new("test-installation-token"), ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)}})
+	})
+	gitMux := http.NewServeMux()
+	fakePolicyGit(gitMux, func(_, _ string) map[string]string {
+		if reads.Load() == 1 {
+			return nil
+		}
+		return map[string]string{path.Join(DefaultPolicyDir, key.identity+".sts.yaml"): "new policy"}
+	}, nil)
+	mux.HandleFunc("/repos/{org}/{repo}", func(w http.ResponseWriter, r *http.Request) {
 		if reads.Add(1) == 1 {
 			close(started)
 			<-release
-			writeGitHubNotFound(w)
-			return
 		}
-		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  new(base64.StdEncoding.EncodeToString([]byte("new policy"))),
-			Type:     new("file"),
-			Encoding: new("base64"),
-		})
+		gitMux.ServeHTTP(w, r)
 	})
+	mux.Handle("/repos/{org}/{repo}/commits/{ref}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/git/trees/{sha}", gitMux)
+	mux.Handle("/repos/{org}/{repo}/git/blobs/{sha}", gitMux)
+	atr := newAppsTransport(t, mux)
 	s := &sts{}
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
@@ -2844,7 +2984,41 @@ func TestExchangeCallerRepository(t *testing.T) {
 			CallerRepository: true,
 		}
 	}
-	fake := newFakeGitHub()
+	policyJSON := func(policy OrgTrustPolicy) string {
+		t.Helper()
+		b, err := json.Marshal(policy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	fake := newFakeGitHubWithExtraFiles(func(owner, repo string) map[string]string {
+		files := map[string]string{}
+		add := func(identity string, policy OrgTrustPolicy) {
+			files[path.Join(DefaultPolicyDir, identity+".sts.yaml")] = policyJSON(policy)
+		}
+		switch {
+		case owner == "org" && repo == ".github":
+			add("caller-shared", newPolicy())
+			other := newPolicy()
+			other.ClaimPattern["repository_id"] = "202"
+			add("caller-other", other)
+			static := newPolicy()
+			static.CallerRepository = false
+			static.RepositoryIDs = []int64{900}
+			add("caller-static", static)
+		case owner == "org" && repo == "project":
+			local := newPolicy()
+			local.CallerRepository = false
+			add("caller-local", local)
+		case owner == "deploy-org" && repo == ".github":
+			deploy := newPolicy()
+			deploy.CallerRepository = false
+			deploy.RepositoryIDs = []int64{900}
+			add("caller-deploy", deploy)
+		}
+		return files
+	})
 	var writeMints atomic.Int32
 	fake.mux.HandleFunc("/app/installations/1234/access_tokens", func(w http.ResponseWriter, r *http.Request) {
 		b, err := io.ReadAll(r.Body)
@@ -2867,43 +3041,10 @@ func TestExchangeCallerRepository(t *testing.T) {
 			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
-	writePolicy := func(w http.ResponseWriter, policy OrgTrustPolicy) {
-		t.Helper()
-		b, err := json.Marshal(policy)
-		if err != nil {
-			t.Fatal(err)
-		}
-		json.NewEncoder(w).Encode(github.RepositoryContent{Content: new(base64.StdEncoding.EncodeToString(b)), Type: new("file"), Encoding: new("base64")})
-	}
-	fake.mux.HandleFunc("/repos/org/.github/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
-		policy := newPolicy()
-		switch r.PathValue("identity") {
-		case "caller-shared.sts.yaml":
-		case "caller-other.sts.yaml":
-			policy.ClaimPattern["repository_id"] = "202"
-		case "caller-static.sts.yaml":
-			policy.CallerRepository = false
-			policy.RepositoryIDs = []int64{900}
-		default:
-			writeGitHubNotFound(w)
-			return
-		}
-		writePolicy(w, policy)
-	})
-	fake.mux.HandleFunc("/repos/org/project/contents/.github/chainguard/caller-local.sts.yaml", func(w http.ResponseWriter, _ *http.Request) {
-		policy := newPolicy()
-		policy.CallerRepository = false
-		writePolicy(w, policy)
-	})
-	fake.mux.HandleFunc("/repos/deploy-org/.github/contents/.github/chainguard/caller-deploy.sts.yaml", func(w http.ResponseWriter, _ *http.Request) {
-		policy := newPolicy()
-		policy.CallerRepository = false
-		policy.RepositoryIDs = []int64{900}
-		writePolicy(w, policy)
-	})
 	// Both policy reads and their token revocations stay on the local fake.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path = strings.TrimPrefix(r.URL.Path, "/api/v3")
+		r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, "/api/v3")
 		fake.ServeHTTP(w, r)
 	}))
 	t.Cleanup(server.Close)

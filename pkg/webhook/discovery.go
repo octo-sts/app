@@ -63,9 +63,28 @@ const (
 	maxPRFiles     = 3000
 	maxPRPages     = maxPRFiles / prFilesPerPage
 	compareFileCap = 300
+	// Count every expanded path, including repeated tree SHAs and non-policies.
+	maxPolicySnapshotPaths = 10000
+	// Including the policy root, this caps tree requests even for unique SHAs.
+	maxPolicySnapshotDirs = 512
+	// Depth is directory levels below the policy directory, which is depth 0.
+	maxPolicySnapshotDepth = 32
 )
 
 var errPRHeadMismatch = errors.New("pull request head differs from event commit")
+
+var errPolicySnapshotIncomplete = errors.New("recursive policy snapshot incomplete")
+var errPolicySnapshotLimit = fmt.Errorf("policy snapshot limit exceeded: %w", errPolicySnapshotIncomplete)
+
+// snapshotBeforeIncompleteError preserves a complete live snapshot when only the
+// prior tree failed during recursive discovery. It is scoped to the compare fallback.
+type snapshotBeforeIncompleteError struct {
+	err  error
+	live map[string]string
+}
+
+func (e *snapshotBeforeIncompleteError) Error() string { return e.err.Error() }
+func (e *snapshotBeforeIncompleteError) Unwrap() error { return e.err }
 
 // errTooManyPRFiles marks a PR whose diff GitHub cannot list completely. A
 // partial list could miss a changed policy, so callers must not use one.
@@ -208,7 +227,7 @@ func (e *Validator) prPolicyChanges(ctx context.Context, client *github.Client, 
 		}
 		return nil, &prTooLargeError{number: tooLarge.number, count: tooLarge.count, scanErr: err}
 	}
-	return policiesPresent(snapshot), nil
+	return e.policiesPresent(snapshot), nil
 }
 
 // reportPRTooLarge posts a failed check run for a PR that could be validated
@@ -255,8 +274,19 @@ func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Cli
 		return nil, fmt.Errorf("commit %s has no tree SHA", ref)
 	}
 	treeSHA := commit.GetTree().GetSHA()
+	trees := make(map[string]*github.Tree)
+	getTree := func(sha string) (*github.Tree, error) {
+		if tree := trees[sha]; tree != nil {
+			return tree, nil
+		}
+		tree, err := completePolicyTree(ctx, client, owner, repo, sha)
+		if err == nil {
+			trees[sha] = tree
+		}
+		return tree, err
+	}
 	for directory := range strings.SplitSeq(e.policyDir(), "/") {
-		tree, err := completePolicyTree(ctx, client, owner, repo, treeSHA)
+		tree, err := getTree(treeSHA)
 		if err != nil {
 			return nil, fmt.Errorf("tree at %s: %w", ref, err)
 		}
@@ -266,8 +296,13 @@ func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Cli
 				continue
 			}
 			if entry.GetType() != "tree" {
-				// A file or submodule with this name cannot contain policies.
+				if entry.GetMode() == "120000" {
+					return nil, fmt.Errorf("policy directory component %q is a symlink: %w", directory, errPolicySnapshotIncomplete)
+				}
 				return map[string]string{}, nil
+			}
+			if entry.GetMode() != "040000" {
+				return nil, fmt.Errorf("policy directory component %q has invalid mode %q: %w", directory, entry.GetMode(), errPolicySnapshotIncomplete)
 			}
 			treeSHA = entry.GetSHA()
 			found = true
@@ -277,27 +312,144 @@ func (e *Validator) policyTreeSnapshotAs(ctx context.Context, client *github.Cli
 			return map[string]string{}, nil
 		}
 	}
-	tree, err := completePolicyTree(ctx, client, owner, repo, treeSHA)
-	if err != nil {
-		return nil, fmt.Errorf("policy tree at %s: %w", ref, err)
-	}
 	out := make(map[string]string)
-	for _, entry := range tree.Entries {
-		if entry == nil || entry.GetSHA() == "" || entry.GetType() == "" || entry.GetPath() == "" {
-			return nil, fmt.Errorf("tree at %s has an incomplete entry", ref)
+	type pendingTree struct {
+		sha, dir string
+		depth    int
+	}
+	pending := []pendingTree{{treeSHA, e.policyDir(), 0}}
+	paths := 1 // The policy directory itself.
+	dirs := 1
+	for len(pending) > 0 {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("%w: %w", errPolicySnapshotIncomplete, err)
 		}
-		switch entry.GetType() {
-		case "blob":
-			path := e.policyDir() + "/" + entry.GetPath()
-			if isValidatedPath(classifyRepo, path, e.policyRepo(), e.policyDir()) {
-				out[path] = entry.GetSHA()
+		current := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		tree, err := getTree(current.sha)
+		if err != nil {
+			if current.depth > 0 {
+				return nil, fmt.Errorf("policy tree %s at %s: %w: %w", current.dir, ref, errPolicySnapshotIncomplete, err)
 			}
-		case "tree", "commit":
-		default:
-			return nil, fmt.Errorf("tree at %s has unknown entry type %q", ref, entry.GetType())
+			return nil, fmt.Errorf("policy tree %s at %s: %w", current.dir, ref, err)
+		}
+		// Reserve before appending children: both pending work and output stay
+		// bounded even when many paths reference the same cached tree.
+		if len(tree.Entries) > maxPolicySnapshotPaths-paths {
+			return nil, fmt.Errorf("policy snapshot exceeds %d paths: %w", maxPolicySnapshotPaths, errPolicySnapshotLimit)
+		}
+		paths += len(tree.Entries)
+		for _, entry := range tree.Entries {
+			name := entry.GetPath()
+			if strings.Contains(name, "/") || !pathIsClean(name) {
+				return nil, fmt.Errorf("tree %s has invalid entry path %q: %w", current.sha, name, errPolicySnapshotIncomplete)
+			}
+			filePath := current.dir + "/" + name
+			if entry.GetMode() == "120000" {
+				if isValidatedPath(classifyRepo, filePath, e.policyRepo(), e.policyDir()) {
+					return nil, fmt.Errorf("policy path is a symlink: %s: %w", filePath, errPolicySnapshotIncomplete)
+				}
+				// A symlink is not a tree. Git alone cannot enumerate paths that
+				// Contents might resolve through it; changed descendants are
+				// rejected by policyPathIsRegular before their content is read.
+				continue
+			}
+			switch entry.GetType() {
+			case "blob":
+				if isValidatedPath(classifyRepo, filePath, e.policyRepo(), e.policyDir()) {
+					if entry.GetMode() != "100644" && entry.GetMode() != "100755" {
+						return nil, fmt.Errorf("policy %s has invalid mode %q: %w", filePath, entry.GetMode(), errPolicySnapshotIncomplete)
+					}
+					out[filePath] = entry.GetSHA()
+				}
+			case "tree":
+				if entry.GetMode() != "040000" {
+					return nil, fmt.Errorf("policy directory %s has invalid mode %q: %w", filePath, entry.GetMode(), errPolicySnapshotIncomplete)
+				}
+				if current.depth == maxPolicySnapshotDepth {
+					return nil, fmt.Errorf("policy snapshot exceeds directory depth %d at %s: %w", maxPolicySnapshotDepth, filePath, errPolicySnapshotLimit)
+				}
+				if dirs == maxPolicySnapshotDirs {
+					return nil, fmt.Errorf("policy snapshot exceeds %d directories: %w", maxPolicySnapshotDirs, errPolicySnapshotLimit)
+				}
+				dirs++
+				pending = append(pending, pendingTree{entry.GetSHA(), filePath, current.depth + 1})
+			case "commit": // Submodules cannot contain repository policies.
+			default:
+				if current.depth > 0 {
+					return nil, fmt.Errorf("tree at %s has unknown entry type %q: %w", ref, entry.GetType(), errPolicySnapshotIncomplete)
+				}
+				return nil, fmt.Errorf("tree at %s has unknown entry type %q", ref, entry.GetType())
+			}
 		}
 	}
 	return out, nil
+}
+
+// policyPathIsRegular resolves each component from immutable Git trees before
+// Contents can dereference a symlink. A missing or non-regular component fails.
+func policyPathIsRegular(ctx context.Context, client *github.Client, owner, repo, ref, filePath string) error {
+	return (&policyPathVerifier{client: client, owner: owner, repo: repo, ref: ref}).verify(ctx, filePath)
+}
+
+// policyPathVerifier caches successful Git reads for one validation pass and ref.
+type policyPathVerifier struct {
+	client           *github.Client
+	owner, repo, ref string
+	root             string
+	trees            map[string]*github.Tree
+}
+
+func (v *policyPathVerifier) verify(ctx context.Context, filePath string) error {
+	if v.root == "" {
+		commit, _, err := v.client.Git.GetCommit(ctx, v.owner, v.repo, v.ref)
+		if err != nil {
+			return err
+		}
+		if commit == nil || commit.Tree == nil || commit.GetTree().GetSHA() == "" {
+			return fmt.Errorf("commit %s has no tree SHA", v.ref)
+		}
+		v.root = commit.GetTree().GetSHA()
+	}
+	if v.trees == nil {
+		v.trees = make(map[string]*github.Tree)
+	}
+	sha := v.root
+	parts := strings.Split(filePath, "/")
+	for i, part := range parts {
+		tree := v.trees[sha]
+		if tree == nil {
+			var err error
+			tree, err = completePolicyTree(ctx, v.client, v.owner, v.repo, sha)
+			if err != nil {
+				return err
+			}
+			v.trees[sha] = tree
+		}
+		var match *github.TreeEntry
+		for _, entry := range tree.Entries {
+			if entry.GetPath() == part {
+				if match != nil {
+					return fmt.Errorf("duplicate tree entry %q", part)
+				}
+				match = entry
+			}
+		}
+		if match == nil {
+			return fmt.Errorf("path %s does not exist in Git tree", filePath)
+		}
+		if i == len(parts)-1 {
+			if match.GetType() != "blob" || (match.GetMode() != "100644" && match.GetMode() != "100755") {
+				return fmt.Errorf("path %s is not a regular file", filePath)
+			}
+			return nil
+		}
+		if match.GetType() != "tree" || match.GetMode() != "040000" {
+			return fmt.Errorf("path %s has a non-directory or symlink parent %q", filePath, part)
+		}
+		sha = match.GetSHA()
+	}
+	return fmt.Errorf("empty policy path")
 }
 
 func completePolicyTree(ctx context.Context, client *github.Client, owner, repo, sha string) (*github.Tree, error) {
@@ -325,6 +477,9 @@ func (e *Validator) policyChangesFromTrees(ctx context.Context, client *github.C
 	if before != zeroHash {
 		beforeFiles, err = e.policyTreeSnapshot(ctx, client, owner, repo, before)
 		if err != nil {
+			if errors.Is(err, errPolicySnapshotIncomplete) {
+				return nil, &snapshotBeforeIncompleteError{err: err, live: afterFiles}
+			}
 			return nil, err
 		}
 	}
@@ -333,14 +488,14 @@ func (e *Validator) policyChangesFromTrees(ctx context.Context, client *github.C
 		beforeSHA, existed := beforeFiles[path]
 		switch {
 		case !existed:
-			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: PolicyCreated})
+			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path, e.policyDir()), Action: PolicyCreated})
 		case sha != beforeSHA:
-			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: PolicyUpdated})
+			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path, e.policyDir()), Action: PolicyUpdated})
 		}
 	}
 	for path := range beforeFiles {
 		if _, exists := afterFiles[path]; !exists {
-			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: PolicyDeleted})
+			changes = append(changes, PolicyChange{Path: path, Policy: policyName(path, e.policyDir()), Action: PolicyDeleted})
 		}
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })

@@ -437,6 +437,7 @@ The App will attempt to load the trust policy from
 `.github/chainguard/${NAME}.sts.yaml` from `${REPO}` and if the provided `${TOKEN}`
 satisfies those rules, it will return a token with the permissions in the trust
 policy.
+The identity `team/deploy` selects `.github/chainguard/team/deploy.sts.yaml`.
 
 ### Release cadence
 
@@ -733,6 +734,20 @@ OCTOSTS_POLICY_DIR=.github/octo-sts
 Trust policies are then read from `.github/octo-sts/{name}.sts.yaml` and the
 org allowlist from `<ORG_POLICY_REPO>/.github/octo-sts/trusted-token-issuers.yaml`.
 
+Nested policies are supported: `.github/octo-sts/1/service/deploy.sts.yaml`
+uses identity `1/service/deploy`. Identities must be relative paths with no
+empty, `.` or `..` segments. `trusted-token-issuers.yaml` stays at the policy
+root, without inheritance.
+
+Git tree traversal rejects symlinks and adds API requests for deeper paths.
+Replace symlinked policies and allowlists with regular files before upgrading;
+cache expiration is unchanged. See [scan limits](docs/architecture.md#policy-scan-limits)
+for webhook and cleanup traversal bounds.
+
+CloudEvent subjects can now contain `/` within identities. Consumers should use
+structured fields: scope and identity for exchanges, repository and change for
+policy events.
+
 The value must be a relative, slash-separated path without a leading or
 trailing slash and without `.` or `..` segments. The process refuses to start
 otherwise.
@@ -745,6 +760,9 @@ should each use their own directory, so each reads, validates and
 > service and the webhook validator each read `OCTOSTS_POLICY_DIR` from their
 > own deployment config. Set it on both, or the webhook validates a different
 > directory than the exchange reads.
+> Audit existing nested policies and deploy the recursive webhook before the
+> exchange service. Updating the webhook does not validate existing files
+> retroactively.
 
 ### Org-level policies only (`OCTOSTS_ORG_POLICY_ONLY`)
 

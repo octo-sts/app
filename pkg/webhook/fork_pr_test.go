@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
@@ -54,6 +55,7 @@ func TestForkCheckSuiteUsesBasePRAndForkContent(t *testing.T) {
 			checks := 0
 			contentReads := 0
 			mux := http.NewServeMux()
+			regularPolicyFixture("renamed-fork", []string{".github/chainguard/trusted-token-issuers.yaml"}, "deadbeef").register(mux)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/app/installations/1111/access_tokens":
@@ -202,7 +204,12 @@ func TestForkCheckSuiteKeepsPushDiffClassification(t *testing.T) {
 	const path = ".github/chainguard/policy.sts.yaml"
 	checks := 0
 	contentReads := 0
+	trees := regularPolicyFixture("renamed-fork", []string{path}, "head")
 	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/git/") {
+			trees.ServeHTTP(w, r)
+			return
+		}
 		switch r.URL.Path {
 		case "/api/v3/repos/foo/renamed-fork/compare/before...head":
 			json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new(path), Status: new("modified")}}})
@@ -231,6 +238,46 @@ func TestForkCheckSuiteKeepsPushDiffClassification(t *testing.T) {
 	}))
 	v := &Validator{Transport: client}
 	_, err := v.handleCheckSuite(context.Background(), forkCheckSuiteEvent("before", "head", ".github"))
+	if err != nil || checks != 1 || contentReads != 1 {
+		t.Fatalf("err=%v posted=%d reads=%d, want one failed check and one content read", err, checks, contentReads)
+	}
+}
+
+func TestForkCheckSuiteZeroHashKeepsSnapshotClassification(t *testing.T) {
+	const path = ".github/chainguard/policy.sts.yaml"
+	trees := regularPolicyFixture("renamed-fork", []string{path}, "head")
+	checks, contentReads := 0, 0
+	client := forkCheckSuiteClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/git/") {
+			trees.ServeHTTP(w, r)
+			return
+		}
+		switch r.URL.Path {
+		case "/api/v3/repos/foo/.github/pulls/7":
+			json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("head")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(1)})
+		case "/api/v3/repos/foo/.github/pulls/7/files":
+			json.NewEncoder(w).Encode([]*github.CommitFile{{Filename: new(path), Status: new("modified")}})
+		case "/api/v3/repos/foo/renamed-fork/contents/" + path:
+			contentReads++
+			raw := "issuer: https://example.com\nsubject: s\nrepositories:\n  - app\n"
+			json.NewEncoder(w).Encode(&github.RepositoryContent{Type: new("file"), Encoding: new("base64"), Content: new(base64.StdEncoding.EncodeToString([]byte(raw)))})
+		case "/api/v3/repos/foo/renamed-fork/check-runs":
+			checks++
+			var options github.CreateCheckRunOptions
+			if err := json.NewDecoder(r.Body).Decode(&options); err != nil {
+				t.Error(err)
+			}
+			if options.GetConclusion() != "failure" {
+				t.Errorf("check conclusion = %q, want failure for snapshot's repo-level policy", options.GetConclusion())
+			}
+			json.NewEncoder(w).Encode(&github.CheckRun{})
+		default:
+			t.Errorf("unexpected API call %s %s", r.Method, r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	v := &Validator{Transport: client}
+	_, err := v.handleCheckSuite(context.Background(), forkCheckSuiteEvent(zeroHash, "head", ".github"))
 	if err != nil || checks != 1 || contentReads != 1 {
 		t.Fatalf("err=%v posted=%d reads=%d, want one failed check and one content read", err, checks, contentReads)
 	}
@@ -312,6 +359,7 @@ func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
 			event := "/api/v3/repos/foo/" + tc.eventRepo
 			base := "/api/v3/repos/" + tc.baseOwner + "/" + tc.baseRepo
 			mux := http.NewServeMux()
+			regularPolicyFixture(tc.eventRepo, []string{policyPath, allowlistPath}, "deadbeef").register(mux)
 			mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				switch r.URL.Path {
 				case "/app/installations/1111/access_tokens":
@@ -326,6 +374,8 @@ func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
 				case event + "/contents/" + allowlistPath:
 					allowlistReads++
 					json.NewEncoder(w).Encode(content(allowlist))
+				case event + "/compare/before...deadbeef":
+					json.NewEncoder(w).Encode(&github.CommitsComparison{Files: []*github.CommitFile{{Filename: new("README.md"), Status: new("modified")}}})
 				case base + "/pulls/7":
 					json.NewEncoder(w).Encode(&github.PullRequest{Head: &github.PullRequestBranch{SHA: new("deadbeef")}, Base: &github.PullRequestBranch{SHA: new("base")}, ChangedFiles: new(2)})
 				case base + "/pulls/7/files":
@@ -362,7 +412,7 @@ func TestForkCheckSuiteClassifiesByEventRepo(t *testing.T) {
 				Installation: &github.Installation{ID: new(int64(1111))},
 				Repo:         &github.Repository{Owner: &github.User{Login: new("foo")}, Name: new(tc.eventRepo), DefaultBranch: new("main")},
 				CheckSuite: &github.CheckSuite{
-					HeadSHA: new("deadbeef"), BeforeSHA: new(zeroHash), HeadBranch: new("feature"),
+					HeadSHA: new("deadbeef"), BeforeSHA: new("before"), HeadBranch: new("feature"),
 					PullRequests: []*github.PullRequest{{Number: new(7), Base: &github.PullRequestBranch{Repo: &github.Repository{URL: new("https://api.github.com/repos/" + tc.baseOwner + "/" + tc.baseRepo)}}}},
 				},
 			})

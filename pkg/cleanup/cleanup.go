@@ -30,7 +30,7 @@ var ErrHistoryTooShort = errors.New("cleanup: exchange history does not cover th
 type Policy struct {
 	// Repo is the repository name, without the owner.
 	Repo string
-	// Identity is the policy name, the file name without ".sts.yaml".
+	// Identity is the path relative to the policy directory, without ".sts.yaml".
 	Identity string
 	// LastChanged is when the policy file was last changed. The zero value
 	// means unknown, and such a policy is never removed.
@@ -38,6 +38,10 @@ type Policy struct {
 	// DefaultBranch is the branch the policy was read from, or empty if
 	// unknown.
 	DefaultBranch string
+	// SnapshotSHA is the default branch commit the policy was read from.
+	// Empty preserves compatibility with policies from other sources, but
+	// disables the publisher's stale-snapshot check.
+	SnapshotSHA string
 }
 
 // Usage summarizes the exchanges for one (scope, identity) pair.

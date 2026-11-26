@@ -1,0 +1,9 @@
+# Copyright 2024 Chainguard, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+issuer: https://token.actions.githubusercontent.com
+subject: foo
+audience: octosts
+
+permissions:
+  pull_requests: write
