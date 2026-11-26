@@ -494,7 +494,7 @@ type scopeCapturingHandler struct {
 }
 
 func (c *scopeCapturingHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.Contains(r.URL.Path, "/contents/") {
+	if strings.Contains(r.URL.Path, "/git/trees/") {
 		c.mu.Lock()
 		c.lastAuth = r.Header.Get("Authorization")
 		c.mu.Unlock()
@@ -589,14 +589,27 @@ func TestFetchOrgIssuersOnceDirectory(t *testing.T) {
 // overrides the mint endpoint still reads testdata exactly as before.
 func newOrgFakeGitHub(opts ...orgFakeGitHubOption) *fakeGitHub {
 	routes := &orgFakeGitHubRoutes{
-		mint:     defaultOrgFakeMint,
-		contents: defaultOrgFakeContents,
+		mint:       defaultOrgFakeMint,
+		contents:   defaultOrgFakeContents,
+		useFixture: true,
 	}
 	for _, opt := range opts {
 		opt(routes)
 	}
 
 	mux := http.NewServeMux()
+	if routes.useFixture {
+		fakePolicyGit(mux, func(owner, repo string) map[string]string {
+			files := map[string]string{}
+			name := filepath.Join("testdata", owner, repo, "trusted-token-issuers.yaml")
+			if b, err := os.ReadFile(name); err == nil {
+				files[OrgTrustedIssuersPath(DefaultPolicyDir)] = string(b)
+			}
+			return files
+		}, nil)
+	} else {
+		mux.HandleFunc("/repos/{org}/{repo}", routes.contents)
+	}
 	mux.HandleFunc("/app/installations", func(w http.ResponseWriter, _ *http.Request) {
 		json.NewEncoder(w).Encode([]github.Installation{{
 			ID:      new(int64(1234)),
@@ -625,8 +638,9 @@ func newOrgFakeGitHub(opts ...orgFakeGitHubOption) *fakeGitHub {
 // vary. The others (installation enumeration, the revoke route, the
 // not-implemented catch-all) are identical everywhere and stay in the builder.
 type orgFakeGitHubRoutes struct {
-	mint     http.HandlerFunc
-	contents http.HandlerFunc
+	mint       http.HandlerFunc
+	contents   http.HandlerFunc
+	useFixture bool
 }
 
 type orgFakeGitHubOption func(*orgFakeGitHubRoutes)
@@ -731,6 +745,7 @@ func withMintRateLimited() orgFakeGitHubOption {
 // policy-read tests keep testing the policy read.
 func withContentsRateLimited() orgFakeGitHubOption {
 	return func(routes *orgFakeGitHubRoutes) {
+		routes.useFixture = false
 		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			// See withMintRateLimited: the zero remaining count is what yields a
@@ -752,6 +767,7 @@ func withContentsRateLimited() orgFakeGitHubOption {
 // blindness, so it classifies as fetchFailed. The mint still succeeds.
 func withContentsServerError() orgFakeGitHubOption {
 	return func(routes *orgFakeGitHubRoutes) {
+		routes.useFixture = false
 		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadGateway)
@@ -1432,11 +1448,12 @@ func TestExchangeEnforcesOrgAllowlist(t *testing.T) {
 // re-read on every exchange would also satisfy.
 type allowlistCounter struct {
 	http.Handler
-	n atomic.Int32
+	owner string
+	n     atomic.Int32
 }
 
 func (c *allowlistCounter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if strings.HasSuffix(r.URL.Path, "/trusted-token-issuers.yaml") {
+	if r.URL.Path == "/repos/"+c.owner+"/.github" {
 		c.n.Add(1)
 	}
 	c.Handler.ServeHTTP(w, r)
@@ -1452,7 +1469,7 @@ func TestExchangeAllowlistIsCached(t *testing.T) {
 	cleanupOrgIssuers(t, "org")
 	forgetTrustPolicy(t, "org")
 
-	counter := &allowlistCounter{Handler: newFakeGitHub()}
+	counter := &allowlistCounter{Handler: newFakeGitHub(), owner: "org"}
 	atr := newAppsTransport(t, counter)
 	ctx := newExchangeContext(t)
 	s := &sts{router: routerFor(&fakeInstallMgr{atr: atr}, 1)}
@@ -1582,10 +1599,18 @@ func TestExchangeUninstalledOwnerReadsNoAllowlist(t *testing.T) {
 	cleanupOrgIssuers(t, "orgallow")
 	forgetTrustPolicy(t, "orgallow")
 
-	counter := &allowlistCounter{Handler: newFakeGitHub()}
+	counter := &allowlistCounter{Handler: newFakeGitHub(), owner: "orgallow"}
 	atr := newAppsTransport(t, counter)
 	ctx := newExchangeContext(t)
 	s := &sts{router: routerFor(&notInstalledMgr{atr: atr}, 1)}
+
+	// Prove the counter observes the same owner's actual allowlist read.
+	if got := s.fetchOrgIssuersOnce(t.Context(), atr, 1234, "orgallow"); got.kind != fetchOK || got.entry.state != orgIssuerPresent {
+		t.Fatalf("control allowlist read = %+v, want Present", got)
+	}
+	if got := counter.n.Swap(0); got != 1 {
+		t.Fatalf("control allowlist reads = %d, want 1", got)
+	}
 
 	if _, err := s.Exchange(ctx, &v1.ExchangeRequest{
 		Identity: "foo",
@@ -2067,6 +2092,7 @@ func withMintForbidden() orgFakeGitHubOption {
 // mint succeeds.
 func withContentsForbidden() orgFakeGitHubOption {
 	return func(routes *orgFakeGitHubRoutes) {
+		routes.useFixture = false
 		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
@@ -2088,6 +2114,7 @@ func withMintServerError() orgFakeGitHubOption {
 // the client sees a network error rather than any HTTP status.
 func withContentsConnectionReset() orgFakeGitHubOption {
 	return func(routes *orgFakeGitHubRoutes) {
+		routes.useFixture = false
 		routes.contents = func(w http.ResponseWriter, _ *http.Request) {
 			conn, _, err := http.NewResponseController(w).Hijack()
 			if err != nil {

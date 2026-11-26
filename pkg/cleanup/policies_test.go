@@ -21,6 +21,7 @@ import (
 )
 
 const policyDir = ".github/chainguard"
+const snapshotOID = "0123456789abcdef0123456789abcdef01234567"
 
 var changed = time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
@@ -35,7 +36,11 @@ type fakeRepo struct {
 	// gone means the repository is listed but deleted before it is queried.
 	gone    bool
 	entries []entry
-	// dates maps a file name to its last change; files missing here have no
+	// modes overrides default Git modes by policy-root-relative path.
+	modes map[string]int
+	// dirs maps paths relative to policyDir to their entries.
+	dirs map[string][]entry
+	// dates maps a relative file path to its last change; files missing here have no
 	// history.
 	dates map[string]time.Time
 	// branch is the default branch, "main" when empty.
@@ -52,6 +57,7 @@ func defaultRepos() []fakeRepo {
 			{"release.sts.yaml", "blob"},
 			{".sts.yaml", "blob"},
 		},
+		dirs:  map[string][]entry{"nested.sts.yaml": {}},
 		dates: map[string]time.Time{"deploy.sts.yaml": changed, "release.sts.yaml": changed},
 	}, {
 		owner: "acme", name: "old", archived: true,
@@ -74,9 +80,10 @@ func defaultRepos() []fakeRepo {
 }
 
 var (
-	treeAlias    = regexp.MustCompile(`(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ object\(expression: "HEAD:([^"]+)"\)`)
-	historyAlias = regexp.MustCompile(`(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ defaultBranchRef`)
-	fileAlias    = regexp.MustCompile(`(f\d+): history\(first: 1, path: "([^"]+)"\)`)
+	snapshotAlias = regexp.MustCompile(`(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ defaultBranchRef`)
+	treeAlias     = regexp.MustCompile(`(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ object\(expression: "([^"]+):([^"]+)"\)`)
+	historyAlias  = regexp.MustCompile(`(r\d+): repository\(owner: "([^"]+)", name: "([^"]+)"\) \{ object\(expression: "([^"]+)"\) \{ __typename \.\.\. on Commit`)
+	fileAlias     = regexp.MustCompile(`(f\d+): history\(first: 1, path: "([^"]+)"\)`)
 )
 
 // fakeGitHub serves the installation's repositories over REST, 100 per page,
@@ -154,10 +161,30 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 		errs = append(errs, map[string]any{"type": "NOT_FOUND", "path": []string{alias}, "message": "Could not resolve to a Repository with the name '" + repo + "'."})
 	}
 
+	for _, m := range snapshotAlias.FindAllStringSubmatch(query, -1) {
+		alias, full := m[1], m[2]+"/"+m[3]
+		r, ok := repos[full]
+		if !ok || r.gone {
+			notFound(alias, full)
+			continue
+		}
+		data[alias] = map[string]any{"defaultBranchRef": map[string]any{"name": cmp.Or(r.branch, "main"), "target": map[string]string{"__typename": "Commit", "oid": snapshotOID}}}
+	}
 	for _, m := range treeAlias.FindAllStringSubmatch(query, -1) {
-		alias, full, dir := m[1], m[2]+"/"+m[3], m[4]
+		if !strings.Contains(query, "entries { name type mode }") {
+			t.Errorf("tree query omits entry modes: %s", query)
+		}
+		alias, full, oid, dir := m[1], m[2]+"/"+m[3], m[4], m[5]
+		if oid != snapshotOID {
+			t.Errorf("tree expression for %s uses commit %s, want %s", full, oid, snapshotOID)
+		}
+		rel := ""
 		if dir != policyDir {
-			t.Errorf("tree expression for %s = HEAD:%s, want HEAD:%s", full, dir, policyDir)
+			var ok bool
+			rel, ok = strings.CutPrefix(dir, policyDir+"/")
+			if !ok {
+				t.Errorf("tree expression for %s = HEAD:%s, not under HEAD:%s", full, dir, policyDir)
+			}
 		}
 		r, ok := repos[full]
 		switch {
@@ -166,11 +193,28 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 		case r.noDir:
 			data[alias] = map[string]any{"object": nil}
 		default:
-			var entries []map[string]string
-			for _, e := range r.entries {
-				entries = append(entries, map[string]string{"name": e.name, "type": e.typ})
+			dirEntries := r.entries
+			if rel != "" {
+				var ok bool
+				dirEntries, ok = r.dirs[rel]
+				if !ok {
+					data[alias] = map[string]any{"object": nil}
+					continue
+				}
 			}
-			data[alias] = map[string]any{"object": map[string]any{"entries": entries}}
+			entries := []map[string]any{}
+			for _, e := range dirEntries {
+				mode := map[string]int{"blob": 0100644, "tree": 0040000, "commit": 0160000}[e.typ]
+				key := e.name
+				if rel != "" {
+					key = rel + "/" + e.name
+				}
+				if override, ok := r.modes[key]; ok {
+					mode = override
+				}
+				entries = append(entries, map[string]any{"name": e.name, "type": e.typ, "mode": mode})
+			}
+			data[alias] = map[string]any{"object": map[string]any{"__typename": "Tree", "entries": entries}}
 		}
 	}
 
@@ -182,6 +226,9 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 	blocks := historyAlias.FindAllStringSubmatchIndex(query, -1)
 	for i, b := range blocks {
 		alias, full := query[b[2]:b[3]], query[b[4]:b[5]]+"/"+query[b[6]:b[7]]
+		if oid := query[b[8]:b[9]]; oid != snapshotOID {
+			t.Errorf("history expression for %s uses commit %s, want %s", full, oid, snapshotOID)
+		}
 		end := len(query)
 		if i+1 < len(blocks) {
 			end = blocks[i+1][0]
@@ -191,7 +238,7 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 			notFound(alias, full)
 			continue
 		}
-		target := map[string]any{}
+		target := map[string]any{"__typename": "Commit"}
 		for _, f := range fileAlias.FindAllStringSubmatch(query[b[1]:end], -1) {
 			name, ok := strings.CutPrefix(f[2], policyDir+"/")
 			if !ok {
@@ -203,8 +250,7 @@ func answer(t *testing.T, repos map[string]fakeRepo, query string) (map[string]a
 			}
 			target[f[1]] = map[string]any{"nodes": nodes}
 		}
-		branch := cmp.Or(r.branch, "main")
-		data[alias] = map[string]any{"defaultBranchRef": map[string]any{"name": branch, "target": target}}
+		data[alias] = map[string]any{"object": target}
 	}
 	return data, errs
 }
@@ -216,17 +262,234 @@ func TestListPolicies(t *testing.T) {
 		t.Fatalf("ListPolicies() = %v", err)
 	}
 	want := []Policy{
-		{Repo: "svc", Identity: "deploy", LastChanged: changed, DefaultBranch: "main"},
-		{Repo: "svc", Identity: "release", LastChanged: changed, DefaultBranch: "main"},
-		{Repo: "fork", Identity: "upstream", LastChanged: changed, DefaultBranch: "trunk"},
-		{Repo: ".github", Identity: "octo-sts-cleanup", DefaultBranch: "main"},
+		{Repo: "svc", Identity: "deploy", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "release", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID},
+		{Repo: "fork", Identity: "upstream", LastChanged: changed, DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+		{Repo: ".github", Identity: "octo-sts-cleanup", DefaultBranch: "main", SnapshotSHA: snapshotOID},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ListPolicies() =\n%+v\nwant\n%+v", got, want)
 	}
-	// One batch: one query for the directories and one for the history.
-	if n := queries.Load(); n != 2 {
-		t.Errorf("GraphQL queries = %d, want 2", n)
+	// One query per directory level, then one for the history.
+	if n := queries.Load(); n != 4 {
+		t.Errorf("GraphQL queries = %d, want 4", n)
+	}
+}
+
+func TestListPoliciesNested(t *testing.T) {
+	repos := []fakeRepo{{
+		owner: "acme", name: "svc", branch: "trunk",
+		entries: []entry{{"deploy.sts.yaml", "blob"}, {"team", "tree"}, {"other", "tree"}, {"link", "commit"}},
+		dirs: map[string][]entry{
+			"team":                      {{"deploy.sts.yaml", "blob"}, {"deep", "tree"}, {".sts.yaml", "blob"}},
+			"team/deep":                 {{"deploy.sts.yaml", "blob"}, {"folder.sts.yaml", "tree"}},
+			"team/deep/folder.sts.yaml": {{"policy.sts.yaml", "blob"}},
+			"other":                     {{"deploy.sts.yaml", "blob"}, {"notes.yaml", "blob"}},
+		},
+		dates: map[string]time.Time{
+			"deploy.sts.yaml":                           changed,
+			"team/deploy.sts.yaml":                      changed.Add(time.Hour),
+			"team/deep/deploy.sts.yaml":                 changed.Add(2 * time.Hour),
+			"team/deep/folder.sts.yaml/policy.sts.yaml": changed.Add(3 * time.Hour),
+			"other/deploy.sts.yaml":                     changed.Add(4 * time.Hour),
+		},
+	}}
+	client, _ := fakeGitHub(t, repos, nil, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err != nil {
+		t.Fatalf("ListPolicies() = %v", err)
+	}
+	want := []Policy{
+		{Repo: "svc", Identity: "deploy", LastChanged: changed, DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "team/deploy", LastChanged: changed.Add(time.Hour), DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "other/deploy", LastChanged: changed.Add(4 * time.Hour), DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "team/deep/deploy", LastChanged: changed.Add(2 * time.Hour), DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "team/deep/folder.sts.yaml/policy", LastChanged: changed.Add(3 * time.Hour), DefaultBranch: "trunk", SnapshotSHA: snapshotOID},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListPolicies() =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+func TestListPoliciesIgnoresSymlinks(t *testing.T) {
+	repos := []fakeRepo{{
+		owner: "acme", name: "svc",
+		entries: []entry{{"normal.sts.yaml", "blob"}, {"exec.sts.yaml", "blob"}, {"link.sts.yaml", "blob"}, {"linked-dir", "blob"}, {"sub", "tree"}, {"submodule", "commit"}},
+		dirs: map[string][]entry{
+			"sub": {{"nested.sts.yaml", "blob"}, {"link.sts.yaml", "blob"}},
+			// A symlink must never be traversed even when its target has policies.
+			"linked-dir": {{"target.sts.yaml", "blob"}},
+		},
+		modes: map[string]int{"exec.sts.yaml": 0100755, "link.sts.yaml": 0120000, "linked-dir": 0120000, "sub/link.sts.yaml": 0120000},
+		dates: map[string]time.Time{"normal.sts.yaml": changed, "exec.sts.yaml": changed, "sub/nested.sts.yaml": changed},
+	}}
+	client, queries := fakeGitHub(t, repos, nil, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	want := []Policy{
+		{Repo: "svc", Identity: "normal", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "exec", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID},
+		{Repo: "svc", Identity: "sub/nested", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID},
+	}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListPolicies() = %+v, %v; want %+v", got, err, want)
+	}
+	if queries.Load() != 4 {
+		t.Errorf("queries = %d, want 4 (snapshot, root, sub, history)", queries.Load())
+	}
+}
+
+func TestListPoliciesManyDirectories(t *testing.T) {
+	r := fakeRepo{owner: "acme", name: "svc", dirs: map[string][]entry{}, dates: map[string]time.Time{}}
+	for i := range batchSize + 1 {
+		dir := fmt.Sprintf("dir-%d", i)
+		r.entries = append(r.entries, entry{dir, "tree"})
+		r.dirs[dir] = []entry{{"policy.sts.yaml", "blob"}}
+		r.dates[dir+"/policy.sts.yaml"] = changed
+	}
+	client, queries := fakeGitHub(t, []fakeRepo{r}, nil, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err != nil {
+		t.Fatalf("ListPolicies() = %v", err)
+	}
+	if len(got) != batchSize+1 {
+		t.Fatalf("ListPolicies() returned %d policies, want %d", len(got), batchSize+1)
+	}
+	for i, p := range got {
+		want := Policy{Repo: "svc", Identity: fmt.Sprintf("dir-%d/policy", i), LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID}
+		if p != want {
+			t.Fatalf("policy %d = %+v, want %+v", i, p, want)
+		}
+	}
+	if n := queries.Load(); n != 5 {
+		t.Errorf("GraphQL queries = %d, want 5", n)
+	}
+}
+
+func TestListPoliciesNestedDirectoryError(t *testing.T) {
+	repos := []fakeRepo{{owner: "acme", name: "svc", entries: []entry{{"sub", "tree"}}}}
+	byName := map[string]fakeRepo{"acme/svc": repos[0]}
+	var calls atomic.Int32
+	client, _ := fakeGitHub(t, repos, func(w http.ResponseWriter, r *http.Request) {
+		if calls.Add(1) > 2 {
+			fmt.Fprint(w, `{"data":null,"errors":[{"type":"RATE_LIMITED","message":"API rate limit exceeded"}]}`)
+			return
+		}
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		data, errs := answer(t, byName, req.Query)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
+	}, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err == nil || !strings.Contains(err.Error(), "cleanup: listing .github/chainguard in acme: graphql: API rate limit exceeded") || got != nil {
+		t.Fatalf("ListPolicies() = %v, %v; want nil and listing error", got, err)
+	}
+}
+
+func TestListPoliciesPinnedSnapshot(t *testing.T) {
+	repos := []fakeRepo{{
+		owner: "acme", name: "svc", branch: "main",
+		entries: []entry{{"team", "tree"}},
+		dirs:    map[string][]entry{"team": {{"deploy.sts.yaml", "blob"}}},
+		dates:   map[string]time.Time{"team/deploy.sts.yaml": changed},
+	}}
+	byName := map[string]fakeRepo{"acme/svc": repos[0]}
+	var calls atomic.Int32
+	client, _ := fakeGitHub(t, repos, func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		n := calls.Add(1)
+		// Simulate the default branch moving after snapshot resolution. Only
+		// the captured commit retains the original policy and its history.
+		if n > 1 && (strings.Contains(req.Query, "HEAD:") || strings.Contains(req.Query, "defaultBranchRef")) {
+			t.Errorf("query after branch moved uses live branch: %s", req.Query)
+		}
+		data, errs := answer(t, byName, req.Query)
+		_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
+	}, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	want := []Policy{{Repo: "svc", Identity: "team/deploy", LastChanged: changed, DefaultBranch: "main", SnapshotSHA: snapshotOID}}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("ListPolicies() = %+v, %v; want %+v", got, err, want)
+	}
+	if calls.Load() != 4 {
+		t.Errorf("queries = %d, want 4", calls.Load())
+	}
+}
+
+func TestListPoliciesEmptyRepository(t *testing.T) {
+	repos := []fakeRepo{{owner: "acme", name: "empty"}}
+	client, queries := fakeGitHub(t, repos, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"data":{"r0":{"defaultBranchRef":null}}}`)
+	}, false)
+	got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+	if err != nil || len(got) != 0 || queries.Load() != 1 {
+		t.Fatalf("ListPolicies() = %+v, %v; queries = %d, want no policies and one query", got, err, queries.Load())
+	}
+}
+
+func TestListPoliciesMalformedResponses(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     int32
+		response string
+		want     string
+	}{
+		{"missing snapshot alias", 1, `{"data":{}}`, "missing snapshot response"},
+		{"unexplained null snapshot", 1, `{"data":{"r0":null}}`, "malformed snapshot"},
+		{"missing snapshot field", 1, `{"data":{"r0":{}}}`, "malformed snapshot"},
+		{"invalid snapshot oid", 1, `{"data":{"r0":{"defaultBranchRef":{"name":"main","target":{"__typename":"Commit","oid":"HEAD"}}}}}`, "malformed snapshot"},
+		{"missing root alias", 2, `{"data":{}}`, "missing directory response"},
+		{"null repository", 2, `{"data":{"r0":null}}`, "missing directory response"},
+		{"missing object", 2, `{"data":{"r0":{}}}`, "malformed directory response"},
+		{"root not tree", 2, `{"data":{"r0":{"object":{"__typename":"Blob"}}}}`, "malformed directory response"},
+		{"missing entries", 2, `{"data":{"r0":{"object":{"__typename":"Tree"}}}}`, "malformed directory response"},
+		{"null entries", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":null}}}}`, "malformed directory response"},
+		{"empty entry", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"","type":"blob"}]}}}}`, "invalid directory entry"},
+		{"slash entry", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"../escape","type":"tree"}]}}}}`, "invalid directory entry"},
+		{"dot entry", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"..","type":"tree"}]}}}}`, "invalid directory entry"},
+		{"invalid type", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x","type":"other"}]}}}}`, "invalid directory entry"},
+		{"duplicate entry", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x","type":"blob","mode":33188},{"name":"x","type":"blob","mode":33188}]}}}}`, "invalid directory entry"},
+		{"missing mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob"}]}}}}`, "invalid mode"},
+		{"null mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob","mode":null}]}}}}`, "invalid mode"},
+		{"zero mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob","mode":0}]}}}}`, "invalid mode"},
+		{"string mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob","mode":"100644"}]}}}}`, "malformed directory response"},
+		{"tree with blob mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x","type":"tree","mode":33188}]}}}}`, "invalid mode"},
+		{"blob with tree mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob","mode":16384}]}}}}`, "invalid mode"},
+		{"commit with symlink mode", 2, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x","type":"commit","mode":40960}]}}}}`, "invalid mode"},
+		{"invalid nested mode", 3, `{"data":{"r0":{"object":{"__typename":"Tree","entries":[{"name":"x.sts.yaml","type":"blob","mode":33152}]}}}}`, "invalid mode"},
+		{"missing nested directory", 3, `{"data":{"r0":{"object":null}}}`, "missing nested directory"},
+		{"missing nested repository", 3, `{"data":{"r0":null}}`, "missing directory response"},
+		{"malformed nested tree", 3, `{"data":{"r0":{"object":{"__typename":"Tree","entries":null}}}}`, "malformed directory response"},
+		{"missing history object", 4, `{"data":{"r0":{"object":null}}}`, "malformed history response"},
+		{"missing history field", 4, `{"data":{"r0":{"object":{"__typename":"Commit"}}}}`, "malformed history"},
+		{"missing history nodes", 4, `{"data":{"r0":{"object":{"__typename":"Commit","f0":{}}}}}`, "malformed history"},
+	}
+	repos := []fakeRepo{{owner: "acme", name: "svc", entries: []entry{{"sub", "tree"}}, dirs: map[string][]entry{"sub": {{"p.sts.yaml", "blob"}}}, dates: map[string]time.Time{"sub/p.sts.yaml": changed}}}
+	byName := map[string]fakeRepo{"acme/svc": repos[0]}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			client, _ := fakeGitHub(t, repos, func(w http.ResponseWriter, r *http.Request) {
+				if calls.Add(1) == tt.call {
+					fmt.Fprint(w, tt.response)
+					return
+				}
+				var req struct {
+					Query string `json:"query"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				data, errs := answer(t, byName, req.Query)
+				_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
+			}, false)
+			got, err := ListPolicies(t.Context(), client, "acme", policyDir)
+			if err == nil || !strings.Contains(err.Error(), tt.want) || got != nil {
+				t.Fatalf("ListPolicies() = %+v, %v; want nil and error containing %q", got, err, tt.want)
+			}
+		})
 	}
 }
 
@@ -254,8 +517,8 @@ func TestListPoliciesBatches(t *testing.T) {
 			t.Fatalf("policy %d = %+v, want %s/p changed %v", i, p, want, changed)
 		}
 	}
-	if n := queries.Load(); n != 5 {
-		t.Errorf("GraphQL queries = %d, want 5 (three directory queries, two history queries)", n)
+	if n := queries.Load(); n != 8 {
+		t.Errorf("GraphQL queries = %d, want 8 (three snapshot queries, three directory queries, two history queries)", n)
 	}
 }
 
@@ -283,13 +546,13 @@ func TestListPoliciesManyPolicies(t *testing.T) {
 		if k >= 250 {
 			i, j = 1, k-250
 		}
-		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main"}
+		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main", SnapshotSHA: snapshotOID}
 		if p != want {
 			t.Fatalf("policy %d = %+v, want %+v", k, p, want)
 		}
 	}
-	if n := queries.Load(); n != 4 {
-		t.Errorf("GraphQL queries = %d, want 4 (one directory query, three history queries)", n)
+	if n := queries.Load(); n != 5 {
+		t.Errorf("GraphQL queries = %d, want 5 (one snapshot, one directory query, three history queries)", n)
 	}
 }
 
@@ -329,17 +592,16 @@ func TestListPoliciesErrors(t *testing.T) {
 
 func TestListPoliciesHistoryError(t *testing.T) {
 	// The directory query succeeds and the history query fails.
-	var calls atomic.Int32
 	byName := map[string]fakeRepo{}
 	for _, r := range defaultRepos() {
 		byName[r.owner+"/"+r.name] = r
 	}
 	client, _ := fakeGitHub(t, defaultRepos(), func(w http.ResponseWriter, r *http.Request) {
-		if calls.Add(1) == 1 {
-			var req struct {
-				Query string `json:"query"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&req)
+		var req struct {
+			Query string `json:"query"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if !strings.Contains(req.Query, "history(first:") {
 			data, errs := answer(t, byName, req.Query)
 			_ = json.NewEncoder(w).Encode(map[string]any{"data": data, "errors": errs})
 			return
@@ -399,13 +661,13 @@ func TestListPoliciesSplitsSlowHistory(t *testing.T) {
 		if k >= 250 {
 			i, j = 1, k-250
 		}
-		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main"}
+		want := Policy{Repo: repos[i].name, Identity: fmt.Sprintf("p%03d", j), LastChanged: changed.Add(time.Duration(i*1000+j) * time.Minute), DefaultBranch: "main", SnapshotSHA: snapshotOID}
 		if p != want {
 			t.Fatalf("policy %d = %+v, want %+v", k, p, want)
 		}
 	}
-	if n := queries.Load(); n != 22 {
-		t.Errorf("GraphQL queries = %d, want 22 (one directory query, 21 history queries)", n)
+	if n := queries.Load(); n != 23 {
+		t.Errorf("GraphQL queries = %d, want 23 (one snapshot, one directory query, 21 history queries)", n)
 	}
 }
 

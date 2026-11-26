@@ -360,11 +360,10 @@ func (s *sts) Exchange(ctx context.Context, request *pboidc.ExchangeRequest) (_ 
 	if request.GetIdentity() == "" {
 		return nil, status.Error(codes.InvalidArgument, "identity must be provided")
 	}
-	// The identity is interpolated into the policy path, so restrict it to a
-	// single path segment. Otherwise a value with "/" resolves to a nested file
-	// the webhook glob never validates, and ".."/"." could traverse the repo.
+	// The identity is interpolated into the policy path; reject non-canonical
+	// paths so it cannot escape the policy directory.
 	if !oidcvalidate.IsValidIdentity(request.GetIdentity()) {
-		return nil, status.Error(codes.InvalidArgument, "identity must be a single path segment")
+		return nil, status.Error(codes.InvalidArgument, "identity must be a relative path without empty, dot, or dot-dot segments")
 	}
 
 	// Check the token against the federation rules. The trust policy may live
@@ -1553,7 +1552,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "creating GitHub client: %v", err)
 	}
-	// GetContents can fail transiently (a 5xx, a network blip, or a token-mint
+	// Git reads can fail transiently (a 5xx, a network blip, or a token-mint
 	// error). Those must not be reported as NotFound, which masks the real cause
 	// and offers no retry. Retry the transient class same-app with a short
 	// backoff, sitting below the fleet rotation in lookupTrustPolicyWithRetry,
@@ -1564,7 +1563,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 	// re-read twice, as GitHub can briefly 404 on a newly minted token (see
 	// notFoundRereadDelays).
 	read := func() (*github.RepositoryContent, error) {
-		// GetContents would mint through this same transport. Acquire explicitly
+		// Git reads would mint through this same transport. Acquire explicitly
 		// so revocation knows which token to use even if the read times out.
 		// The transport caches the token, so retries reuse it rather than
 		// minting another.
@@ -1573,12 +1572,8 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			return nil, err
 		}
 		mintedToken = tok
-		file, _, _, err := client.Repositories.GetContents(ctx,
-			tpKey.owner, tpKey.repo,
-			path.Join(s.policyDirectory(), tpKey.identity+".sts.yaml"),
-			&github.RepositoryContentGetOptions{},
-		)
-		return file, err
+		return readRegularPolicy(ctx, client, tpKey.owner, tpKey.repo,
+			path.Join(s.policyDirectory(), tpKey.identity+".sts.yaml"))
 	}
 	// sawNotFound records that GitHub answered 404 earlier in this fetch. It
 	// limits the re-reads to one round per fetch (if a re-read fails
@@ -1594,8 +1589,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 		}
 		if err == nil {
 			if file == nil {
-				// GetContents returns a nil file when the path is a directory;
-				// GetContent would panic on it. Treat it as no policy.
+				// Unsafe or incomplete Git path: never follow it or serve stale.
 				clog.InfoContextf(ctx, "trust policy path is not a file for %s", tpKey)
 				staleTrustPolicies.Remove(tpKey)
 				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
@@ -1604,7 +1598,7 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			if rerr != nil {
 				clog.ErrorContextf(ctx, "failed to read trust policy: %v", rerr)
 				staleTrustPolicies.Remove(tpKey)
-				return "", backoff.Permanent(status.Errorf(codes.NotFound, "unable to find trust policy for %q", tpKey.identity))
+				return "", backoff.Permanent(status.Errorf(codes.Unavailable, "unable to decode trust policy for %q", tpKey.identity))
 			}
 			// Populate the caches on the fresh-fetch path only. The stale-serve
 			// branch below must not reach here, or it would renew the stale
@@ -1617,6 +1611,10 @@ func (s *sts) fetchTrustPolicyRawUncached(ctx context.Context, base *ghinstallat
 			return raw, nil
 		}
 		clog.InfoContextf(ctx, "failed to find trust policy: %v", err)
+		if errors.Is(err, errUnsafePolicyPath) {
+			staleTrustPolicies.Remove(tpKey)
+			return "", backoff.Permanent(status.Errorf(codes.Unavailable, "unsafe or incomplete trust policy path for %q", tpKey.identity))
+		}
 
 		// The read's own deadline passed; propagate rather than retry or mask.
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

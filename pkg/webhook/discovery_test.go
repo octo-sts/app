@@ -194,6 +194,40 @@ func TestPolicyTreeSnapshotRejectsTruncatedTree(t *testing.T) {
 	}
 }
 
+func TestHasPoliciesRejectsTruncatedTree(t *testing.T) {
+	for _, truncated := range []string{"root", "github", "policy", "nested"} {
+		t.Run(truncated, func(t *testing.T) {
+			client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/v3/repos/o/r/git/commits/head" {
+					fmt.Fprint(w, `{"tree":{"sha":"root"}}`)
+					return
+				}
+				sha := strings.TrimPrefix(r.URL.Path, "/api/v3/repos/o/r/git/trees/")
+				var entries []*github.TreeEntry
+				switch sha {
+				case "root":
+					entries = []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), Mode: new("040000"), SHA: new("github")}}
+				case "github":
+					entries = []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), Mode: new("040000"), SHA: new("policy")}}
+				case "policy":
+					entries = []*github.TreeEntry{{Path: new("visible.sts.yaml"), Type: new("blob"), Mode: new("100644"), SHA: new("blob")}, {Path: new("nested"), Type: new("tree"), Mode: new("040000"), SHA: new("nested")}}
+				case "nested":
+					entries = []*github.TreeEntry{{Path: new("hidden.sts.yaml"), Type: new("blob"), Mode: new("100644"), SHA: new("blob")}}
+				default:
+					t.Errorf("unexpected request %s", r.URL)
+					http.NotFound(w, r)
+					return
+				}
+				json.NewEncoder(w).Encode(map[string]any{"tree": entries, "truncated": sha == truncated})
+			}))
+			has, err := (&Validator{}).hasPolicies(context.Background(), client, "o", "r", "head")
+			if has || err == nil || !strings.Contains(err.Error(), "truncated") {
+				t.Fatalf("hasPolicies = %v, error = %v, want false and truncated error", has, err)
+			}
+		})
+	}
+}
+
 func TestPolicyTreeSnapshotFileNamedGithubHasNoPolicies(t *testing.T) {
 	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -223,7 +257,11 @@ func TestPolicyTreeSnapshotAndHasPoliciesMultiSegmentPolicyDir(t *testing.T) {
 		return map[string]any{"sha": "x", "tree": entries, "truncated": false}
 	}
 	entry := func(path, typ, sha string) *github.TreeEntry {
-		return &github.TreeEntry{Path: new(path), Type: new(typ), SHA: new(sha)}
+		mode := "100644"
+		if typ == "tree" {
+			mode = "040000"
+		}
+		return &github.TreeEntry{Path: new(path), Type: new(typ), SHA: new(sha), Mode: new(mode)}
 	}
 	client := discoveryClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body any
@@ -246,6 +284,8 @@ func TestPolicyTreeSnapshotAndHasPoliciesMultiSegmentPolicyDir(t *testing.T) {
 				// Only the org policy repository validates the allowlist.
 				entry("trusted-token-issuers.yaml", "blob", "sha-allowlist"),
 			)
+		case "/api/v3/repos/o/r/git/trees/nested":
+			body = tree(entry("deep.sts.yaml", "blob", "sha-deep"))
 		case "/api/v3/repos/o/r/contents/" + dir:
 			if r.URL.Query().Get("ref") != "head" {
 				t.Errorf("policy probe ref = %q, want head", r.URL.Query().Get("ref"))
@@ -268,8 +308,9 @@ func TestPolicyTreeSnapshotAndHasPoliciesMultiSegmentPolicyDir(t *testing.T) {
 		t.Fatalf("policyTreeSnapshot: %v", err)
 	}
 	want := map[string]string{
-		dir + "/foo.sts.yaml": "sha-foo",
-		dir + "/bar.sts.yaml": "sha-bar",
+		dir + "/foo.sts.yaml":         "sha-foo",
+		dir + "/bar.sts.yaml":         "sha-bar",
+		dir + "/nested/deep.sts.yaml": "sha-deep",
 	}
 	if len(files) != len(want) {
 		t.Fatalf("policyTreeSnapshot = %v, want %v", files, want)
@@ -308,14 +349,14 @@ func TestCompleteCompareChangesAtFileCap(t *testing.T) {
 					json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new(ref + "-root")}})
 				case "/api/v3/repos/o/r/git/trees/before-root", "/api/v3/repos/o/r/git/trees/after-root":
 					ref := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/repos/o/r/git/trees/"), "-root")
-					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), SHA: new(ref + "-github")}}})
+					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), Mode: new("040000"), SHA: new(ref + "-github")}}})
 				case "/api/v3/repos/o/r/git/trees/before-github", "/api/v3/repos/o/r/git/trees/after-github":
 					ref := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v3/repos/o/r/git/trees/"), "-github")
-					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), SHA: new(ref + "-policy")}}})
+					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), Mode: new("040000"), SHA: new(ref + "-policy")}}})
 				case "/api/v3/repos/o/r/git/trees/before-policy":
 					fmt.Fprint(w, `{"tree":[],"truncated":false}`)
 				case "/api/v3/repos/o/r/git/trees/after-policy":
-					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("snapshot.sts.yaml"), Type: new("blob"), SHA: new("blob")}}})
+					json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("snapshot.sts.yaml"), Type: new("blob"), Mode: new("100644"), SHA: new("blob")}}})
 				default:
 					t.Errorf("unexpected request %s", r.URL)
 					http.NotFound(w, r)
@@ -540,10 +581,10 @@ func TestNewRefPushAtPayloadLimit(t *testing.T) {
 				json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new("tree")}})
 			})
 			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/tree", func(w http.ResponseWriter, r *http.Request) {
-				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), SHA: new("github-tree")}}})
+				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), Mode: new("040000"), SHA: new("github-tree")}}})
 			})
 			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/github-tree", func(w http.ResponseWriter, r *http.Request) {
-				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), SHA: new("policy-tree")}}})
+				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), Mode: new("040000"), SHA: new("policy-tree")}}})
 			})
 			mux.HandleFunc("GET /api/v3/repos/foo/bar/git/trees/policy-tree", func(w http.ResponseWriter, r *http.Request) {
 				if tc.status != http.StatusOK {
@@ -557,7 +598,7 @@ func TestNewRefPushAtPayloadLimit(t *testing.T) {
 				entries := make([]*github.TreeEntry, len(tc.entries))
 				for i, entry := range tc.entries {
 					name := strings.TrimPrefix(entry.GetPath(), ".github/chainguard/")
-					entries[i] = &github.TreeEntry{Path: &name, Type: entry.Type, SHA: entry.SHA}
+					entries[i] = &github.TreeEntry{Path: &name, Type: entry.Type, SHA: entry.SHA, Mode: new("100644")}
 				}
 				json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: entries})
 			})
@@ -666,9 +707,9 @@ func serveLargePRPolicyTree(w http.ResponseWriter, r *http.Request, base string,
 	case base + "/git/commits/head":
 		json.NewEncoder(w).Encode(&github.Commit{Tree: &github.Tree{SHA: new("root")}})
 	case base + "/git/trees/root":
-		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), SHA: new("github-tree")}}})
+		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new(".github"), Type: new("tree"), Mode: new("040000"), SHA: new("github-tree")}}})
 	case base + "/git/trees/github-tree":
-		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), SHA: new("policy-tree")}}})
+		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(false), Entries: []*github.TreeEntry{{Path: new("chainguard"), Type: new("tree"), Mode: new("040000"), SHA: new("policy-tree")}}})
 	case base + "/git/trees/policy-tree":
 		if policyStatus != http.StatusOK {
 			w.WriteHeader(policyStatus)
@@ -676,7 +717,7 @@ func serveLargePRPolicyTree(w http.ResponseWriter, r *http.Request, base string,
 		}
 		entries := make([]*github.TreeEntry, 0, len(names))
 		for _, name := range names {
-			entries = append(entries, &github.TreeEntry{Path: new(name), Type: new("blob"), SHA: new("blob-" + name)})
+			entries = append(entries, &github.TreeEntry{Path: new(name), Type: new("blob"), Mode: new("100644"), SHA: new("blob-" + name)})
 		}
 		json.NewEncoder(w).Encode(&github.Tree{Truncated: new(truncated), Entries: entries})
 	default:

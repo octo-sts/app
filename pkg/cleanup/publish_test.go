@@ -51,6 +51,7 @@ type fakeOrg struct {
 	items []item
 	// commits maps a commit to its tree; trees maps a tree to its files.
 	commits map[string]string
+	parents map[string][]string
 	trees   map[string][]string
 	// incomplete makes search report incomplete results.
 	incomplete bool
@@ -59,12 +60,16 @@ type fakeOrg struct {
 	queries []string
 	writes  []string
 	// repoGets counts repository lookups.
-	repoGets int
-	next     int
+	repoGets   int
+	branchGets int
+	// advanceOnBranchGet simulates the base moving just before a branch read.
+	advanceOnBranchGet int
+	failBranchGet      int
+	next               int
 }
 
 func newFakeOrg(t *testing.T) *fakeOrg {
-	return &fakeOrg{t: t, repos: map[string]*pubRepo{}, commits: map[string]string{}, trees: map[string][]string{}, next: 100}
+	return &fakeOrg{t: t, repos: map[string]*pubRepo{}, commits: map[string]string{}, parents: map[string][]string{}, trees: map[string][]string{}, next: 100}
 }
 
 // addRepo adds a repository whose default branch holds files.
@@ -183,6 +188,14 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"name": name, "default_branch": repo.defaultBranch})
 
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "branches/"):
+		f.branchGets++
+		if f.branchGets == f.failBranchGet {
+			http.Error(w, `{"message":"boom"}`, http.StatusInternalServerError)
+			return
+		}
+		if f.branchGets == f.advanceOnBranchGet {
+			repo.branches[repo.defaultBranch] = f.commit(name, append(slices.Clone(repo.files), "moved.go"))
+		}
 		sha := repo.branches[strings.TrimPrefix(rest, "branches/")]
 		reply(map[string]any{"commit": map[string]any{"sha": sha, "commit": map[string]any{"tree": map[string]any{"sha": f.commits[sha]}}}})
 
@@ -214,7 +227,12 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 		reply(map[string]any{"ref": "refs/heads/" + b, "object": map[string]any{"sha": sha}})
 
 	case r.Method == http.MethodGet && strings.HasPrefix(rest, "git/commits/"):
-		reply(map[string]any{"tree": map[string]any{"sha": f.commits[strings.TrimPrefix(rest, "git/commits/")]}})
+		sha := strings.TrimPrefix(rest, "git/commits/")
+		parents := []map[string]string{}
+		for _, parent := range f.parents[sha] {
+			parents = append(parents, map[string]string{"sha": parent})
+		}
+		reply(map[string]any{"tree": map[string]any{"sha": f.commits[sha]}, "parents": parents})
 
 	case r.Method == http.MethodPost && rest == "git/commits":
 		parents, _ := body["parents"].([]any)
@@ -226,6 +244,9 @@ func (f *fakeOrg) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		sha := fmt.Sprintf("commit-%s-%d", name, len(f.commits))
 		f.commits[sha] = str("tree")
+		for _, parent := range parents {
+			f.parents[sha] = append(f.parents[sha], parent.(string))
+		}
 		write("commit " + str("message"))
 		reply(map[string]any{"sha": sha})
 
@@ -294,6 +315,205 @@ func pol(repo, identity string) Policy {
 }
 
 func file(identity string) string { return policyDir + "/" + identity + ".sts.yaml" }
+
+func snapshotPolicy(f *fakeOrg, repo, identity string) Policy {
+	p := pol(repo, identity)
+	p.SnapshotSHA = f.repos[repo].branches["main"]
+	return p
+}
+
+func TestPublishSnapshotGuard(t *testing.T) {
+	for _, identity := range []string{"deploy", "team/deploy"} {
+		for _, advance := range []int{1, 2, 3} {
+			t.Run(fmt.Sprintf("%s/branch-read-%d", identity, advance), func(t *testing.T) {
+				f := newFakeOrg(t)
+				f.addRepo("svc", file(identity))
+				policy := snapshotPolicy(f, "svc", identity)
+				f.advanceOnBranchGet = advance
+				plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{policy}}}}
+				err := publisher(f.client()).Publish(t.Context(), plan)
+				if err == nil || !strings.Contains(err.Error(), "branch main changed since policy snapshot") {
+					t.Fatalf("Publish() = %v, want stale snapshot error", err)
+				}
+				for _, write := range f.writes {
+					if strings.Contains(write, "open pull") || advance < 3 && (strings.Contains(write, "create ref") || strings.Contains(write, "force-push")) {
+						t.Errorf("unexpected write after branch moved: %q", write)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestPublishSnapshotConsistency(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Policy)
+	}{
+		{"different commit", func(p *Policy) { p.SnapshotSHA = "different" }},
+		{"missing commit", func(p *Policy) { p.SnapshotSHA = "" }},
+		{"different branch", func(p *Policy) { p.DefaultBranch = "other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeOrg(t)
+			f.addRepo("svc", file("deploy"), file("team/deploy"))
+			a, b := snapshotPolicy(f, "svc", "deploy"), snapshotPolicy(f, "svc", "team/deploy")
+			tc.mutate(&b)
+			plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{a, b}}}}
+			err := publisher(f.client()).Publish(t.Context(), plan)
+			if err == nil || !strings.Contains(err.Error(), "inconsistent policy snapshots") || len(f.writes) != 0 {
+				t.Fatalf("Publish() = %v; writes %v, want inconsistent snapshots and no writes", err, f.writes)
+			}
+		})
+	}
+}
+
+func TestPublishStaleSnapshotClosesExistingPullRequest(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	policy := snapshotPolicy(f, "svc", "deploy")
+	f.items = []item{{repo: "svc", number: 1, title: PullTitle, body: "existing", pull: true, bot: true}}
+	f.advanceOnBranchGet = 1
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{policy}}}}
+	err := publisher(f.client()).Publish(t.Context(), plan)
+	if err == nil || !strings.Contains(err.Error(), "changed since policy snapshot") || !reflect.DeepEqual(f.writes, []string{"svc: close #1 ", "svc: comment #1"}) || len(f.items) != 0 {
+		t.Fatalf("Publish() = %v; writes %v; items %+v", err, f.writes, f.items)
+	}
+}
+
+func TestPublishInvalidatesPullOnSnapshotFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		advance   int
+		failRead  int
+		fail      string
+		wantErr   string
+		wantClose bool
+	}{
+		{"drift after push", 3, 0, "", "changed since policy snapshot", true},
+		{"read failure after push", 0, 3, "", "getting branch main", true},
+		{"close failure", 3, 0, "PATCH /repos/acme/svc/issues/1", "closing potentially stale pull request", false},
+		{"comment failure", 3, 0, "POST /repos/acme/svc/issues/1/comments", "explaining closure", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeOrg(t)
+			f.addRepo("svc", file("team/deploy"))
+			policy := snapshotPolicy(f, "svc", "team/deploy")
+			f.repos["svc"].branches[branch] = f.repos["svc"].branches["main"]
+			f.items = []item{{repo: "svc", number: 1, title: PullTitle, pull: true, bot: true}}
+			f.advanceOnBranchGet, f.failBranchGet, f.fail = tc.advance, tc.failRead, tc.fail
+			plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{policy}}}}
+			err := publisher(f.client()).Publish(t.Context(), plan)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Publish() = %v, want %q", err, tc.wantErr)
+			}
+			if (len(f.items) == 0) != tc.wantClose {
+				t.Errorf("items = %+v, want closed %t", f.items, tc.wantClose)
+			}
+			if !slices.Contains(f.writes, "svc: force-push "+branch) {
+				t.Errorf("writes = %v; want force-push before failure", f.writes)
+			}
+			if tc.name == "close failure" && !strings.Contains(err.Error(), "changed since policy snapshot") {
+				t.Errorf("error lost snapshot failure: %v", err)
+			}
+		})
+	}
+}
+
+func TestPublishClosesNewPullOnPostCreateDrift(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	policy := snapshotPolicy(f, "svc", "deploy")
+	f.advanceOnBranchGet = 4
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{policy}}}}
+	err := publisher(f.client()).Publish(t.Context(), plan)
+	if err == nil || !strings.Contains(err.Error(), "changed since policy snapshot") || len(f.items) != 0 || !slices.Contains(f.writes, "svc: close #101 ") {
+		t.Fatalf("Publish() = %v; items %v; writes %v", err, f.items, f.writes)
+	}
+}
+
+func TestPublishClosesReusedPullOnDrift(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	pub := publisher(f.client())
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{snapshotPolicy(f, "svc", "deploy")}}}}
+	if err := pub.Publish(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	f.writes = nil
+	f.advanceOnBranchGet = f.branchGets + 2 // Reused ref: initial and post-ref checks.
+	err := pub.Publish(t.Context(), plan)
+	if err == nil || !strings.Contains(err.Error(), "changed since policy snapshot") || len(f.items) != 0 {
+		t.Fatalf("Publish() = %v; items %v; writes %v", err, f.items, f.writes)
+	}
+	if !reflect.DeepEqual(f.writes, []string{"svc: close #101 ", "svc: comment #101"}) {
+		t.Errorf("writes = %v; want closure without ref update", f.writes)
+	}
+}
+
+func TestPublishClosesExistingPullOnUncertainPush(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	policy := snapshotPolicy(f, "svc", "deploy")
+	f.repos["svc"].branches[branch] = f.repos["svc"].branches["main"]
+	f.items = []item{{repo: "svc", number: 1, title: PullTitle, pull: true, bot: true}}
+	f.fail = "PATCH /repos/acme/svc/git/refs/heads/"
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{policy}}}}
+	err := publisher(f.client()).Publish(t.Context(), plan)
+	if err == nil || !strings.Contains(err.Error(), "pushing heads/") || len(f.items) != 0 || !slices.Contains(f.writes, "svc: close #1 ") {
+		t.Fatalf("Publish() = %v; items %v; writes %v", err, f.items, f.writes)
+	}
+}
+
+func TestPublishLegacyPolicyWithoutSnapshot(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "deploy")}}}}
+	if err := publisher(f.client()).Publish(t.Context(), plan); err != nil {
+		t.Fatalf("Publish() = %v", err)
+	}
+	if f.branchGets != 1 || len(f.items) != 1 {
+		t.Fatalf("branch reads = %d, items = %v; want one read and one PR", f.branchGets, f.items)
+	}
+}
+
+func TestPublishSnapshotReusesMatchingParent(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"))
+	pub := publisher(f.client())
+	plan := Plan{Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{snapshotPolicy(f, "svc", "deploy")}}}}
+	if err := pub.Publish(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	f.writes = nil
+	if err := pub.Publish(t.Context(), plan); err != nil || len(f.writes) != 0 {
+		t.Fatalf("second Publish() = %v; writes %v, want none", err, f.writes)
+	}
+	// An identical tree rooted at another commit must not be reused.
+	f.parents[f.repos["svc"].branches[branch]] = []string{"other"}
+	if err := pub.Publish(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.writes) != 2 || !strings.Contains(f.writes[1], "force-push") {
+		t.Fatalf("writes = %v, want new commit and force-push", f.writes)
+	}
+}
+
+func TestPublishNestedPolicy(t *testing.T) {
+	f := newFakeOrg(t)
+	f.addRepo("svc", file("deploy"), file("team/deploy"), file("team/deep/keep"))
+	pub := publisher(f.client())
+	plan := Plan{WindowStart: since, Window: DefaultWindow, Repos: []RepoPlan{{Repo: "svc", Remove: []Policy{pol("svc", "team/deploy")}}}}
+	if err := pub.Publish(t.Context(), plan); err != nil {
+		t.Fatalf("Publish() = %v", err)
+	}
+	if got, want := f.filesOn("svc", branch), []string{file("deploy"), file("team/deep/keep")}; !reflect.DeepEqual(got, want) {
+		t.Errorf("files on %s = %v, want %v", branch, got, want)
+	}
+	if !strings.Contains(f.items[0].body, "`"+file("team/deploy")+"`") {
+		t.Errorf("pull request body does not contain nested path: %s", f.items[0].body)
+	}
+}
 
 func TestPublishOpensPullRequest(t *testing.T) {
 	f := newFakeOrg(t)

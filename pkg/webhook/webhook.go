@@ -12,7 +12,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
-	"path/filepath"
+	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -163,19 +163,18 @@ type PolicyEvent struct {
 // policy because "." cannot appear in a *.sts.yaml basename stem here.
 const OrgTrustedIssuersPolicyName = ".trusted-token-issuers"
 
-// policyName extracts the policy identity from a validated path:
-// ".github/chainguard/foo.sts.yaml" -> "foo".
-func policyName(path string) string {
-	base := filepath.Base(path)
-	stem, found := strings.CutSuffix(base, ".sts.yaml")
+// policyName extracts the identity relative to the configured policy directory.
+func policyName(filePath, policyDir string) string {
+	rel := strings.TrimPrefix(filePath, policyDir+"/")
+	stem, found := strings.CutSuffix(rel, ".sts.yaml")
 	if !found {
 		return OrgTrustedIssuersPolicyName
 	}
-	if stem == "" {
+	if stem == "" || strings.HasSuffix(stem, "/") {
 		// A literal ".sts.yaml" matches the glob octo-sts validates but leaves
 		// no stem, which would degenerate the event subject to "org/repo/".
 		// Fall back to the filename so the subject stays well-formed.
-		return base
+		return rel
 	}
 	return stem
 }
@@ -206,7 +205,7 @@ func (e *Validator) policyChangesFromPushEvent(repo string, event *github.PushEv
 	for path, action := range byPath {
 		changes = append(changes, PolicyChange{
 			Path:   path,
-			Policy: policyName(path),
+			Policy: policyName(path, e.policyDir()),
 			Action: action,
 		})
 	}
@@ -234,7 +233,7 @@ func (e *Validator) policyChangesFromCompare(ctx context.Context, repo string, f
 		}
 		changes = append(changes, PolicyChange{
 			Path:   path,
-			Policy: policyName(path),
+			Policy: policyName(path, e.policyDir()),
 			Action: action,
 		})
 	}
@@ -303,7 +302,7 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 
 	var changes []PolicyChange //nolint:prealloc // most pushes change no policies
 	add := func(path string, action PolicyAction) {
-		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: action})
+		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path, e.policyDir()), Action: action})
 	}
 	for path, sha := range afterSnap {
 		switch prev, existed := beforeSnap[path]; {
@@ -330,10 +329,10 @@ func (e *Validator) policyChangesFromSnapshot(ctx context.Context, client *githu
 // in force at this commit" — enough to keep the check-run gate and to put a
 // per-policy record in the stream, instead of only a content-free marker that
 // says a rewind happened and nothing about what it left behind.
-func policiesPresent(snap map[string]string) []PolicyChange {
+func (e *Validator) policiesPresent(snap map[string]string) []PolicyChange {
 	changes := make([]PolicyChange, 0, len(snap))
 	for path := range snap {
-		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path), Action: PolicyPresent})
+		changes = append(changes, PolicyChange{Path: path, Policy: policyName(path, e.policyDir()), Action: PolicyPresent})
 	}
 	sort.Slice(changes, func(i, j int) bool { return changes[i].Path < changes[j].Path })
 	return changes
@@ -792,11 +791,23 @@ func validatePolicyFiles(ctx context.Context, client *github.Client, owner, read
 		return ordered[i].path < ordered[j].path
 	})
 	contents := make(map[string]string, len(ordered))
+	verifier := &policyPathVerifier{client: client, owner: owner, repo: readRepo, ref: sha}
 	for _, file := range ordered {
 		f := file.path
 		log := clog.FromContext(ctx).With("path", f)
 		raw, cached := contents[f]
 		if !cached {
+			if !isValidatedPath(file.repo, f, orgPolicyRepo, policyDir) {
+				fail(f, fmt.Errorf("%s: invalid policy path", f))
+				continue
+			}
+			if err := verifier.verify(ctx, f); err != nil {
+				if installationToken403(err) != nil || isProvenWebhookRateLimit(err) {
+					return results, fmt.Errorf("%s: %w", f, err)
+				}
+				fail(f, fmt.Errorf("%s: verifying Git path: %w", f, err))
+				continue
+			}
 			resp, _, _, err := client.Repositories.GetContents(ctx, owner, readRepo, f, &github.RepositoryContentGetOptions{Ref: sha})
 			if err != nil {
 				if installationToken403(err) != nil {
@@ -957,6 +968,8 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	// is recorded as degraded and the error goes back to ServeHTTP once the
 	// audit emit is registered, so the gap stays visible in the audit trail.
 	var tokenErr error
+	// An incomplete recursive live snapshot must not validate a partial payload.
+	var snapshotIncompleteErr error
 
 	// The forced-push fallbacks below call policyChangesFromPushEvent directly,
 	// not payloadChanges: they run with any commit count, and a truncated commit
@@ -965,11 +978,15 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	case event.GetForced() && isDefaultBranch:
 		snapshot, live, serr := e.policyChangesFromSnapshot(ctx, client, owner, repo, event.GetBefore(), sha)
 		if serr != nil {
+			if errors.Is(serr, errPolicySnapshotIncomplete) && live == nil && installationToken403(serr) == nil && !isProvenWebhookRateLimit(serr) {
+				detection, detectionErr, snapshotIncompleteErr = DetectionDegraded, serr.Error(), serr
+				break
+			}
 			if installationToken403(serr) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, serr.Error(), serr
 				changes = e.policyChangesFromPushEvent(repo, event)
 				if live != nil {
-					changes = policiesPresent(live)
+					changes = e.policiesPresent(live)
 				}
 				break
 			}
@@ -990,7 +1007,7 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 			// leave the resurfaced policy unvalidated and unrecorded, the very
 			// gap the snapshot path exists to close.
 			if live != nil {
-				changes = policiesPresent(live)
+				changes = e.policiesPresent(live)
 				break
 			}
 			changes = e.policyChangesFromPushEvent(repo, event)
@@ -1006,6 +1023,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	case event.GetBefore() == zeroHash:
 		changes, err = e.policyChangesFromTrees(ctx, client, owner, repo, zeroHash, sha)
 		if err != nil {
+			if errors.Is(err, errPolicySnapshotLimit) {
+				detection, detectionErr, snapshotIncompleteErr = DetectionDegraded, err.Error(), err
+				break
+			}
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
 				break
@@ -1048,6 +1069,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 			detection, detectionErr = DetectionDegraded, err.Error()
 			live, serr := e.policyTreeSnapshot(ctx, client, owner, repo, sha)
 			if serr != nil {
+				if errors.Is(serr, errPolicySnapshotLimit) {
+					detectionErr, snapshotIncompleteErr = serr.Error(), serr
+					break
+				}
 				if installationToken403(serr) != nil {
 					detectionErr, tokenErr = serr.Error(), serr
 					break
@@ -1058,11 +1083,25 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 				}
 				return nil, serr
 			}
-			changes = policiesPresent(live)
+			changes = e.policiesPresent(live)
 			break
 		}
 		changes, detection, err = e.completeCompareChanges(ctx, client, owner, repo, event.GetBefore(), sha, resp)
 		if err != nil {
+			if errors.Is(err, errPolicySnapshotIncomplete) {
+				detection, detectionErr = DetectionDegraded, err.Error()
+				var beforeIncomplete *snapshotBeforeIncompleteError
+				if installationToken403(err) != nil {
+					tokenErr = err
+				} else if isProvenWebhookRateLimit(err) {
+					// Do not validate a partial payload or issue more reads.
+				} else if errors.As(err, &beforeIncomplete) {
+					changes = e.policiesPresent(beforeIncomplete.live)
+				} else {
+					snapshotIncompleteErr = err
+				}
+				break
+			}
 			if installationToken403(err) != nil {
 				detection, detectionErr, tokenErr = DetectionDegraded, err.Error(), err
 				changes = payloadChanges
@@ -1100,6 +1139,10 @@ func (e *Validator) handlePush(ctx context.Context, event *github.PushEvent) (ch
 	if tokenErr != nil {
 		outcome = validationOutcome{incomplete: tokenErr}
 		return nil, tokenErr
+	}
+	if snapshotIncompleteErr != nil {
+		outcome = validationOutcome{incomplete: snapshotIncompleteErr}
+		return nil, snapshotIncompleteErr
 	}
 
 	// Deletions leave nothing to read at the head SHA, so a push that only
@@ -1515,36 +1558,15 @@ func (e *Validator) postNoPolicyChangesCheckRun(ctx context.Context, client *git
 	return cr, nil
 }
 
-// contentsListingCap is the most entries the Contents API returns for a
-// directory. It truncates past that without saying so.
+// contentsListingCap is GitHub's maximum Contents directory listing size.
 const contentsListingCap = 1000
 
 // hasPolicies reports whether the policy directory at sha holds at least one
-// file octo-sts validates. A 404 means the directory does not exist.
-//
-// This is a single Contents call rather than the tree walk policyTreeSnapshot
-// does, because it only decides whether a no-change success is worth posting,
-// not what to validate. A listing at the Contents cap may hide policies past
-// it, so it counts as having policies: posting the no-change run is truthful
-// either way, while wrongly skipping it would leave a required check missing.
+// file octo-sts validates. Git trees avoid Contents dereferencing symlinks and
+// silently truncating directory listings.
 func (e *Validator) hasPolicies(ctx context.Context, client *github.Client, owner, repo, sha string) (bool, error) {
-	policyDir := e.policyDir()
-	_, dir, resp, err := client.Repositories.GetContents(ctx, owner, repo, policyDir, &github.RepositoryContentGetOptions{Ref: sha})
-	if err != nil {
-		if resp != nil && resp.StatusCode == http.StatusNotFound {
-			return false, nil
-		}
-		return false, fmt.Errorf("listing %s at %s: %w", policyDir, sha, err)
-	}
-	if len(dir) >= contentsListingCap {
-		return true, nil
-	}
-	for _, f := range dir {
-		if f.GetType() == "file" && isValidatedPath(repo, f.GetPath(), e.policyRepo(), policyDir) {
-			return true, nil
-		}
-	}
-	return false, nil
+	files, err := e.policyTreeSnapshot(ctx, client, owner, repo, sha)
+	return len(files) > 0, err
 }
 
 type fauxCheckSuite struct {
@@ -1572,17 +1594,21 @@ func (e *Validator) shouldSkipOrganization(org string) bool {
 // isValidatedPath reports whether octo-sts validates the given file. Trust
 // policies are validated in every repository; the organization trusted-issuer
 // allowlist only in the organization's org policy repository (orgPolicyRepo).
-// Both must sit directly in policyDir.
+// Trust policies may be nested; the allowlist must sit directly in policyDir.
 //
 // The repository comparison folds case because GitHub repository names are
 // case-insensitive and the exchange path resolves the repo name through the API.
 func isValidatedPath(repo, path, orgPolicyRepo, policyDir string) bool {
 	// Match "<policyDir>/*.sts.yaml" by prefix rather than with a glob, so that
 	// policyDir is taken literally whatever characters it contains.
-	if name, ok := strings.CutPrefix(path, policyDir+"/"); ok && !strings.Contains(name, "/") && strings.HasSuffix(name, ".sts.yaml") {
+	if name, ok := strings.CutPrefix(path, policyDir+"/"); ok && name != "" && pathIsClean(name) && strings.HasSuffix(name, ".sts.yaml") {
 		return true
 	}
 	return strings.EqualFold(repo, orgPolicyRepo) && path == octosts.OrgTrustedIssuersPath(policyDir)
+}
+
+func pathIsClean(name string) bool {
+	return !strings.HasPrefix(name, "/") && path.Clean(name) == name && name != "." && name != ".." && !strings.HasPrefix(name, "../")
 }
 
 // filterValidatedFiles returns the subset of files octo-sts validates.

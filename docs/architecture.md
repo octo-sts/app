@@ -66,7 +66,7 @@ sequenceDiagram
     alt cache hit
         TP-->>S: policy YAML
     else miss
-        S->>GH: mint contents:read token + read <identity>.sts.yaml (revoked after)
+        S->>GH: mint contents:read token + resolve Git trees and policy blob (revoked after)
         GH-->>S: YAML (404 → two re-reads over ~4s → negative cache)
         S->>TP: cache policy
     end
@@ -76,6 +76,10 @@ sequenceDiagram
     GH-->>S: installation access token
     S-->>C: scoped GitHub token
 ```
+
+Identities are relative to `OCTOSTS_POLICY_DIR`: `team/deploy` selects
+`team/deploy.sts.yaml`. Cache misses walk Git trees at a resolved commit,
+rejecting symlinks. Cache expiry and stale fallback rules are unchanged.
 
 ## Multiple application instances (round-robin over N Apps)
 
@@ -131,7 +135,7 @@ sequenceDiagram
     Note over S,AN: Trust-policy read, retry across Apps on rate limit
     S->>TP: lookupTrustPolicy(key)
     alt cache miss
-        S->>A1: mint contents:read + read <identity>.sts.yaml
+        S->>A1: mint contents:read + resolve Git trees and policy blob
         A1-->>S: 403/429 rate-limited
         S->>AN: retry read on another App
         AN-->>S: policy YAML

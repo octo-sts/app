@@ -4,7 +4,6 @@
 package octosts
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"sync/atomic"
@@ -33,8 +32,9 @@ func newUnreadableRepoTransport(t *testing.T, mints *atomic.Int32) *ghinstallati
 		w.WriteHeader(http.StatusUnprocessableEntity)
 		_, _ = w.Write([]byte(`{"message":"There is at least one repository that does not exist or is not accessible to the parent installation."}`))
 	})
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("policy read without a token: %s", r.URL.Path)
+		http.Error(w, "policy read without a token", http.StatusInternalServerError)
 	})
 	return newAppsTransport(t, &fakeGitHub{mux: mux})
 }
@@ -42,13 +42,20 @@ func newUnreadableRepoTransport(t *testing.T, mints *atomic.Int32) *ghinstallati
 func newReadablePolicyTransport(t *testing.T) *ghinstallation.AppsTransport {
 	t.Helper()
 	const policy = "issuer: https://example.com\nsubject: example\n"
-	return newPolicyReadTransport(t, func(w http.ResponseWriter, _ *http.Request) {
-		_ = json.NewEncoder(w).Encode(github.RepositoryContent{
-			Content:  new(base64.StdEncoding.EncodeToString([]byte(policy))),
-			Type:     new("file"),
-			Encoding: new("base64"),
+	mux := http.NewServeMux()
+	mux.HandleFunc("/app/installations/{appID}/access_tokens", func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(github.InstallationToken{
+			Token:     new("test-installation-token"),
+			ExpiresAt: &github.Timestamp{Time: time.Now().Add(10 * time.Minute)},
 		})
 	})
+	mux.HandleFunc("/installation/token", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	fakePolicyGit(mux, func(_, _ string) map[string]string {
+		return map[string]string{".github/chainguard/foo.sts.yaml": policy}
+	}, nil)
+	return newAppsTransport(t, &fakeGitHub{mux: mux})
 }
 
 // unreadableKey is a policy key on its own repository, so the per-repository

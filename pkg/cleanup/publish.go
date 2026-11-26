@@ -188,6 +188,12 @@ func (p Publisher) open(ctx context.Context, query, title string) (map[string]*g
 // propose points the cleanup branch at a commit removing policies from the
 // default branch, and opens or updates its pull request.
 func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, pr *github.Issue, window time.Duration) error {
+	snapshot := policies[0].SnapshotSHA
+	for _, pol := range policies {
+		if pol.SnapshotSHA != snapshot || pol.DefaultBranch != policies[0].DefaultBranch {
+			return fmt.Errorf("cleanup: %s/%s: inconsistent policy snapshots", p.Org, repo)
+		}
+	}
 	// ListPolicies records the default branch; look it up only when a plan
 	// came from elsewhere.
 	base := policies[0].DefaultBranch
@@ -200,7 +206,12 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 	}
 	b, _, err := p.Client.Repositories.GetBranch(ctx, p.Org, repo, base, 0)
 	if err != nil {
-		return fmt.Errorf("cleanup: %s/%s: getting branch %s: %w", p.Org, repo, base, err)
+		err = fmt.Errorf("cleanup: %s/%s: getting branch %s: %w", p.Org, repo, base, err)
+		return p.invalidatePull(ctx, repo, pr, snapshot, err)
+	}
+	if snapshot != "" && b.GetCommit().GetSHA() != snapshot {
+		err := fmt.Errorf("cleanup: %s/%s: branch %s changed since policy snapshot; retry cleanup", p.Org, repo, base)
+		return p.invalidatePull(ctx, repo, pr, snapshot, err)
 	}
 
 	// An entry with neither SHA nor content deletes the path.
@@ -231,6 +242,9 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 			return fmt.Errorf("cleanup: %s/%s: getting %s: %w", p.Org, repo, ref, err)
 		}
 		same = c.GetTree().GetSHA() == tree.GetSHA()
+		if snapshot != "" {
+			same = same && len(c.Parents) == 1 && c.Parents[0].GetSHA() == snapshot
+		}
 	}
 	if !same {
 		// No author is set, so GitHub authors and signs the commit as the
@@ -243,29 +257,81 @@ func (p Publisher) propose(ctx context.Context, repo string, policies []Policy, 
 		if err != nil {
 			return fmt.Errorf("cleanup: %s/%s: committing: %w", p.Org, repo, err)
 		}
+		if err := p.checkSnapshot(ctx, repo, base, snapshot); err != nil {
+			return p.invalidatePull(ctx, repo, pr, snapshot, err)
+		}
 		if cur == nil {
 			_, _, err = p.Client.Git.CreateRef(ctx, p.Org, repo, github.CreateRef{Ref: "refs/" + ref, SHA: commit.GetSHA()})
 		} else {
 			_, _, err = p.Client.Git.UpdateRef(ctx, p.Org, repo, ref, github.UpdateRef{SHA: commit.GetSHA(), Force: github.Ptr(true)})
 		}
 		if err != nil {
-			return fmt.Errorf("cleanup: %s/%s: pushing %s: %w", p.Org, repo, ref, err)
+			err = fmt.Errorf("cleanup: %s/%s: pushing %s: %w", p.Org, repo, ref, err)
+			// A failed request may have updated the ref before its response was lost.
+			return p.invalidatePull(ctx, repo, pr, snapshot, err)
 		}
 	}
 
+	if err := p.checkSnapshot(ctx, repo, base, snapshot); err != nil {
+		return p.invalidatePull(ctx, repo, pr, snapshot, err)
+	}
 	body := p.pullBody(policies, window)
 	if pr == nil {
-		if _, _, err := p.Client.PullRequests.Create(ctx, p.Org, repo, &github.NewPullRequest{
+		created, _, err := p.Client.PullRequests.Create(ctx, p.Org, repo, &github.NewPullRequest{
 			Title: github.Ptr(PullTitle),
 			Head:  github.Ptr(p.Branch),
 			Base:  github.Ptr(base),
 			Body:  github.Ptr(body),
-		}); err != nil {
+		})
+		if err != nil {
 			return fmt.Errorf("cleanup: %s/%s: opening pull request: %w", p.Org, repo, err)
 		}
+		if snapshot == "" {
+			return nil
+		}
+		if created.GetNumber() == 0 {
+			return fmt.Errorf("cleanup: %s/%s: opened pull request without a number; verify it manually", p.Org, repo)
+		}
+		pr = &github.Issue{Number: created.Number, PullRequestLinks: &github.PullRequestLinks{}}
+	} else if err := p.update(ctx, repo, pr, body); err != nil {
+		return err
+	}
+	if err := p.checkSnapshot(ctx, repo, base, snapshot); err != nil {
+		return p.invalidatePull(ctx, repo, pr, snapshot, err)
+	}
+	return nil
+}
+
+// invalidatePull closes first: a failed comment must not leave a stale PR open.
+func (p Publisher) invalidatePull(ctx context.Context, repo string, pr *github.Issue, snapshot string, cause error) error {
+	if snapshot == "" || pr == nil {
+		return cause
+	}
+	_, _, err := p.Client.Issues.Edit(ctx, p.Org, repo, pr.GetNumber(), &github.IssueRequest{State: github.Ptr("closed")})
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("cleanup: %s/%s#%d: closing potentially stale pull request: %w", p.Org, repo, pr.GetNumber(), err))
+	}
+	_, _, err = p.Client.Issues.CreateComment(ctx, p.Org, repo, pr.GetNumber(), &github.IssueComment{Body: github.Ptr("Closing this pull request because its policy snapshot could not be verified. The next cleanup run will reassess the policies.")})
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("cleanup: %s/%s#%d: explaining closure: %w", p.Org, repo, pr.GetNumber(), err))
+	}
+	return cause
+}
+
+// checkSnapshot narrows the race before publishing a branch or pull request.
+// GitHub's branch and pull request APIs cannot atomically check the base ref.
+func (p Publisher) checkSnapshot(ctx context.Context, repo, base, snapshot string) error {
+	if snapshot == "" {
 		return nil
 	}
-	return p.update(ctx, repo, pr, body)
+	b, _, err := p.Client.Repositories.GetBranch(ctx, p.Org, repo, base, 0)
+	if err != nil {
+		return fmt.Errorf("cleanup: %s/%s: getting branch %s: %w", p.Org, repo, base, err)
+	}
+	if b.GetCommit().GetSHA() != snapshot {
+		return fmt.Errorf("cleanup: %s/%s: branch %s changed since policy snapshot; retry cleanup", p.Org, repo, base)
+	}
+	return nil
 }
 
 // report opens or updates the issue listing policies that only fail.

@@ -333,15 +333,17 @@ func (s *sts) fetchOrgIssuersOnce(ctx context.Context, base *ghinstallation.Apps
 		}
 	}
 
-	file, _, _, err := client.Repositories.GetContents(ctx,
-		owner, s.policyRepo(), OrgTrustedIssuersPath(s.policyDirectory()),
-		&github.RepositoryContentGetOptions{},
-	)
+	file, err := readRegularPolicy(ctx, client, owner, s.policyRepo(), OrgTrustedIssuersPath(s.policyDirectory()))
 	if err != nil {
+		if errors.Is(err, errUnsafePolicyPath) {
+			clog.ErrorContextf(ctx, "org trusted issuers: unsafe or incomplete Git path for %s", owner)
+			staleOrgIssuers.Remove(owner)
+			return invalidConfigResult()
+		}
 		return classifyContentsError(ctx, owner, s.policyRepo(), err)
 	}
 	if file == nil {
-		// A directory: GetContent() dereferences Encoding unguarded and would panic.
+		// Unsafe or incomplete Git path must never disable the allowlist.
 		clog.ErrorContextf(ctx, "org trusted issuers: path is not a file for %s", owner)
 		return invalidConfigResult()
 	}

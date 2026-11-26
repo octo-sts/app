@@ -104,6 +104,19 @@ func TestDecide(t *testing.T) {
 		usage:      []Usage{{Scope: "acme/svc", Identity: "Deploy", LastSucceeded: recent}},
 		wantRemove: map[string][]string{"svc": {"deploy"}},
 	}, {
+		name: "nested identities match full paths",
+		policies: []Policy{
+			{Repo: "svc", Identity: "deploy", LastChanged: old},
+			{Repo: "svc", Identity: "team/deploy", LastChanged: old},
+			{Repo: "svc", Identity: "other/deploy", LastChanged: old},
+		},
+		usage: []Usage{
+			{Scope: "acme/svc", Identity: "team/deploy", LastSucceeded: recent},
+			{Scope: "acme/svc", Identity: "other/deploy", LastFailed: recent},
+		},
+		wantRemove:  map[string][]string{"svc": {"deploy"}},
+		wantFailing: map[string][]string{"svc": {"other/deploy"}},
+	}, {
 		name: "results are grouped by repo and sorted",
 		policies: []Policy{
 			{Repo: "web", Identity: "zeta", LastChanged: old},
@@ -163,6 +176,14 @@ func TestDecide(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestDecidePreservesSnapshot(t *testing.T) {
+	p := Policy{Repo: "svc", Identity: "team/deploy", LastChanged: old, DefaultBranch: "main", SnapshotSHA: snapshotOID}
+	plan, err := Decide(config(), []Policy{p}, nil)
+	if err != nil || len(plan.Repos) != 1 || len(plan.Repos[0].Remove) != 1 || plan.Repos[0].Remove[0] != p {
+		t.Fatalf("Decide() = %+v, %v; want policy %+v", plan, err, p)
 	}
 }
 

@@ -429,14 +429,17 @@ definition [here](https://github.com/chainguard-dev/sdk/blob/main/proto/platform
 If a `${TOKEN}` suitable for federation is sent like so:
 
 ```
-curl -H "Authorization: Bearer ${TOKEN}" \
-  "https://octo-sts.dev/sts/exchange?scope=${REPO}&identity=${NAME}"
+curl --get -H "Authorization: Bearer ${TOKEN}" \
+  --data-urlencode "scope=${REPO}" --data-urlencode "identity=${NAME}" \
+  "https://octo-sts.dev/sts/exchange"
 ```
 
 The App will attempt to load the trust policy from
 `.github/chainguard/${NAME}.sts.yaml` from `${REPO}` and if the provided `${TOKEN}`
 satisfies those rules, it will return a token with the permissions in the trust
 policy.
+The identity `team/deploy` selects `.github/chainguard/team/deploy.sts.yaml`.
+Pass it unencoded to `--data-urlencode`.
 
 ### Release cadence
 
@@ -733,6 +736,24 @@ OCTOSTS_POLICY_DIR=.github/octo-sts
 Trust policies are then read from `.github/octo-sts/{name}.sts.yaml` and the
 org allowlist from `<ORG_POLICY_REPO>/.github/octo-sts/trusted-token-issuers.yaml`.
 
+Nested policies are supported: `.github/octo-sts/1/service/deploy.sts.yaml`
+uses identity `1/service/deploy`. Identities must be relative paths with no
+empty, `.` or `..` segments. `trusted-token-issuers.yaml` stays at the policy
+root, without inheritance.
+
+Git tree traversal rejects symlinks and adds API requests for deeper paths.
+Replace symlinked policies and allowlists with regular files before upgrading;
+cache expiration is unchanged. Incomplete reads, rate limits or traversal limits
+fail validation or cleanup rather than returning partial results:
+
+- Webhook snapshot: 512 directories, 10,000 paths, depth 32 below the policy root.
+- Organization cleanup scan: 4,096 directories, 100,000 entries, 10,000 policies,
+  depth 32.
+
+CloudEvent subjects can now contain `/` within identities. Consumers should use
+structured fields: scope and identity for exchanges, repository and change for
+policy events.
+
 The value must be a relative, slash-separated path without a leading or
 trailing slash and without `.` or `..` segments. The process refuses to start
 otherwise.
@@ -745,6 +766,9 @@ should each use their own directory, so each reads, validates and
 > service and the webhook validator each read `OCTOSTS_POLICY_DIR` from their
 > own deployment config. Set it on both, or the webhook validates a different
 > directory than the exchange reads.
+> Audit existing nested policies and deploy the recursive webhook before the
+> exchange service. Updating the webhook does not validate existing files
+> retroactively.
 
 ### Restricting issuers (`OCTOSTS_ALLOWED_ISSUERS`)
 

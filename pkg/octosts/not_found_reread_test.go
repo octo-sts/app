@@ -5,14 +5,13 @@ package octosts
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/google/go-github/v88/github"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -253,34 +252,30 @@ func TestNotFoundThenRateLimitFailsClosed(t *testing.T) {
 	}
 }
 
-// TestNotFoundRereadFindsDirectory checks that a re-read finding a directory
-// where the policy file was is reported as NotFound, as a first read would
-// be, and counted as not_found rather than as a recovery.
+// A re-read finding a directory must fail closed, not count as a recovery.
 func TestNotFoundRereadFindsDirectory(t *testing.T) {
 	key := freshTPKey(t, "reread-directory")
 	staleTrustPolicies.Add(key, rereadPolicy)
-	base, _ := newFakeGitHubContents("", http.StatusOK)
+	base, _ := newFakeGitHubPolicy(key.identity, "", http.StatusOK)
 	var contents atomic.Int32
 	mux := http.NewServeMux()
-	mux.HandleFunc("/repos/{org}/{repo}/contents/.github/chainguard/{identity}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/repos/{org}/{repo}/git/trees/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", func(w http.ResponseWriter, _ *http.Request) {
 		if contents.Add(1) == 1 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			json.NewEncoder(w).Encode(github.ErrorResponse{
-				Response: &http.Response{StatusCode: http.StatusNotFound},
-				Message:  http.StatusText(http.StatusNotFound),
-			})
+			fmt.Fprint(w, `{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","truncated":false,"tree":[]}`)
 			return
 		}
-		json.NewEncoder(w).Encode([]github.RepositoryContent{{Type: new("file")}})
+		fmt.Fprint(w, `{"sha":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","truncated":false,"tree":[{"path":".github","mode":"040000","type":"tree","sha":"cccccccccccccccccccccccccccccccccccccccc"}]}`)
+	})
+	mux.HandleFunc("/repos/{org}/{repo}/git/trees/dddddddddddddddddddddddddddddddddddddddd", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"sha":"dddddddddddddddddddddddddddddddddddddddd","truncated":false,"tree":[{"path":%q,"mode":"040000","type":"tree","sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}]}`, key.identity+".sts.yaml")
 	})
 	mux.Handle("/", base.mux)
-	recoveredBefore, notFoundBefore := rereadCount("recovered", "true"), rereadCount("not_found", "true")
+	recoveredBefore, errorBefore := rereadCount("recovered", "true"), rereadCount("error", "true")
 
 	s := &sts{}
 	_, err := s.fetchTrustPolicyRaw(context.Background(), newAppsTransport(t, mux), 1234, key)
-	if got := status.Code(err); got != codes.NotFound {
-		t.Fatalf("code = %v, want NotFound; err = %v", got, err)
+	if got := status.Code(err); got != codes.Unavailable {
+		t.Fatalf("code = %v, want Unavailable; err = %v", got, err)
 	}
 	if got := contents.Load(); got != 2 {
 		t.Errorf("contents calls = %d, want 2 (the 404, then the directory)", got)
@@ -291,7 +286,7 @@ func TestNotFoundRereadFindsDirectory(t *testing.T) {
 	if got := rereadCount("recovered", "true") - recoveredBefore; got != 0 {
 		t.Errorf("recovered{known=true} rose by %v, want 0", got)
 	}
-	if got := rereadCount("not_found", "true") - notFoundBefore; got != 1 {
-		t.Errorf("not_found{known=true} rose by %v, want 1", got)
+	if got := rereadCount("error", "true") - errorBefore; got != 1 {
+		t.Errorf("error{known=true} rose by %v, want 1", got)
 	}
 }
