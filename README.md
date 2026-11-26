@@ -429,9 +429,8 @@ definition [here](https://github.com/chainguard-dev/sdk/blob/main/proto/platform
 If a `${TOKEN}` suitable for federation is sent like so:
 
 ```
-curl --get -H "Authorization: Bearer ${TOKEN}" \
-  --data-urlencode "scope=${REPO}" --data-urlencode "identity=${NAME}" \
-  "https://octo-sts.dev/sts/exchange"
+curl -H "Authorization: Bearer ${TOKEN}" \
+  "https://octo-sts.dev/sts/exchange?scope=${REPO}&identity=${NAME}"
 ```
 
 The App will attempt to load the trust policy from
@@ -439,7 +438,6 @@ The App will attempt to load the trust policy from
 satisfies those rules, it will return a token with the permissions in the trust
 policy.
 The identity `team/deploy` selects `.github/chainguard/team/deploy.sts.yaml`.
-Pass it unencoded to `--data-urlencode`.
 
 ### Release cadence
 
@@ -743,12 +741,8 @@ root, without inheritance.
 
 Git tree traversal rejects symlinks and adds API requests for deeper paths.
 Replace symlinked policies and allowlists with regular files before upgrading;
-cache expiration is unchanged. Incomplete reads, rate limits or traversal limits
-fail validation or cleanup rather than returning partial results:
-
-- Webhook snapshot: 512 directories, 10,000 paths, depth 32 below the policy root.
-- Organization cleanup scan: 4,096 directories, 100,000 entries, 10,000 policies,
-  depth 32.
+cache expiration is unchanged. See [scan limits](docs/architecture.md#policy-scan-limits)
+for webhook and cleanup traversal bounds.
 
 CloudEvent subjects can now contain `/` within identities. Consumers should use
 structured fields: scope and identity for exchanges, repository and change for

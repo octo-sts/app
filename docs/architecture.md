@@ -77,9 +77,20 @@ sequenceDiagram
     S-->>C: scoped GitHub token
 ```
 
-Identities are relative to `OCTOSTS_POLICY_DIR`: `team/deploy` selects
-`team/deploy.sts.yaml`. Cache misses walk Git trees at a resolved commit,
-rejecting symlinks. Cache expiry and stale fallback rules are unchanged.
+For identity `team/deploy`, OctoSTS reads
+`<OCTOSTS_POLICY_DIR>/team/deploy.sts.yaml`.
+Policy reads use a fixed commit and reject symlinks.
+
+### Policy scan limits
+
+Recursive scans have these limits:
+
+- Webhook snapshot: 512 directories, 10,000 paths, depth 32 below the policy root.
+- Organization cleanup scan: 4,096 directories, 100,000 entries, 10,000 policies,
+  depth 32. Directory counts include queried policy roots.
+
+Incomplete reads, rate limits or exceeded traversal limits fail the scan rather
+than returning partial results.
 
 ## Multiple application instances (round-robin over N Apps)
 
