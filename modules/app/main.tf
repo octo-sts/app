@@ -140,7 +140,7 @@ module "sts-emits-events" {
   for_each = var.regions
 
   source  = "chainguard-dev/common/infra//modules/authorize-private-service"
-  version = "1.101.1"
+  version = "1.101.5"
 
   project_id = var.project_id
   region     = each.key
@@ -151,7 +151,7 @@ module "sts-emits-events" {
 
 module "this" {
   source  = "chainguard-dev/common/infra//modules/regional-service"
-  version = "1.101.1"
+  version = "1.101.5"
 
   team = "developer-platform"
 
@@ -197,6 +197,10 @@ module "this" {
         {
           name  = "OCTOSTS_POLICY_CACHE_SIZE"
           value = tostring(var.policy_cache_size)
+        },
+        {
+          name  = "OCTOSTS_ORG_POLICY_ONLY"
+          value = tostring(var.org_policy_only)
         },
       ])
       regional-env = [{

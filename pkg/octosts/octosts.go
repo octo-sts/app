@@ -64,7 +64,7 @@ const (
 // GitHub installation tokens. router selects the per-org app pool; sticky (may
 // be nil) persists checks:write routing for check-run ownership across all
 // pools (installation IDs are globally unique within GitHub).
-func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool) pboidc.SecurityTokenServiceServer {
+func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickystore.Store, apps AppSet, ceclient cloudevents.Client, domain string, metrics bool, baseURL string, orgPolicyRepo string, policyDir string, allowedIssuers []string, requireAppPin bool, orgPolicyOnly bool) pboidc.SecurityTokenServiceServer {
 	return &sts{
 		router:         router,
 		sticky:         sticky,
@@ -77,6 +77,7 @@ func NewSecurityTokenServiceServer(router *ghinstall.OrgRouter, sticky stickysto
 		policyDir:      policyDir,
 		allowedIssuers: allowedIssuers,
 		requireAppPin:  requireAppPin,
+		orgPolicyOnly:  orgPolicyOnly,
 	}
 }
 
@@ -211,6 +212,9 @@ type sts struct {
 
 	// requireAppPin rejects trust policies without app or app_pattern.
 	requireAppPin bool
+
+	// orgPolicyOnly refuses scopes that would read a repository trust policy.
+	orgPolicyOnly bool
 
 	// orgIssuerFlight collapses concurrent org-allowlist lookups for the same
 	// owner into one enumeration. Its zero value is ready to use.
@@ -1026,6 +1030,9 @@ func (s *sts) lookupInstallAndTrustPolicy(ctx context.Context, scope, identity, 
 	scopedToRepo := owner != "."
 	if !scopedToRepo {
 		owner, repo = repo, s.policyRepo()
+	}
+	if s.orgPolicyOnly && repo != s.policyRepo() {
+		return nil, 0, nil, nil, status.Error(codes.PermissionDenied, "repository trust policies are disabled")
 	}
 
 	// If the repo is the org policy repo, then parse with an org policy even

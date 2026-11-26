@@ -131,3 +131,9 @@ variable "policy_cache_size" {
     error_message = "policy_cache_size must be a positive integer."
   }
 }
+
+variable "org_policy_only" {
+  description = "Reject the exchange for a scope that would read a per-repository trust policy, that is any repository other than ORG_POLICY_REPO (OCTOSTS_ORG_POLICY_ONLY)."
+  type        = bool
+  default     = false
+}

@@ -91,6 +91,9 @@ type EnvConfigApp struct {
 	// RequireAppPin rejects the exchange for a trust policy that sets neither
 	// app nor app_pattern, in every pool.
 	RequireAppPin bool `envconfig:"OCTOSTS_REQUIRE_APP_PIN" required:"false" default:"false"`
+	// OrgPolicyOnly rejects the exchange for a scope that would read a
+	// repository trust policy, that is any repo other than OrgPolicyRepo.
+	OrgPolicyOnly bool `envconfig:"OCTOSTS_ORG_POLICY_ONLY" required:"false" default:"false"`
 }
 
 type EnvConfigWebhook struct {

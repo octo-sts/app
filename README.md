@@ -769,6 +769,20 @@ uses the same size. The webhook does not read policies, so the variable
 only affects the exchange service; an invalid value still fails startup
 of any process that loads the shared configuration.
 
+### Org-level policies only (`OCTOSTS_ORG_POLICY_ONLY`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OCTOSTS_ORG_POLICY_ONLY` | `false` | Refuse exchanges that would read a per-repository trust policy. |
+
+With `OCTOSTS_ORG_POLICY_ONLY=true` on the exchange service, a scope of the
+form `org/repo` is rejected with `PermissionDenied` before any policy is read,
+unless `repo` is `ORG_POLICY_REPO` (compared exactly, case included). The
+scopes `org` and `org/<ORG_POLICY_REPO>` work as before. Use it where every
+trust policy must go through the review of the policy repository, so that a
+policy file committed to any other repository grants nothing. The webhook
+check does not enforce it.
+
 ### Restricting issuers (`OCTOSTS_ALLOWED_ISSUERS`)
 
 | Variable | Default | Description |
