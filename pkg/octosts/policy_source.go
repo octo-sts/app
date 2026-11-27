@@ -119,17 +119,21 @@ func (g guardedSource) OrgTrustedIssuers(ctx context.Context, owner string) (*Is
 	return allow, nil
 }
 
-// sourceError makes a source's error safe to return to the caller. A gRPC
-// status passes through, and one wrapped in another error loses the wrapping
-// text. A context error becomes its status. Anything else may carry the
-// store's internals, so it is logged and replaced by Unavailable.
+// sourceError makes a source's error safe to return to the caller, and never
+// returns nil for a non-nil err. A gRPC status passes through, and one wrapped
+// in another error loses the wrapping text. A context error becomes its
+// status. Anything else may carry the store's internals, so it is logged and
+// replaced by Unavailable.
+//
+// An error can carry a nil or OK status (gax-go's apierror does for a REST
+// call). Its Err() is nil, which would turn a failed allowlist read into "no
+// allowlist" and permit every issuer, so it is treated as any other error.
 func sourceError(ctx context.Context, what string, err error) error {
-	if _, ok := err.(interface{ GRPCStatus() *status.Status }); ok {
-		return err
-	}
 	var se interface{ GRPCStatus() *status.Status }
 	if errors.As(err, &se) {
-		return se.GRPCStatus().Err()
+		if st := se.GRPCStatus(); st != nil && st.Code() != codes.OK {
+			return st.Err()
+		}
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return status.FromContextError(err).Err()

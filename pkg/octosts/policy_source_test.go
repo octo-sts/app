@@ -131,6 +131,13 @@ permissions:
   contents: read
 `
 
+// statusError is an error carrying a gRPC status that may be nil or OK, as
+// some client libraries' errors do (gax-go's apierror for a REST call).
+type statusError struct{ st *status.Status }
+
+func (e statusError) Error() string              { return "rest call failed: dial tcp 10.0.0.5:443" }
+func (e statusError) GRPCStatus() *status.Status { return e.st }
+
 func newSourceSTS(t *testing.T, src PolicySource) (*sts, *mintOnlyGitHub) {
 	t.Helper()
 	gh := &mintOnlyGitHub{t: t}
@@ -256,6 +263,29 @@ func TestPolicySourceErrors(t *testing.T) {
 	}, {
 		name:     "plain allowlist error is replaced and fails closed",
 		src:      &fakePolicySource{policies: map[string]string{"srcorg/repo/foo": sourcePolicy}, issuersErr: errors.New(secret)},
+		wantCode: codes.Unavailable,
+		wantMsg:  "unable to read org trusted issuers",
+	}, {
+		// A nil or OK status is no error at all to gRPC: passing it on would
+		// turn a failed allowlist read into "no allowlist", which permits
+		// every issuer, or hand the caller the raw error text.
+		name:     "direct error with nil status fails closed",
+		src:      &fakePolicySource{policies: map[string]string{"srcorg/repo/foo": sourcePolicy}, issuersErr: statusError{}},
+		wantCode: codes.Unavailable,
+		wantMsg:  "unable to read org trusted issuers",
+	}, {
+		name:     "direct error with OK status fails closed",
+		src:      &fakePolicySource{policies: map[string]string{"srcorg/repo/foo": sourcePolicy}, issuersErr: statusError{st: status.New(codes.OK, "")}},
+		wantCode: codes.Unavailable,
+		wantMsg:  "unable to read org trusted issuers",
+	}, {
+		name:     "wrapped error with nil status fails closed",
+		src:      &fakePolicySource{policies: map[string]string{"srcorg/repo/foo": sourcePolicy}, issuersErr: fmt.Errorf("allowlist: %w", statusError{})},
+		wantCode: codes.Unavailable,
+		wantMsg:  "unable to read org trusted issuers",
+	}, {
+		name:     "wrapped error with OK status fails closed",
+		src:      &fakePolicySource{policies: map[string]string{"srcorg/repo/foo": sourcePolicy}, issuersErr: fmt.Errorf("allowlist: %w", statusError{st: status.New(codes.OK, "")})},
 		wantCode: codes.Unavailable,
 		wantMsg:  "unable to read org trusted issuers",
 	}, {
