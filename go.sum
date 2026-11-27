@@ -4,8 +4,8 @@ chainguard.dev/go-grpc-kit v0.21.0 h1:lhy+OeQxxpbvJc9ctBHe4G3T4aEnvXV54T721iu85F
 chainguard.dev/go-grpc-kit v0.21.0/go.mod h1:vpBBX1kjnOMqM/ePAndA7uvYNEKE8rsHitvdZlvqZEM=
 chainguard.dev/go-oidctest v0.4.0 h1:B9YTfoa1WtsrEg0wnFeSP7i9tth0LO+GICm2j8HOgWI=
 chainguard.dev/go-oidctest v0.4.0/go.mod h1:IIic4S3je1I7Acy3bqPtaSPefGEsQDzUp7NJF35MPV4=
-chainguard.dev/sdk v0.2.19 h1:cJsCXmV74wR42Vm0u+X2/hQ+UZA3sV4wY9ceQqJoGr4=
-chainguard.dev/sdk v0.2.19/go.mod h1:0v7DhL1zPZlNba24mEh/iwVNHGJTgY7hpvsE7q0Keb4=
+chainguard.dev/sdk v0.2.25 h1:126uLw3R9xZyzPMqy14kRXIUKdxyHtN+O4YpYYSzZ+Q=
+chainguard.dev/sdk v0.2.25/go.mod h1:0v7DhL1zPZlNba24mEh/iwVNHGJTgY7hpvsE7q0Keb4=
 cloud.google.com/go v0.123.0 h1:2NAUJwPR47q+E35uaJeYoNhuNEM9kM8SjgRgdeOJUSE=
 cloud.google.com/go v0.123.0/go.mod h1:xBoMV08QcqUGuPW65Qfm1o9Y4zKZBpGS+7bImXLTAZU=
 cloud.google.com/go/auth v0.24.1 h1:NTmd2iJb4DsGIav0KiqFMYI88nMshA2wnFMBatRmoCs=
@@ -108,8 +108,8 @@ github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5 h1:uIOBLMhef4N16WguadoHKuBy
 github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.5/go.mod h1:NwWmkFLtsTVyXQpbzPOlYLwEoANkdCFjJRtrNcbg/vY=
 github.com/aws/aws-sdk-go-v2/service/sts v1.53.0 h1:my9Y6lxcqvPV5k4OTqnxr8XbiTDDRos1leEh050Z93U=
 github.com/aws/aws-sdk-go-v2/service/sts v1.53.0/go.mod h1:MG6N8U9+lY4LqchrlHPqCOSr7hyxw70XU0Et2YR3eNA=
-github.com/aws/smithy-go v1.28.9 h1:zkZ058OpNX0iGTK24b+ZUEQSMc11CBA6oO7xtKZfzkY=
-github.com/aws/smithy-go v1.28.9/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
+github.com/aws/smithy-go v1.28.10 h1:SfPnj8fGCVAI/P5YC4/1JjuMsucbPp2dROnSTYNo2PE=
+github.com/aws/smithy-go v1.28.10/go.mod h1:YE2RhdIuDbA5E5bTdciG9KrW3+TiEONeUWCqxX9i1Fc=
 github.com/bahlo/generic-list-go v0.2.0 h1:5sz/EEAK+ls5wF+NeqDpk5+iNdMDXrh3z3nPnH1Wvgk=
 github.com/bahlo/generic-list-go v0.2.0/go.mod h1:2KvAjgMlE5NNynlg/5iLrrCCZ2+5xWbdbCW3pNTGyYg=
 github.com/beorn7/perks v1.0.1 h1:VlbKKnNfV8bJzeqoa4cOKqO6bYr3WgKZxO8Z16+hsOM=

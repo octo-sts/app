@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	chainguard.dev/go-grpc-kit v0.21.0
-	chainguard.dev/sdk v0.2.19
+	chainguard.dev/sdk v0.2.25
 	cloud.google.com/go v0.123.0
 	cloud.google.com/go/bigquery v1.86.3
 	cloud.google.com/go/firestore v1.29.2
@@ -20,7 +20,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.74.1
 	github.com/aws/aws-sdk-go-v2/service/kms v1.63.0
 	github.com/aws/aws-sdk-go-v2/service/secretsmanager v1.51.0
-	github.com/aws/smithy-go v1.28.9
+	github.com/aws/smithy-go v1.28.10
 	github.com/bradleyfalzon/ghinstallation/v2 v2.19.0
 	github.com/cenkalti/backoff/v5 v5.0.3
 	github.com/chainguard-dev/clog v1.8.1
