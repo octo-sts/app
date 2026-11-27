@@ -1955,6 +1955,67 @@ func TestOrgPolicyOnly(t *testing.T) {
 	}
 }
 
+func TestOrgPolicyOnlyOverrides(t *testing.T) {
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "id"}
+	trustPolicies.Add(key, negativeCacheConst)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+	yes, no := true, false
+	for _, tc := range []struct {
+		name     string
+		global   bool
+		override *bool
+		want     codes.Code
+	}{
+		{"inherits enabled", true, nil, codes.PermissionDenied},
+		{"inherits disabled", false, nil, codes.NotFound},
+		{"enables", false, &yes, codes.PermissionDenied},
+		{"disables", true, &no, codes.NotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := ghinstall.NewOrgRouter(map[string]*ghinstall.OrgPool{
+				"org": {M: &failInstallMgr{}, AppCount: 1, OrgPolicyOnly: tc.override},
+			})
+			svc := &sts{router: router, orgPolicyOnly: tc.global}
+			_, _, _, _, err := svc.lookupInstallAndTrustPolicy(context.Background(), "org/repo", "id", "subject", testGitHubIssuer, func(*OrgTrustPolicy) error {
+				t.Fatal("unexpected authorization")
+				return nil
+			})
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOrgPolicyOnlyFallback(t *testing.T) {
+	yes := true
+	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "id"}
+	trustPolicies.Add(key, negativeCacheConst)
+	t.Cleanup(func() { trustPolicies.Remove(key) })
+	for _, tc := range []struct {
+		name, scope      string
+		global, fallback bool
+		want             codes.Code
+	}{
+		{"unknown org is denied by global restriction", "unknown/repo", true, false, codes.PermissionDenied},
+		{"unknown org without restriction is not found", "unknown/repo", false, false, codes.NotFound},
+		{"wildcard restricts unlisted org", "unlisted/repo", false, true, codes.PermissionDenied},
+		{"named pool inherits global, not wildcard", "org/repo", false, true, codes.NotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pools := map[string]*ghinstall.OrgPool{"org": {M: &failInstallMgr{}, AppCount: 1}}
+			if tc.fallback {
+				pools[ghinstall.WildcardOrg] = &ghinstall.OrgPool{M: &failInstallMgr{}, AppCount: 1, OrgPolicyOnly: &yes}
+			}
+			svc := &sts{router: ghinstall.NewOrgRouter(pools), orgPolicyOnly: tc.global}
+			_, _, _, _, err := svc.lookupInstallAndTrustPolicy(context.Background(), tc.scope, "id", "subject", testGitHubIssuer, func(*OrgTrustPolicy) error { t.Fatal("unexpected authorization"); return nil })
+			if got := status.Code(err); got != tc.want {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRateLimitServesStaleCache(t *testing.T) {
 	key := cacheTrustPolicyKey{owner: "org", repo: "repo", identity: "foo"}
 	trustPolicies.Remove(key)

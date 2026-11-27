@@ -20,3 +20,15 @@ variable "github_apps" {
     app_name    = optional(string, "")
   }))
 }
+
+variable "org_policy_only" {
+  description = "Reject repository trust policies by default."
+  type        = bool
+  default     = false
+}
+
+variable "org_policy_only_overrides" {
+  description = "Per-org overrides for the policy source restriction."
+  type        = map(bool)
+  default     = {}
+}

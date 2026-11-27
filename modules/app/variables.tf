@@ -126,3 +126,19 @@ variable "org_policy_only" {
   type        = bool
   default     = false
 }
+
+variable "org_policy_only_overrides" {
+  description = "Override org_policy_only for configured org pools. Unlisted pools inherit the global setting."
+  type        = map(bool)
+  default     = {}
+  nullable    = false
+
+  validation {
+    condition = (
+      length(distinct([for org in keys(var.org_policy_only_overrides) : lower(org)])) == length(var.org_policy_only_overrides) &&
+      length(setsubtract([for org in keys(var.org_policy_only_overrides) : lower(org)], [for app in var.github_apps : lower(app.org_name) if app.org_name != ""])) == 0 &&
+      alltrue([for enabled in values(var.org_policy_only_overrides) : enabled != null])
+    )
+    error_message = "Each override must uniquely match a configured org pool (ignoring case), with a true or false value."
+  }
+}

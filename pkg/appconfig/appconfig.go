@@ -24,8 +24,9 @@ type Config struct {
 
 // OrgConfig binds a GitHub organization to one or more GitHub Apps.
 type OrgConfig struct {
-	Name string      `mapstructure:"name"`
-	Apps []AppConfig `mapstructure:"apps"`
+	Name          string      `mapstructure:"name"`
+	Apps          []AppConfig `mapstructure:"apps"`
+	OrgPolicyOnly *bool       `mapstructure:"org_policy_only,omitempty"`
 }
 
 // AppConfig describes a single GitHub App and its credential source.

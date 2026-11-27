@@ -72,9 +72,11 @@ module "app" {
     webhook = cosign_sign.webhook.signed_ref
   }
 
-  github_apps           = var.github_apps
-  notification_channels = local.notification_channels
-  sticky_store          = "firestore"
+  org_policy_only           = var.org_policy_only
+  org_policy_only_overrides = var.org_policy_only_overrides
+  github_apps               = var.github_apps
+  notification_channels     = local.notification_channels
+  sticky_store              = "firestore"
   # Reads refresh expire_at, so this TTL only reaps IDLE mappings; it must
   # exceed the longest exchange cadence of any checks:write consumer, or the
   # mapping dies between exchanges and identity re-rolls. Long-lived bots

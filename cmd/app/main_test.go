@@ -31,6 +31,7 @@ func TestBuildRouterAppMembership(t *testing.T) {
 	t.Run("YAML keeps membership in the selected pool", func(t *testing.T) {
 		config := fmt.Sprintf(`orgs:
   - name: Org-A
+    org_policy_only: true
     apps:
       - app_id: 101
         app_name: ci-a
@@ -39,6 +40,7 @@ func TestBuildRouterAppMembership(t *testing.T) {
         app_name: deploy
         private_key_file: %[1]q
   - name: Org-B
+    org_policy_only: false
     apps:
       - app_id: 102
         app_name: ci-b
@@ -77,6 +79,20 @@ func TestBuildRouterAppMembership(t *testing.T) {
 			}
 			if !maps.Equal(pool.AppIDs, want) || pool.AppCount != len(want) {
 				t.Errorf("pool for %q = (%v, %d apps), want (%v, %d apps)", owner, pool.AppIDs, pool.AppCount, want, len(want))
+			}
+			switch owner {
+			case "ORG-A":
+				if pool.OrgPolicyOnly == nil || !*pool.OrgPolicyOnly {
+					t.Error("Org-A should enable org policy only")
+				}
+			case "org-b":
+				if pool.OrgPolicyOnly == nil || *pool.OrgPolicyOnly {
+					t.Error("Org-B should disable org policy only")
+				}
+			case "another-org":
+				if pool.OrgPolicyOnly != nil {
+					t.Error("fallback should inherit the default")
+				}
 			}
 		}
 	})
