@@ -5,8 +5,40 @@ every cache it touches, for both a single-App deployment and a multi-App
 deployment (several GitHub Apps sharing load behind a round-robin manager).
 
 The diagrams reflect the exchange path in `pkg/octosts` (`Exchange` →
-`lookupInstallAndTrustPolicy` → `checkOrgTrustedIssuers` → `lookupTrustPolicy` →
+`lookupInstallAndTrustPolicy` → `checkOrgTrustedIssuers` → `lookupTrustPolicyWithRetry` →
 `getExchangeInstall` → mint) and the installation manager in `pkg/ghinstall`.
+
+## Policy sources
+
+Trust policies and org trusted-issuer allowlists are read through a
+`PolicySource` (`pkg/octosts/policy_source.go`). The default, and the one these
+diagrams show, reads them from the org's repositories through its GitHub App
+installations, with the caches, rate-limit rotation and 404/403 handling below.
+`WithPolicySource` replaces it with another store.
+
+Only the reads move behind the interface. Routing to an installation, the
+negative install cache, parsing and compiling the policy, `CheckToken`, the
+allowlist decision (audit or enforce, failing closed), app pins, sticky
+routing and the mint stay in the STS, so every source gets the same checks. A
+policy that does not parse is answered exactly like a missing one,
+whichever source it came from.
+
+A configured source sees only owner, repo and identity, never the App pool or
+installations, which can mint tokens. The STS lowercases owner and repo before
+asking it, because GitHub names are case-insensitive and a missed allowlist
+would permit every issuer. It also replaces any error that is not a gRPC
+status, so a store's internals never reach the caller. The exchange then mints
+with the installation the STS picked.
+
+The GitHub source is internal and gets more. It receives the pool and the
+picked installation, and returns the installation that read the policy, so a
+read that moved off a rate-limited App mints on the App that answered. It keeps
+the owner as the caller wrote it, because installation lookup matches GitHub
+logins exactly. The trust-policy and org-issuer caches in the table below
+belong to the GitHub source. Another source decides its own caching.
+
+The webhook check is not part of the policy source. It still validates the
+policy files in the org's repositories, which a configured source ignores.
 
 ## Caches
 
@@ -62,7 +94,7 @@ sequenceDiagram
     end
     Note over S: absent→allow · listed→allow · enforce+unlisted→DENY
 
-    S->>TP: lookupTrustPolicy(key)
+    S->>TP: lookupTrustPolicyWithRetry(key)
     alt cache hit
         TP-->>S: policy YAML
     else miss
@@ -129,7 +161,7 @@ sequenceDiagram
     Note over S: fail CLOSED if the allowlist cannot be established
 
     Note over S,AN: Trust-policy read, retry across Apps on rate limit
-    S->>TP: lookupTrustPolicy(key)
+    S->>TP: lookupTrustPolicyWithRetry(key)
     alt cache miss
         S->>A1: mint contents:read + read <identity>.sts.yaml
         A1-->>S: 403/429 rate-limited
