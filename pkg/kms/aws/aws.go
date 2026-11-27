@@ -13,10 +13,34 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/aws/smithy-go"
+	"github.com/aws/smithy-go/middleware"
 	"github.com/chainguard-dev/clog"
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/octo-sts/app/pkg/internal/awserr"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+var signThrottledAttemptsTotal = promauto.NewCounter(prometheus.CounterOpts{
+	Name: "octosts_kms_sign_throttled_attempts_total",
+	Help: "Throttled AWS KMS Sign attempts, including attempts retried successfully.",
+})
+
+func withSignThrottleMetrics(o *kms.Options) {
+	o.APIOptions = append(o.APIOptions, func(stack *middleware.Stack) error {
+		return stack.Finalize.Insert(middleware.FinalizeMiddlewareFunc("OctoSTSKMSSignThrottleMetrics", func(
+			ctx context.Context, in middleware.FinalizeInput, next middleware.FinalizeHandler,
+		) (middleware.FinalizeOutput, middleware.Metadata, error) {
+			out, md, err := next.HandleFinalize(ctx, in)
+			var apiErr smithy.APIError
+			if middleware.GetOperationName(ctx) == "Sign" && errors.As(err, &apiErr) && apiErr.ErrorCode() == "ThrottlingException" {
+				signThrottledAttemptsTotal.Inc()
+			}
+			return out, md, err
+		}), "Retry", middleware.After)
+	})
+}
 
 type signingMethodAWS struct {
 	ctx    context.Context
@@ -60,7 +84,7 @@ func NewProvider(ctx context.Context, kmsKey string) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	client := kms.NewFromConfig(awsConfig)
+	client := kms.NewFromConfig(awsConfig, withSignThrottleMetrics)
 
 	return &Provider{
 		ctx:    context.WithoutCancel(ctx),

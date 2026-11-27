@@ -1046,3 +1046,12 @@ The following permissions are the currently enabled in octo-Sts and will be avai
 - **SSH signing keys**: `No Access`
 - **Starring**: `No Access`
 - **Watching**: `No Access`
+
+### AWS KMS signing metrics
+
+With `KMS_PROVIDER=aws`, `octosts_kms_sign_throttled_attempts_total` counts each
+`Sign` attempt returning `ThrottlingException`, including attempts followed by
+a successful retry and final failed attempts. It has no labels, resets on process
+restart, and leaves SDK retry behavior unchanged. With `METRICS=true`, scrape
+`/metrics` on each replica. A successful token exchange does not rule out KMS
+throttling.
