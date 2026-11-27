@@ -28,9 +28,10 @@ func newTestKMSClient(t *testing.T, handler http.HandlerFunc, optFns ...func(*km
 	srv := httptest.NewServer(handler)
 	t.Cleanup(srv.Close)
 
-	opts := []func(*kms.Options){withSignThrottleMetrics, func(o *kms.Options) {
+	opts := make([]func(*kms.Options), 0, 2+len(optFns))
+	opts = append(opts, withSignThrottleMetrics, func(o *kms.Options) {
 		o.BaseEndpoint = aws.String(srv.URL)
-	}}
+	})
 	return kms.NewFromConfig(aws.Config{
 		Region:      "us-east-1",
 		Credentials: aws.AnonymousCredentials{},
